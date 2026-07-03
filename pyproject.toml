@@ -1,0 +1,44 @@
+[project]
+name = "lara"
+version = "0.1.0"
+description = "LARA AI Environment"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # Notebook
+    "ipython",
+    "jupyterlab",
+    "notebook",
+    # Utils
+    "rich",
+    "tqdm",
+    # Scientific
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    # Hugging Face
+    "transformers",
+    "accelerate",
+    "datasets",
+    "evaluate",
+    "huggingface-hub",
+    "hf-transfer",
+    # Tokenizer
+    "sentencepiece",
+    "protobuf",
+    "safetensors",
+    # Llama
+    "llama-models",
+    "llama-stack",
+    # Finetune
+    "peft",
+    "trl",
+    # API
+    "fastapi",
+    "uvicorn",
+    # OpenAI API
+    "openai",
+    "socksio>=1.0.0",
+]
+
