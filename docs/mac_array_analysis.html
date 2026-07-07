@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MAC Array Dimension Analysis — 16×16 vs 16×32 vs 32×32</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  body {
+    background: #1a1a2e; color: #e0e0e0; font-family: system-ui;
+    max-width: 1400px; margin: 0 auto; padding: 20px;
+  }
+  h1 { color: #7ec8e3; border-bottom: 2px solid #7ec8e3; padding-bottom: 10px; }
+  h2 { color: #a8d8ea; margin-top: 40px; }
+  h3 { color: #7ec8e3; }
+  .mermaid { background: #16213e; border-radius: 12px; padding: 30px; margin: 20px 0; overflow-x: auto; text-align: center; }
+  .notes {
+    background: #16213e; border-radius: 8px; padding: 20px; margin: 20px 0;
+    font-size: 14px; line-height: 1.8;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+  th { background: #0f3460; padding: 8px 12px; text-align: left; }
+  td { padding: 6px 12px; border-bottom: 1px solid #333; vertical-align: top; }
+  .highlight { color: #4ecca3; font-weight: bold; }
+  .warn { color: #e8a87c; font-weight: bold; }
+  .reject { color: #ff6b6b; }
+  .adopt { color: #4ecca3; }
+  .best { background: #0a3d2e; border-left: 4px solid #4ecca3; padding: 16px; margin: 16px 0; border-radius: 4px; }
+  .bad { background: #3d0a0a; border-left: 4px solid #ff6b6b; padding: 16px; margin: 16px 0; border-radius: 4px; }
+  pre { background: #0d1117; color: #c9d1d9; padding: 20px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  .grid-container { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin: 20px 0; }
+  .grid-item { background: #16213e; border-radius: 8px; padding: 16px; }
+  .grid-item h4 { margin-top: 0; color: #a8d8ea; }
+</style>
+</head>
+<body>
+
+<h1>MAC 阵列维度分析</h1>
+<p>16×16 vs 16×32 vs 32×32 — 为什么 16×32 是最佳扩展方向</p>
+
+<!-- ================================================================ -->
+<!-- 1. 三种阵列如何计算 Q×K^T -->
+<!-- ================================================================ -->
+<h2>1. 阵列计算过程可视化</h2>
+<p>任务：Q_tile [32, 128] × K_tile^T [128, 64] = S_tile [32, 64]</p>
+
+<h3>1.1 16×16 阵列 — 基准方案 (256 DSP)</h3>
+<div class="mermaid">
+graph TB
+    subgraph ARRAY_16["16×16 MAC Array"]
+        direction LR
+        subgraph ROWS_16["Rows (Q dimension)"]
+            R0_16["Q_row[0..15]"]
+        end
+        subgraph COLS_16["Cols (K dimension)"]
+            C0_16["K_col[0..15]"]
+        end
+    end
+
+    subgraph TILING_16["分块策略"]
+        T_16["S_out [32,64] 分解为 2×4 = <b>8 个子块</b><br/>
+        ┌──────────┬──────────┬──────────┬──────────┐<br/>
+        │ Block    │ Block    │ Block    │ Block    │<br/>
+        │ [0..15,  │ [0..15,  │ [0..15,  │ [0..15,  │<br/>
+        │  0..15]  │ 16..31]  │ 32..47]  │ 48..63]  │<br/>
+        ├──────────┼──────────┼──────────┼──────────┤<br/>
+        │ Block    │ Block    │ Block    │ Block    │<br/>
+        │ [16..31, │ [16..31, │ [16..31, │ [16..31, │<br/>
+        │  0..15]  │ 16..31]  │ 32..47]  │ 48..63]  │<br/>
+        └──────────┴──────────┴──────────┴──────────┘<br/>
+        每个 Block: 128 次深度迭代 (head_dim=128, 每次 16)"]
+    end
+</div>
+
+<h3>1.2 16×32 阵列 — 推荐扩展 (512 DSP)</h3>
+<div class="mermaid">
+graph TB
+    subgraph ARRAY_16_32["16×32 MAC Array"]
+        direction LR
+        subgraph ROWS_16_32["Rows (Q dim)"]
+            R0_16_32["Q_row[0..15] — 16 rows, fanout=16 ✓"]
+        end
+        subgraph COLS_16_32["Cols (K dim)"]
+            C0_16_32["K_col[0..31] — 32 cols"]
+        end
+    end
+
+    subgraph TILING_16_32["分块策略"]
+        T_16_32["S_out [32,64] 分解为 2×2 = <b>4 个子块</b><br/>
+        ┌─────────────────────┬─────────────────────┐<br/>
+        │ Block               │ Block               │<br/>
+        │ [0..15, 0..31]      │ [0..15, 32..63]     │<br/>
+        ├─────────────────────┼─────────────────────┤<br/>
+        │ Block               │ Block               │<br/>
+        │ [16..31, 0..31]     │ [16..31, 32..63]    │<br/>
+        └─────────────────────┴─────────────────────┘<br/>
+        每个 Block: 128 次深度迭代 (每次处理 32 列 K)<br/>
+        子块数 = 原来的一半 ✓"]
+    end
+</div>
+
+<h3>1.3 32×32 阵列 — 不推荐 (1024 DSP)</h3>
+<div class="mermaid">
+graph TB
+    subgraph ARRAY_32["32×32 MAC Array"]
+        direction LR
+        subgraph ROWS_32["Rows (Q dim)"]
+            R0_32["Q_row[0..31] — 32 rows, fanout=32 ✗"]
+        end
+        subgraph COLS_32["Cols (K dim)"]
+            C0_32["K_col[0..31] — 32 cols"]
+        end
+    end
+
+    subgraph TILING_32["分块策略"]
+        T_32["S_out [32,64] 分解为 1×2 = <b>2 个子块</b><br/>
+        ┌─────────────────────┬─────────────────────┐<br/>
+        │ Block               │ Block               │<br/>
+        │ [0..31, 0..31]      │ [0..31, 32..63]     │<br/>
+        └─────────────────────┴─────────────────────┘<br/>
+        子块数最少，但..."]
+    end
+</div>
+
+<!-- ================================================================ -->
+<!-- 2. 三种阵列详图 — 数据流对比 -->
+<!-- ================================================================ -->
+<h2>2. 单次子块计算的详细数据流</h2>
+<p>展示 Q、K 数据如何流入阵列，以及阵列内部的数据移动</p>
+
+<h3>2.1 16×16 阵列 — 一次子块 [0:15, 0:15] 的计算</h3>
+<div class="mermaid">
+graph LR
+    subgraph Q_DATA_16["Q 数据 (16行)"]
+        Q0_16["Q[0,:] 128-dim"]
+        Q1_16["Q[1,:] 128-dim"]
+        QD_16["..."]
+        Q15_16["Q[15,:] 128-dim"]
+    end
+
+    subgraph K_DATA_16["K 数据 (16列)"]
+        K0_16["K[0,:] 128-dim"]
+        K1_16["K[1,:] 128-dim"]
+        KD_16["..."]
+        K15_16["K[15,:] 128-dim"]
+    end
+
+    subgraph PE_ARRAY_16["16×16 PE Array"]
+        direction LR
+        PE00_16["PE[0,0]"]
+        PE01_16["PE[0,1]"]
+        PE0F_16["... PE[0,15]"]
+        PE10_16["PE[1,0]"]
+        PE11_16["PE[1,1]"]
+        PE1F_16["... PE[1,15]"]
+        PEFF_16["PE[15,0..15]"]
+    end
+
+    subgraph SOFTMAX_16["Softmax Engine"]
+        SM16["16 路并行<br/>每路处理 1 行 Q<br/>m[0..15], l[0..15], O_acc[0..15]"]
+    end
+
+    Q0_16 --> PE00_16
+    Q0_16 --> PE01_16
+    Q0_16 --> PE0F_16
+    K0_16 --> PE00_16
+    K0_16 --> PE10_16
+    K0_16 --> PEFF_16
+    PE_ARRAY_16 -->|"列归约 → S[0:15,0:15]"| SM16
+</div>
+
+<div class="notes">
+<p><b>16×16 计算过程：</b></p>
+<ol>
+  <li>Q[0:15][:] 和 K[0:15][:] 加载到阵列边界</li>
+  <li>128 个 head_dim 元素逐个流入（depth iteration），每个元素触发 16×16=256 次 MAC</li>
+  <li>每个 PE 内部累加 128 个部分积 → 输出 S[i,j]</li>
+  <li>Softmax Engine 处理 16 行 × 16 列 = 256 个 S 值，分 4 次 (每次 16 列)</li>
+  <li>状态：m[0..15] 16 个 max 寄存器, l[0..15] 16 个 sum 寄存器</li>
+</ol>
+</div>
+
+<h3>2.2 16×32 阵列 — 一次子块 [0:15, 0:31] 的计算</h3>
+<div class="mermaid">
+graph LR
+    subgraph Q_DATA_1632["Q 数据 (16行)"]
+        Q0_1632["Q[0,:]"]
+        Q1_1632["Q[1,:]"]
+        QD_1632["..."]
+        Q15_1632["Q[15,:]"]
+    end
+
+    subgraph K_DATA_1632["K 数据 (32列)"]
+        K0_1632["K[0:31,:]"]
+    end
+
+    subgraph PE_ARRAY_1632["16×32 PE Array"]
+        direction LR
+        PE1632["16 rows × 32 cols<br/>每个 PE: bf16_mac<br/>K 列方向 2× 扩展"]
+    end
+
+    subgraph SOFTMAX_1632["Softmax Engine"]
+        SM1632["16 路并行<br/>处理 16 行 Q<br/>每路处理 32 列 S 值"]
+    end
+
+    Q_DATA_1632 --> PE_ARRAY_1632
+    K_DATA_1632 --> PE_ARRAY_1632
+    PE_ARRAY_1632 -->|"列归约 → S[0:15,0:31]"| SM1632
+</div>
+
+<div class="notes">
+<p><b>16×32 的优势：</b></p>
+<ol>
+  <li><span class="highlight">行数不变 (16) → Softmax 引擎不变</span> — 不需要增加 m/l/acc 寄存器</li>
+  <li>列数翻倍 (32) → 每个子块覆盖 2× 的 K 列 → 子块数减半</li>
+  <li>fanout 不变 (每行 Q 广播给 32 个 PE vs 16 个 PE) — 但这是列方向的，走的是列广播线，不是行方向</li>
+  <li>列归约树深度 +1 (log₂32=5 vs log₂16=4) — 时序影响可控</li>
+</ol>
+</div>
+
+<h3>2.3 32×32 阵列 — 一次子块 [0:31, 0:31] 的计算</h3>
+<div class="mermaid">
+graph LR
+    subgraph Q_DATA_32["Q 数据 (32行)"]
+        Q0_32["Q[0:31,:]<br/>32 行全部"]
+    end
+
+    subgraph PE_ARRAY_32["32×32 PE Array"]
+        PE32["32 rows × 32 cols<br/>1024 PE"]
+    end
+
+    subgraph SOFTMAX_32["Softmax Engine"]
+        SM32["<span class='reject'>32 路并行 ✗</span><br/>需要 2× 的硬件<br/>m[0..31], l[0..31], O_acc[0..31]<br/>max 归约树, sum 归约树 各 2×"]
+    end
+
+    Q_DATA_32 --> PE_ARRAY_32
+    PE_ARRAY_32 --> SM32
+</div>
+
+<!-- ================================================================ -->
+<!-- 3. 核心对比 -->
+<!-- ================================================================ -->
+<h2>3. 为什么 16×32 比 32×32 好 — 核心原因</h2>
+<div class="notes">
+
+<h3>原因一：Softmax 引擎的并行度瓶颈</h3>
+
+<p>这是<b>最关键的约束</b>。Online Softmax 需要为<b>每行 Q</b> 维护独立的状态：</p>
+
+<pre>
+<span style="color:#8b949e">// Online Softmax 每行 Q 的状态</span>
+<span style="color:#ff7b72">for</span> i in 0..<span style="color:#4ecca3">NUM_ROWS</span>-1:                    <span style="color:#8b949e">// ← 这个数字决定了硬件并行度</span>
+    m_new[i] = max(m[i], row_max(S[i,:]))     <span style="color:#8b949e">// 需要: 1 个比较器树 / 行</span>
+    correction[i] = exp(m[i] - m_new[i])       <span style="color:#8b949e">// 需要: 1 个 EXP LUT + 1 个减法器</span>
+    P_row[i] = exp(S[i,:] - m_new[i])          <span style="color:#8b949e">// 需要: 1 个 EXP LUT + 1 个减法器 / 元素</span>
+    l[i] = l[i] × correction[i] + sum(P_row)   <span style="color:#8b949e">// 需要: 1 个加法器树 + 1 个乘法器 + 1 个加法器</span>
+    O_acc[i,:] = O_acc[i,:] × correction[i] + P_row[i] × V_tile
+</pre>
+
+<table>
+<tr><th>硬件</th><th>16 行 (16×16 / 16×32)</th><th>32 行 (32×32)</th></tr>
+<tr>
+  <td>max 归约树 (每行)</td>
+  <td>16 棵树, log₂(Tk) 深度</td>
+  <td><span class="reject">32 棵树 → 2× LUT/FF</span></td>
+</tr>
+<tr>
+  <td>sum 归约树 (每行)</td>
+  <td>16 棵树</td>
+  <td><span class="reject">32 棵树 → 2× LUT/FF</span></td>
+</tr>
+<tr>
+  <td>EXP LUT (每行)</td>
+  <td>16 个 BRAM 端口或分时复用</td>
+  <td><span class="reject">32 个 → 1 个 BRAM 不够, 需要 2 个</span></td>
+</tr>
+<tr>
+  <td>m/l/O_acc 状态寄存器</td>
+  <td>16 组 × (1+1+128) fp32 ≈ 8 KB</td>
+  <td><span class="reject">32 组 ≈ 16 KB</span></td>
+</tr>
+<tr>
+  <td>O_acc 修正乘法 + 加法</td>
+  <td>16 路并行</td>
+  <td><span class="reject">32 路 → 2× DSP</span></td>
+</tr>
+</table>
+
+<div class="best">
+<b>关键洞察：MAC 阵列可以做大，但 Softmax 引擎的并行度必须和 MAC 阵列的行数匹配。</b><br/>
+16 行 → Softmax 处理 16 行并行 → 硬件开销合理<br/>
+32 行 → Softmax 处理 32 行并行 → 硬件翻倍，成为新的瓶颈<br/>
+<b>MAC 阵列的行数由 Softmax 引擎的合理并行度决定，而非 DSP 数量。</b>
+</div>
+
+<h3>原因二：Q 数据加载与广播</h3>
+
+<pre>
+16 行阵列:
+  Q 加载: 16 × 128 × 2B = 4 KB / 子块
+  广播: 每行 Q 值广播到 C 个 PE → fanout = C
+
+32 行阵列:
+  Q 加载: 32 × 128 × 2B = 8 KB / 子块
+  广播: 每行 Q 值广播到 C 个 PE → fanout 不变
+  但 32 行需要 32 条独立的广播线 → 布线密度 2×
+
+对 32×32: 32 条行广播线, 32 条列广播线 → 64 条总广播线
+对 16×32: 16 条行广播线, 32 条列广播线 → 48 条总广播线
+→ 16×32 的布线压力小 25%
+</pre>
+
+<h3>原因三：时序收敛</h3>
+
+<pre>
+关键路径分析 (200MHz = 5ns 周期):
+
+16×16:
+  PE 内部 bf16 MAC: ~2.5ns (DSP48E2 乘法 + 累加)
+  行广播 fanout=16: ~0.5ns
+  列归约 fanout=16 (4级): ~1.0ns
+  余量: ~1.0ns ✓
+
+16×32:
+  PE 内部 bf16 MAC: ~2.5ns (不变)
+  行广播 fanout=16: ~0.5ns (不变!)
+  列归约 fanout=32 (5级): ~1.3ns → +0.3ns
+  余量: ~0.7ns → 可接受, 可能需要 pipelining
+
+32×32:
+  PE 内部 bf16 MAC: ~2.5ns
+  行广播 fanout=32: ~0.8ns → +0.3ns
+  列归约 fanout=32 (5级): ~1.3ns → +0.3ns
+  额外: 1024 PE 的布线拥塞 → ~0.3ns
+  总: ~4.9ns → 余量仅 0.1ns → 高风险 ✗
+</pre>
+
+<h3>原因四：赛题约束 & 论文叙事</h3>
+
+<pre>
+16×16 → 256 DSP (20%) → "克制"
+16×32 → 512 DSP (41%) → "适度扩展"
+32×32 → 1024 DSP (82%) → "堆资源"
+
+从 16×16 到 16×32: 论文可以写 "2× 列并行度, 子块数减半, 时序可控"
+从 16×16 到 32×32: 论文写 "4× 阵列, 但 Softmax 硬件也翻倍" → 说明效率不高
+</pre>
+
+</div>
+
+<!-- ================================================================ -->
+<!-- 4. 总结 -->
+<!-- ================================================================ -->
+<h2>4. 总结</h2>
+
+<div class="grid-container">
+<div class="grid-item" style="border: 1px solid #4ecca3;">
+<h4>✅ 16×16 (基准)</h4>
+<table>
+<tr><td>DSP</td><td class="highlight">256 (20%)</td></tr>
+<tr><td>行数</td><td>16</td></tr>
+<tr><td>Softmax</td><td>16 路 ✓</td></tr>
+<tr><td>子块数</td><td>8</td></tr>
+<tr><td>时序</td><td>余量充足</td></tr>
+<tr><td>CIM 复用</td><td>直接复用</td></tr>
+<tr><td>定位</td><td class="adopt">v1.0 首选</td></tr>
+</table>
+</div>
+
+<div class="grid-item" style="border: 1px solid #f0c060;">
+<h4>⚠️ 16×32 (扩展方向)</h4>
+<table>
+<tr><td>DSP</td><td class="highlight">512 (41%)</td></tr>
+<tr><td>行数</td><td>16</td></tr>
+<tr><td>Softmax</td><td>16 路 ✓ (不变!)</td></tr>
+<tr><td>子块数</td><td>4 (减半)</td></tr>
+<tr><td>时序</td><td>+0.3ns, 可控</td></tr>
+<tr><td>CIM 复用</td><td>结构复用</td></tr>
+<tr><td>定位</td><td class="highlight">v2.0 扩展</td></tr>
+</table>
+</div>
+
+<div class="grid-item" style="border: 1px solid #ff6b6b;">
+<h4>❌ 32×32 (不推荐)</h4>
+<table>
+<tr><td>DSP</td><td class="reject">1024 (82%)</td></tr>
+<tr><td>行数</td><td>32</td></tr>
+<tr><td>Softmax</td><td class="reject">32 路 (2×硬件)</td></tr>
+<tr><td>子块数</td><td>2 (最少)</td></tr>
+<tr><td>时序</td><td class="reject">高风险</td></tr>
+<tr><td>CIM 复用</td><td>需重新设计</td></tr>
+<tr><td>定位</td><td class="reject">不适合</td></tr>
+</table>
+</div>
+</div>
+
+<div class="best">
+<h3>🎯 核心结论</h3>
+<p>
+<b>MAC 阵列的行数受限于 Softmax 引擎的并行度，而非 DSP 数量。</b><br/><br/>
+Online Softmax 需要为 <b>每行 Q</b> 维护独立的 (m, l, O_acc) 状态，并进行 max/sum/exp/div 运算。<br/>
+阵列行数翻倍 → Softmax 硬件翻倍 → 这个代价远大于多加几个 DSP。<br/><br/>
+<b>16 行是 Softmax 硬件复杂度的 sweet spot</b>：16 路 max 树 + 16 路 sum 树 + 1 个双端口 BRAM EXP LUT 刚好够。<br/>
+32 路则需要 2 套独立的 Softmax 硬件，或者 1 套分时复用（增加延迟和状态机复杂度）。<br/><br/>
+因此：
+</p>
+<ul>
+  <li><b>扩展列数 (16→32)</b>：只增加 MAC PE 和列归约深度，Softmax 不变 → <span class="adopt">安全扩展</span></li>
+  <li><b>扩展行数 (16→32)</b>：要求 Softmax 硬件翻倍 → <span class="reject">瓶颈转移，得不偿失</span></li>
+</ul>
+<p>
+  这个约束同样解释了为什么 CIM 毕设选择 16 行而不是 32 行 — 16 行的部分和累加器 (psum_accum) 复杂度恰好是拿 LUT/FF 可以高效实现的临界点。
+</p>
+</div>
+
+</body>
+</html>

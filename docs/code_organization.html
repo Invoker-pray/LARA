@@ -1,0 +1,1539 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>LARA Code Organization — Complete Module Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d2991d;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #39c5cf;
+    --pink: #db61a2;
+    --yellow: #e3b341;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.6; max-width: 1600px; margin: 0 auto; padding: 24px;
+  }
+
+  h1 { font-size: 2em; color: var(--accent); border-bottom: 2px solid var(--accent); padding-bottom: 12px; margin-bottom: 8px; }
+  h2 { font-size: 1.5em; color: var(--cyan); margin-top: 48px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  h3 { font-size: 1.2em; color: var(--green); margin-top: 32px; margin-bottom: 12px; }
+  h4 { font-size: 1.05em; color: var(--purple); margin-top: 24px; margin-bottom: 8px; }
+
+  .subtitle { color: var(--muted); font-size: 0.95em; margin-bottom: 24px; }
+
+  .mermaid { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin: 16px 0; overflow-x: auto; text-align: center; }
+
+  .module-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 24px; margin: 20px 0;
+  }
+  .module-card h3 { margin-top: 0; display: flex; align-items: center; gap: 10px; }
+  .module-card h3 .file { font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 0.85em; color: var(--muted); font-weight: normal; }
+
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75em; font-weight: 600; }
+  .badge-core { background: #1a3a5c; color: var(--accent); }
+  .badge-mem  { background: #1a3a2a; color: var(--green); }
+  .badge-axi  { background: #3a2a1a; color: var(--orange); }
+  .badge-pkg  { background: #2a1a3a; color: var(--purple); }
+  .badge-top  { background: #1a3a3a; color: var(--cyan); }
+  .badge-ext  { background: #3a1a2a; color: var(--pink); }
+
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9em; }
+  th { background: #1a2332; padding: 10px 14px; text-align: left; font-weight: 600; color: var(--accent); border-bottom: 2px solid var(--border); }
+  td { padding: 8px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover { background: rgba(88,166,255,0.04); }
+
+  .iface-table th { background: #1a2a1a; color: var(--green); }
+  .iface-table td:first-child { font-family: 'Fira Code', monospace; font-size: 0.85em; color: var(--accent); }
+  .iface-table td:nth-child(2) { color: var(--orange); font-weight: 600; }
+  .iface-table td:nth-child(3) { font-family: 'Fira Code', monospace; color: var(--purple); }
+
+  .data-desc { background: #0d1b2a; border-left: 3px solid var(--accent); padding: 12px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; font-size: 0.9em; }
+  .data-desc strong { color: var(--accent); }
+  .data-desc.kv { border-left-color: var(--green); }
+  .data-desc.kv strong { color: var(--green); }
+  .data-desc.ext { border-left-color: var(--pink); }
+  .data-desc.ext strong { color: var(--pink); }
+
+  .pipeline-pos {
+    background: #1a2332; border: 1px dashed var(--border); border-radius: 6px;
+    padding: 8px 14px; margin: 8px 0; font-size: 0.85em;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .pipeline-pos .label { color: var(--muted); font-weight: 600; }
+  .pipeline-pos .pos { color: var(--yellow); font-weight: 600; }
+  .pipeline-pos .arrow { color: var(--muted); }
+
+  .note { background: #1a2a1a; border-left: 3px solid var(--green); padding: 10px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; font-size: 0.9em; }
+  .warn { background: #2a2a1a; border-left: 3px solid var(--orange); padding: 10px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; font-size: 0.9em; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+  .bit-field { font-family: 'Fira Code', monospace; font-size: 0.85em; }
+  .bit-field span { padding: 1px 4px; border-radius: 3px; }
+  .bit-sign { background: rgba(248,81,73,0.2); color: var(--red); }
+  .bit-exp  { background: rgba(210,153,29,0.2); color: var(--orange); }
+  .bit-mant { background: rgba(63,185,80,0.2); color: var(--green); }
+
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px 28px; margin: 24px 0; }
+  .toc h3 { margin-top: 0; color: var(--cyan); }
+  .toc ol { columns: 2; column-gap: 32px; }
+  .toc li { margin: 4px 0; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0; }
+  .legend .item { display: flex; align-items: center; gap: 6px; font-size: 0.85em; }
+
+  pre { background: #0d1117; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 0.82em; line-height: 1.5; border: 1px solid var(--border); }
+  code { font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 0.9em; }
+  .inline-code { background: rgba(88,166,255,0.1); padding: 1px 6px; border-radius: 3px; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>LARA — Code Organization &amp; Module Architecture</h1>
+<p class="subtitle">
+  Target: Llama3-8B / Llama3.1-8B Attention Accelerator · bf16 Precision · Kria KV260 (Without AI Cores)<br>
+  Competition: FPT'26 Track B — "Llama3-8B or models with consistent parameters"
+</p>
+
+<!-- ================================================================ -->
+<!-- LEGEND -->
+<!-- ================================================================ -->
+<div class="legend">
+  <span class="item"><span class="badge badge-core">core</span> Compute</span>
+  <span class="item"><span class="badge badge-mem">mem</span> Memory</span>
+  <span class="item"><span class="badge badge-axi">axi</span> AXI Interface</span>
+  <span class="item"><span class="badge badge-pkg">pkg</span> Parameters</span>
+  <span class="item"><span class="badge badge-top">top</span> Top-Level</span>
+  <span class="item"><span class="badge badge-ext">ext</span> Extension</span>
+</div>
+
+<!-- ================================================================ -->
+<!-- TABLE OF CONTENTS -->
+<!-- ================================================================ -->
+<div class="toc">
+<h3>Table of Contents</h3>
+<ol>
+  <li><a href="#sec-overview">System Overview &amp; Top-Level Pipeline</a></li>
+  <li><a href="#sec-pkg">Parameter Package: attn_pkg.sv</a></li>
+  <li><a href="#sec-data-types">Data Type Specifications — bf16, fp32, and Internal Formats</a></li>
+  <li><a href="#sec-mac">bf16_mac.sv — Atomic Multiply-Accumulate Unit</a></li>
+  <li><a href="#sec-tile">attn_tile.sv — 16×16 MAC Array</a></li>
+  <li><a href="#sec-softmax">softmax_engine.sv — Online Softmax Engine</a></li>
+  <li><a href="#sec-psum">psum_accum.sv — Partial Sum Accumulator</a></li>
+  <li><a href="#sec-fsm">attn_core.sv — Attention FSM Controller</a></li>
+  <li><a href="#sec-kvcache">kv_cache_ram.sv — K/V URAM Cache</a></li>
+  <li><a href="#sec-tilebuf">tile_buffer.sv — Q Tile Ping-Pong Buffer</a></li>
+  <li><a href="#sec-outbuf">output_buffer.sv — Output Accumulator &amp; Buffer</a></li>
+  <li><a href="#sec-axi-lite">attn_axi_lite_slave.sv — AXI4-Lite CSR</a></li>
+  <li><a href="#sec-axi-stream">attn_axi_stream_*.sv — AXI4-Stream DMA</a></li>
+  <li><a href="#sec-top">attn_top.sv — Top-Level Wrapper</a></li>
+  <li><a href="#sec-extensions">Extension Modules</a></li>
+  <li><a href="#sec-end2end">End-to-End Data Flow Trace</a></li>
+</ol>
+</div>
+
+<!-- ================================================================ -->
+<!-- 1. SYSTEM OVERVIEW -->
+<!-- ================================================================ -->
+<h2 id="sec-overview">1. System Overview &amp; Top-Level Pipeline</h2>
+
+<div class="mermaid">
+graph TB
+    subgraph HOST["🖥️ Host (PS — ARM Cortex-A53)"]
+        direction LR
+        QKV_PROJ["QKV Projection<br/><i>X @ Wq/Wk/Wv</i>"]
+        DRIVER["Python Driver"]
+    end
+
+    subgraph DDR["💾 DDR4 (4 GB)"]
+        Q_DDR["Q [L,4096]bf16"]
+        K_DDR["K [L,1024]bf16"]
+        V_DDR["V [L,1024]bf16"]
+        O_DDR["O [L,4096]bf16"]
+    end
+
+    subgraph FPGA["FPGA PL — attn_top.sv"]
+        subgraph AXI_LAYER["AXI Interface Layer"]
+            AXIL["AXI4-Lite Slave<br/>CSR Config"]
+            SINK["AXIS Sink<br/>DDR→PL"]
+            SRC["AXIS Source<br/>PL→DDR"]
+        end
+
+        subgraph CTRL["Control"]
+            FSM["attn_core.sv<br/>FlashAttention FSM"]
+        end
+
+        subgraph MEM_LAYER["Memory Subsystem"]
+            K_URAM["kv_cache_ram.sv<br/>K Cache URAM"]
+            V_URAM["kv_cache_ram.sv<br/>V Cache URAM"]
+            Q_BUF["tile_buffer.sv<br/>Q Ping-Pong"]
+            O_ACC["output_buffer.sv<br/>O Accumulator"]
+        end
+
+        subgraph COMPUTE["Compute Subsystem"]
+            MAC["attn_tile.sv<br/>16×16 bf16 Array"]
+            SM["softmax_engine.sv<br/>Online Softmax"]
+            PS["psum_accum.sv<br/>Partial Sum"]
+        end
+
+        PKG["attn_pkg.sv<br/>Parameters"]
+    end
+
+    QKV_PROJ --> Q_DDR
+    QKV_PROJ --> K_DDR
+    QKV_PROJ --> V_DDR
+    DRIVER --> AXIL
+
+    K_DDR --> SINK --> K_URAM
+    V_DDR --> SINK --> V_URAM
+    Q_DDR --> SINK --> Q_BUF
+
+    Q_BUF --> MAC
+    K_URAM --> MAC
+    MAC --> SM
+    SM --> PS
+    V_URAM --> MAC
+    PS --> O_ACC
+    SM -.-> SM
+
+    O_ACC --> SRC --> O_DDR
+
+    AXIL --> FSM
+    FSM -.-> COMPUTE
+    FSM -.-> MEM_LAYER
+    PKG -.-> COMPUTE
+    PKG -.-> MEM_LAYER
+    PKG -.-> AXI_LAYER
+    PKG -.-> CTRL
+</div>
+
+<div class="data-desc">
+<strong>Pipeline Order (one GQA group, one Q_tile):</strong><br>
+① K/V Full Load (DDR→URAM, once) → ② Q_tile Stream Load (DDR→Ping-Pong) →
+③ Q×K^T (MAC Phase A) → ④ Scale + Mask → ⑤ Online Softmax →
+⑥ P×V (MAC Phase B) → ⑦ O Accumulate → ⑧ Normalize + bf16 Truncate → ⑨ O_tile Writeback (DDR)
+</div>
+
+<div class="note">
+<strong>Key Design Decision — Host-Side QKV Projection:</strong>
+QKV 投影 (X @ Wq/Wk/Wv) 的计算量约 51.5 GMACs (L=2048)，是 Attention 计算 (~34.4 GMACs)
+的 1.5×，但需要加载 80 MB 权重。在 KV260 256 DSP 上做投影会占用 MAC 阵列 99.9% 的时间。
+正确的分工：投影在主机 ARM 端用 NumPy/PyTorch 完成，FPGA 只做 Attention 本身的计算。
+权重 Wq/Wk/Wv/Wo 不进入 FPGA 数据通路。
+</div>
+
+<!-- ================================================================ -->
+<!-- 2. PARAMETER PACKAGE -->
+<!-- ================================================================ -->
+<h2 id="sec-pkg">2. Parameter Package — <code>hw/rtl/pkg/attn_pkg.sv</code> <span class="badge badge-pkg">pkg</span></h2>
+
+<div class="module-card">
+<h3>attn_pkg.sv <span class="file">Single Source of Truth — all configurable parameters</span></h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Compile-Time</span>
+  <span class="arrow">→</span> imported by ALL modules via <code>import attn_pkg::*</code>
+</div>
+
+<h4>Parameter Organization</h4>
+<table>
+<tr><th>Section</th><th>Key Parameters</th><th>Values</th><th>Derivation</th></tr>
+<tr>
+  <td><strong>1. Tile Geometry</strong></td>
+  <td><code>TILE_ROWS</code>, <code>TILE_COLS</code>, <code>TILE_ELEMS</code></td>
+  <td>16, 16, 256</td>
+  <td>Based on CIM 16×16 experience; row count limited by Softmax parallelism</td>
+</tr>
+<tr>
+  <td><strong>2. Pipeline Split</strong></td>
+  <td><code>TILE_SPLIT_FACTOR</code>, <code>TILE_MAC_REUSE</code></td>
+  <td>2, 1'b1</td>
+  <td>SPLIT_FACTOR=1 safe ≤60MHz; =2 target 100-125MHz; dual-path rollback</td>
+</tr>
+<tr>
+  <td><strong>3. Data Widths</strong></td>
+  <td><code>BF16_EXP_W</code>, <code>BF16_MANT_W</code>, <code>BF16_W</code>, <code>FP32_W</code>, <code>PSUM_W</code></td>
+  <td>8, 7, 16, 32, 32</td>
+  <td>IEEE 754 bf16 / fp32 standards</td>
+</tr>
+<tr>
+  <td><strong>4. Algorithm Params</strong></td>
+  <td><code>MAX_SEQ_LEN</code>, <code>HEAD_DIM</code>, <code>N_Q_HEADS</code>, <code>N_KV_HEADS</code></td>
+  <td>2048, 128, 32, 8</td>
+  <td>Llama3.1-8B specification</td>
+</tr>
+<tr>
+  <td><strong>5. Tiling Config</strong></td>
+  <td><code>TILE_Q</code>, <code>TILE_KV</code></td>
+  <td>32, 64</td>
+  <td>URAM capacity: TILE_Q=32 uses 16KB; TILE_KV=64 matches K/V read granularity</td>
+</tr>
+<tr>
+  <td><strong>6. Memory Sizing</strong></td>
+  <td><code>MAX_N_Q_TILES</code>, <code>MAX_N_KV_TILES</code>, <code>WSRAM_DEPTH</code></td>
+  <td>ceil(L/TILE_Q), ceil(L/TILE_KV)</td>
+  <td>Auto-derived: NO manual numbers</td>
+</tr>
+<tr>
+  <td><strong>7. CSR Map</strong></td>
+  <td><code>CSR_CTRL</code>, <code>CSR_STATUS</code>, <code>CSR_STREAM_LEN</code>, ...</td>
+  <td>14'h000–14'h060</td>
+  <td>All CSR addresses explicitly defined</td>
+</tr>
+<tr>
+  <td><strong>8. FSM States</strong></td>
+  <td><code>ST_IDLE</code>, <code>ST_LOAD_KV</code>, <code>ST_ATTN_LOOP</code>, <code>ST_DONE</code>, ...</td>
+  <td>6-bit enum</td>
+  <td>States for FlashAttention double-loop orchestration</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>Design Rule:</strong> No module may define its own <code>parameter</code> that shadows a pkg value.
+Hardcoded numeric constants (e.g., <code>logic [7:0]</code> instead of <code>logic [BF16_EXP_W-1:0]</code>) are forbidden.
+All derived values use <code>localparam</code> computed from pkg parameters.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 3. DATA TYPE SPECS -->
+<!-- ================================================================ -->
+<h2 id="sec-data-types">3. Data Type Specifications</h2>
+
+<div class="module-card">
+<h3>3.1 bf16 (Brain Floating Point 16)</h3>
+
+<table>
+<tr><th>Field</th><th>Bits</th><th>Encoding</th></tr>
+<tr>
+  <td><strong>Sign</strong></td><td>[15]</td><td>0=positive, 1=negative</td>
+</tr>
+<tr>
+  <td><strong>Exponent</strong></td><td>[14:7]</td><td>8-bit, bias=127. Range: 2⁻¹²⁷ to 2¹²⁸</td>
+</tr>
+<tr>
+  <td><strong>Mantissa</strong></td><td>[6:0]</td><td>7-bit fractional. Implicit leading 1 → effective 8-bit precision</td>
+</tr>
+</table>
+
+<div class="bit-field">
+<span class="bit-sign">S</span>
+<span class="bit-exp">E₇E₆E₅E₄E₃E₂E₁E₀</span>
+<span class="bit-mant">M₆M₅M₄M₃M₂M₁M₀</span>
+</div>
+
+<div class="data-desc">
+<strong>Value = (-1)^S × 2^(E-127) × 1.M</strong><br>
+Dynamic range ≈ fp32 (±3.4×10³⁸), precision ≈ 3 significant decimal digits<br>
+<strong>Key property:</strong> bf16 → fp32 conversion is trivial — pad mantissa with 16 zeros. No rounding needed.<br>
+<strong>Storage:</strong> 2 bytes per element. Alignment: 16-bit boundary in memory.<br>
+<strong>Special values:</strong> E=0xFF, M≠0 → NaN; E=0xFF, M=0 → ±∞; E=0, M=0 → ±0; E=0, M≠0 → subnormal
+</div>
+
+<h4>3.2 fp32 (IEEE 754 Single Precision)</h4>
+
+<div class="data-desc">
+<strong>Format:</strong> 1-bit sign + 8-bit exponent (bias=127) + 23-bit mantissa (implicit leading 1)<br>
+<strong>Used for:</strong> All intermediate accumulation results. The 23-bit mantissa provides enough precision
+for accumulating up to 2^(23-7) = 65536 bf16 products without rounding error.<br>
+<strong>Storage:</strong> 4 bytes per element. Alignment: 32-bit boundary.
+</div>
+
+<h4>3.3 Internal Data Representations</h4>
+
+<table>
+<tr><th>Stage</th><th>Format</th><th>Width</th><th>Rationale</th></tr>
+<tr>
+  <td>Q/K/V input (DDR)</td>
+  <td>bf16</td>
+  <td>16-bit</td>
+  <td>Matches Llama3.1-8B checkpoint format</td>
+</tr>
+<tr>
+  <td>MAC multiply operands</td>
+  <td>bf16</td>
+  <td>16-bit</td>
+  <td>DSP48E2 accepts 16-bit operands</td>
+</tr>
+<tr>
+  <td>MAC product (per PE)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>bf16×bf16 → exact fp32 product (DSP48 27×18 multiplier)</td>
+</tr>
+<tr>
+  <td>Partial sums (column reduction)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>Column accumulation of up to 16 products — fp32 mantissa sufficient</td>
+</tr>
+<tr>
+  <td>S_tile (Q×K^T result)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>Streamed directly to Softmax; never stored in SRAM</td>
+</tr>
+<tr>
+  <td>P_tile (after Softmax)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>Streamed directly to MAC Phase B; never stored in SRAM</td>
+</tr>
+<tr>
+  <td>O_acc (accumulated output)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>Accumulated across all KV tiles; must maintain precision</td>
+</tr>
+<tr>
+  <td>O_final (DDR writeback)</td>
+  <td>bf16</td>
+  <td>16-bit</td>
+  <td>Truncated from fp32 only at final step; matches original precision</td>
+</tr>
+<tr>
+  <td>m (running max per row)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>Online Softmax state; must match S_tile precision</td>
+</tr>
+<tr>
+  <td>l (running sum per row)</td>
+  <td>fp32</td>
+  <td>32-bit</td>
+  <td>Accumulates exp() values; fp32 prevents overflow for L≤2048</td>
+</tr>
+</table>
+</div>
+
+<!-- ================================================================ -->
+<!-- 4. bf16_mac.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-mac">4. bf16_mac.sv — Atomic Multiply-Accumulate Unit <span class="badge badge-core">core</span></h2>
+
+<div class="module-card">
+<h3>bf16_mac.sv — Single bf16 MAC PE</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Leaf PE in attn_tile array</span>
+  <span class="arrow">→</span> instantiated 256× in 16×16 grid
+  <span class="arrow">→</span> output feeds column reduction tree in psum_accum
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code></td><td>in</td><td>1</td><td>System clock (target 100-200 MHz)</td></tr>
+<tr><td><code>rst_n</code></td><td>in</td><td>1</td><td>Asynchronous reset, active-low</td></tr>
+<tr><td><code>a_bf16</code></td><td>in</td><td>16</td><td>Operand A in bf16 format {sign, exp[7:0], mant[6:0]}</td></tr>
+<tr><td><code>b_bf16</code></td><td>in</td><td>16</td><td>Operand B in bf16 format</td></tr>
+<tr><td><code>c_fp32</code></td><td>in</td><td>32</td><td>Accumulation input (partial sum from upstream PE or 0)</td></tr>
+<tr><td><code>out_fp32</code></td><td>out</td><td>32</td><td>Result = a_bf16 × b_bf16 + c_fp32, in fp32 format</td></tr>
+</table>
+
+<h4>Data Flow Through This Module</h4>
+<pre>
+a_bf16 [15:0]  ──→ [Decode] ──→ sign_a, exp_a[7:0], mant_a[7:0] (with implicit 1)
+b_bf16 [15:0]  ──→ [Decode] ──→ sign_b, exp_b[7:0], mant_b[7:0] (with implicit 1)
+                                       │
+                        ┌──────────────┼──────────────┐
+                        ▼              ▼              ▼
+                   sign = a^b    exp = ea+eb-127  mant = ma×mb
+                   (XOR gate)    (8-bit adder)    (DSP48E2 9×9→18-bit)
+                                       │
+                                       ▼
+                              [Normalize + Round]
+                              (leading-one detect,
+                               shift, round-to-nearest-even)
+                                       │
+                                  product_fp32 [31:0]
+                                       │
+                                       ▼
+                              [fp32 Adder] ←── c_fp32 [31:0]
+                                       │
+                                       ▼
+                                  out_fp32 [31:0]
+</pre>
+
+<div class="data-desc">
+<strong>Input Data Structure (a_bf16 / b_bf16):</strong><br>
+Two bf16 operands. In Phase A (Q×K^T): a = one Q element, b = one K element.<br>
+In Phase B (A×V): a = one P (attention weight) element cast from fp32 to bf16, b = one V element.<br><br>
+<strong>Input Data Structure (c_fp32):</strong><br>
+fp32 partial sum. In a systolic column: output of the PE above (or 0 for the first PE).<br>
+For a row of 128 head_dim elements: PE accumulates 128 products, one per cycle.<br><br>
+<strong>Output Data Structure (out_fp32):</strong><br>
+fp32 result = Σ(a_i × b_i) + c_initial. This is one element of the S_tile (Phase A) or
+one partial output contribution (Phase B). Feeds into column reduction tree.
+</div>
+
+<div class="note">
+<strong>DSP48E2 Mapping:</strong> The 9-bit mantissa multiplication (1.m × 1.m, where m is 7-bit)
+maps directly to DSP48E2's 27×18 multiplier. The exponent addition (8-bit) and sign XOR
+are done in FPGA logic (LUTs). The fp32 accumulation uses the DSP's 48-bit accumulator
+or a separate fp32 adder. <strong>Round-to-nearest-even</strong> must match Python's
+<code>ml_dtypes.bfloat16</code> behavior exactly for bit-accurate verification.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 5. attn_tile.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-tile">5. attn_tile.sv — 16×16 bf16 MAC Array <span class="badge badge-core">core</span></h2>
+
+<div class="module-card">
+<h3>attn_tile.sv — Time-Multiplexed Compute Array</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Central Compute Engine</span>
+  <span class="arrow">←</span> Q from tile_buffer, K/V from kv_cache_ram
+  <span class="arrow">→</span> S_tile/P_tile to softmax_engine/psum_accum
+  <span class="arrow">↻</span> Phase A (Q×K^T) and Phase B (P×V) time-multiplexed
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>phase_sel</code></td><td>in</td><td>1</td><td>0=Phase A (Q×K^T), 1=Phase B (P×V)</td></tr>
+<tr><td><code>q_data [TILE_ROWS-1:0]</code></td><td>in</td><td>16×16</td><td>Q row broadcast: TILE_ROWS × bf16. Each row broadcast to all TILE_COLS PEs in that row.</td></tr>
+<tr><td><code>k_data [TILE_COLS-1:0]</code></td><td>in</td><td>16×16</td><td>K column broadcast: TILE_COLS × bf16. Each column broadcast to all TILE_ROWS PEs in that column.</td></tr>
+<tr><td><code>p_data [TILE_ROWS-1:0]</code></td><td>in</td><td>16×fp32</td><td>Phase B: P (attention weight) row data. Broadcast same as Q.</td></tr>
+<tr><td><code>v_data [TILE_COLS-1:0]</code></td><td>in</td><td>16×16</td><td>Phase B: V column data. Broadcast same as K.</td></tr>
+<tr><td><code>depth_cnt</code></td><td>in</td><td>—</td><td>Current depth iteration (0..HEAD_DIM-1 or 0..TILE_Q-1)</td></tr>
+<tr><td><code>col_out [TILE_COLS-1:0]</code></td><td>out</td><td>16×32</td><td>Column outputs: TILE_COLS × fp32. Each is Σ(row_PE_outputs).</td></tr>
+</table>
+
+<h4>Phase A: Q×K^T Computation</h4>
+<pre>
+Task: Q_tile [Tq, 128] × K_tile^T [128, Tk] = S_tile [Tq, Tk]
+
+With TILE_ROWS=16, TILE_COLS=16, Tq=32, Tk=64, head_dim=128:
+
+Outer loop: S [32,64] decomposed into (32/16)×(64/16) = 2×4 = 8 sub-blocks
+Each sub-block: [16,16] computed by the array in one pass.
+
+Inner (depth) loop: 128 / TILE_SPLIT_FACTOR iterations.
+  - Each cycle: 16 Q elements broadcast to 16 rows, 16 K elements broadcast to 16 cols
+  - 16×16 = 256 parallel bf16 multiplications
+  - Column reduction: each column sums 16 PE outputs → 16 fp32 values
+
+Data flow per cycle (TILE_SPLIT_FACTOR=2, 8 elements processed/cycle):
+  Q[0..15][depth]  ──row broadcast──→ PE[row, 0..15]  ←──col broadcast── K[0..15][depth]
+                                              │
+                                     256 parallel bf16 MACs
+                                              │
+                                   Column reduction (16×)
+                                   Each column: Σ(row=0..15) PE[row,col]
+                                              │
+                                   col_out[0..15] = S_block[row_start..row_start+15, col_start..col_start+15]
+                                              │
+                                   Streamed directly to softmax_engine (NOT stored in SRAM)
+</pre>
+
+<h4>Phase B: P×V Computation</h4>
+<pre>
+Task: P_tile [Tq, Tk] × V_tile [Tk, 128] = ΔO [Tq, 128]
+
+Same array, different operands:
+  Row input: P[i][k] (fp32, cast to bf16 for multiplication)
+  Col input: V[k][j] (bf16)
+  Output: ΔO[i][j] contribution for this KV tile
+
+Since Tk (64) > TILE_COLS (16):
+  For each row i ∈ [0..Tq-1] and each V column block j ∈ [0..(128/16)-1]:
+    Accumulate Σ(k=0..Tk-1) P[i][k] × V[k][j_block*16 .. j_block*16+15]
+
+The column outputs are partial ΔO contributions.
+psum_accum collects and accumulates these across V column blocks and KV tiles.
+</pre>
+
+<div class="data-desc">
+<strong>Key Data Structure — S_tile (Phase A output):</strong><br>
+Shape: [TILE_ROWS × TILE_COLS] = [16 × 16] fp32 values.<br>
+Each element S[i,j] = Σ(depth=0..127) Q[row_start+i][depth] × K[col_start+j][depth].<br>
+These are <strong>streamed directly</strong> to softmax_engine — NOT written to SRAM.<br>
+This is the FlashAttention optimization: the full [Tq,Tk] S matrix materializes only as a
+series of small [16,16] blocks flowing through the pipeline.<br><br>
+
+<strong>Key Data Structure — col_out (column reduction):</strong><br>
+16 × fp32 values per cycle. Each value = Σ(row=0..15) PE[row][col].<br>
+Feeds into psum_accum for further reduction and the softmax_engine for exp/max/sum operations.
+</div>
+
+<div class="note">
+<strong>Time Multiplexing Rationale:</strong> Using one 16×16 array for both Q×K^T and P×V
+saves 256 DSPs (vs. two separate arrays). The array is idle during Softmax computation,
+which takes ~O(Tk) cycles. For Tk=64, the idle time is acceptable (pipeline bubble).
+If Softmax latency becomes the bottleneck, double-buffering the MAC array inputs can help.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 6. SOFTMAX ENGINE -->
+<!-- ================================================================ -->
+<h2 id="sec-softmax">6. softmax_engine.sv — Online Softmax Engine <span class="badge badge-core">core</span></h2>
+
+<div class="module-card">
+<h3>softmax_engine.sv — Hardware Online Softmax</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Between MAC Phase A and Phase B</span>
+  <span class="arrow">←</span> S_tile blocks from attn_tile
+  <span class="arrow">→</span> P_tile blocks to attn_tile (Phase B)
+  <span class="arrow">↻</span> Internal state feedback: m, l, O_acc across KV tiles
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>s_valid</code></td><td>in</td><td>1</td><td>S_tile block data valid strobe</td></tr>
+<tr><td><code>s_data [TILE_ROWS-1:0][TILE_COLS-1:0]</code></td><td>in</td><td>16×16×32</td><td>S_tile sub-block: TILE_ROWS×TILE_COLS fp32 values</td></tr>
+<tr><td><code>kv_tile_first</code></td><td>in</td><td>1</td><td>High when processing first KV tile of a Q tile → init m/l/O_acc</td></tr>
+<tr><td><code>kv_tile_last</code></td><td>in</td><td>1</td><td>High when processing last KV tile → trigger final normalization</td></tr>
+<tr><td><code>m_state [TILE_ROWS-1:0]</code></td><td>inout</td><td>16×32</td><td>Running max per row (fp32). Updated each KV tile.</td></tr>
+<tr><td><code>l_state [TILE_ROWS-1:0]</code></td><td>inout</td><td>16×32</td><td>Running sum(exp) per row (fp32). Updated each KV tile.</td></tr>
+<tr><td><code>o_acc [TILE_ROWS-1:0][HEAD_DIM-1:0]</code></td><td>inout</td><td>16×128×32</td><td>Running output accumulator per row (fp32). Updated each KV tile.</td></tr>
+<tr><td><code>p_valid</code></td><td>out</td><td>1</td><td>P_tile block data valid</td></tr>
+<tr><td><code>p_data [TILE_ROWS-1:0][TILE_COLS-1:0]</code></td><td>out</td><td>16×16×32</td><td>P_tile sub-block (post-softmax attention weights, fp32)</td></tr>
+<tr><td><code>o_valid</code></td><td>out</td><td>1</td><td>Final O_tile valid (after last KV tile + normalization)</td></tr>
+<tr><td><code>o_data [TILE_ROWS-1:0][HEAD_DIM-1:0]</code></td><td>out</td><td>16×128×16</td><td>Final O_tile, normalized, truncated to bf16</td></tr>
+</table>
+
+<h4>Online Softmax Algorithm (Hardware Implementation)</h4>
+<pre>
+// For each row i ∈ [0..TILE_ROWS-1], parallel hardware:
+// Process one S_tile sub-block [TILE_ROWS × TILE_COLS]
+
+if (kv_tile_first) begin
+    m[i] = -inf;        // fp32 minimum
+    l[i] = 0;           // fp32 zero
+    O_acc[i][0..127] = 0;
+end
+
+// Step 1: Scale S by 1/√128
+for each S[i][j]:
+    S_scaled[i][j] = S[i][j] * (1/√128)    // fp32 multiply by constant
+
+// Step 2: Find row-wise max (over this sub-block)
+for each row i:
+    row_max[i] = max(S_scaled[i][0..TILE_COLS-1])  // reduction tree, log₂(TILE_COLS) depth
+
+// Step 3: Update running max
+m_new[i] = max(m[i], row_max[i])
+
+// Step 4: Compute correction factor
+correction[i] = exp(m[i] - m_new[i])       // EXP via LUT (1 cycle)
+
+// Step 5: Compute P (attention weights for this sub-block)
+for each S_scaled[i][j]:
+    P[i][j] = exp(S_scaled[i][j] - m_new[i])   // EXP via LUT (1 cycle)
+
+// Step 6: Update running sum
+row_exp_sum[i] = sum(P[i][0..TILE_COLS-1])     // reduction tree
+l[i] = l[i] * correction[i] + row_exp_sum[i]
+
+// Step 7: Update running output accumulator
+// Handled by psum_accum + output_buffer:
+O_acc[i][:] = O_acc[i][:] * correction[i] + Σ(j) P[i][j] * V[j][:]
+
+// Step 8: Final normalization (only after last KV tile)
+if (kv_tile_last) begin
+    O[i][:] = bf16( O_acc[i][:] / l[i] )     // fp32 divide + bf16 truncate
+end
+</pre>
+
+<div class="data-desc">
+<strong>Critical Data Structures:</strong><br><br>
+<strong>m_state [16 × fp32]:</strong> Running maximum per Q row. Initialized to -inf at each Q tile start.
+Updated every KV tile. The correction factor exp(m_old - m_new) is always ≤ 1,
+ensuring numerical stability. After 8 KV tiles (Tk=64, TILE_COLS=16), m converges to
+the global row max.<br><br>
+<strong>l_state [16 × fp32]:</strong> Running sum of exp(S - m). Each KV tile contributes
+row_exp_sum to l, after the old l is corrected by exp(m_old - m_new).
+At the end: l[i] = Σ(j=0..Tk-1) exp(S[i][j] - m_final[i]) — the softmax denominator.<br><br>
+<strong>O_acc [16 × 128 × fp32]:</strong> Running weighted sum of V. Each KV tile adds
+P_block × V_block after correcting the old O_acc by exp(m_old - m_new).
+At the end: O_acc[i][:] = Σ(j) P[i][j] × V[j][:] — the unnormalized attention output.<br><br>
+<strong>P_tile [16 × 16 × fp32]:</strong> The softmax output for this sub-block.
+<h4>EXP Function Implementation</h4>
+<pre>
+Method: LUT + Linear Interpolation (recommended for v1.0)
+
+ROM: 1024 entries × fp32 = 4 KB (1 BRAM)
+Input range: [-8, 8] (covers exp(-8)≈0.0003 to exp(8)≈2981)
+  - Values < -8: clamp to 0
+  - Values > 8:  clamp to exp(8) ≈ 2981
+
+LUT addressing:
+  addr = (x + 8) * 64    // 1024 entries over 16-unit range → 64 entries per unit
+  exp(x) ≈ LUT[addr] + (x - x_base) * (LUT[addr+1] - LUT[addr]) / step
+
+Precision: < 0.1% relative error within [-8, 8]
+Latency: 2 cycles (LUT read + interpolation multiply-add)
+Resource: 1 BRAM (18Kb, dual-port → 2 reads/cycle for 2 rows)
+</pre>
+
+<div class="warn">
+<strong>Parallelism Constraint:</strong> The Softmax engine must process TILE_ROWS=16 rows in parallel.
+This requires: 16 max-reduction trees, 16 sum-reduction trees, 16 EXP LUT ports (or time-multiplexed).
+This hardware cost is WHY the MAC array row count is capped at 16 — doubling to 32 would double
+the Softmax hardware, becoming the new bottleneck instead of DSP count.
+</div>
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 7. psum_accum.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-psum">7. psum_accum.sv — Partial Sum Accumulator <span class="badge badge-core">core</span></h2>
+
+<div class="module-card">
+<h3>psum_accum.sv — Column Reduction &amp; O_acc Update</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Post-Softmax Accumulation</span>
+  <span class="arrow">←</span> P_tile from softmax_engine, V_tile from kv_cache_ram
+  <span class="arrow">→</span> ΔO_acc to output_buffer
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>p_valid</code></td><td>in</td><td>1</td><td>P_tile data valid (from softmax_engine)</td></tr>
+<tr><td><code>p_data [TILE_ROWS-1:0][TILE_COLS-1:0]</code></td><td>in</td><td>16×16×32</td><td>P_tile sub-block (fp32 attention weights)</td></tr>
+<tr><td><code>v_data [TILE_COLS-1:0][HEAD_DIM-1:0]</code></td><td>in</td><td>16×128×16</td><td>V_tile data: TILE_COLS rows of V, each HEAD_DIM=128 bf16 elements</td></tr>
+<tr><td><code>correction [TILE_ROWS-1:0]</code></td><td>in</td><td>16×32</td><td>Correction factor from softmax_engine: exp(m_old - m_new) per row</td></tr>
+<tr><td><code>o_acc_in [TILE_ROWS-1:0][HEAD_DIM-1:0]</code></td><td>in</td><td>16×128×32</td><td>Current O_acc state (from output_buffer)</td></tr>
+<tr><td><code>o_acc_out [TILE_ROWS-1:0][HEAD_DIM-1:0]</code></td><td>out</td><td>16×128×32</td><td>Updated O_acc = O_acc_old × correction + P × V</td></tr>
+</table>
+
+<h4>Computation</h4>
+<pre>
+// For each row i and each head_dim d:
+// O_acc_new[i][d] = O_acc_old[i][d] × correction[i] + Σ(j=0..TILE_COLS-1) P[i][j] × V[j][d]
+
+// Step 1: Correct old accumulator
+for each row i, each dim d ∈ [0..127]:
+    O_corrected[i][d] = O_acc_in[i][d] × correction[i]    // fp32 multiply
+
+// Step 2: P × V (reuses attn_tile MAC array in Phase B)
+P_tile [TILE_ROWS × TILE_COLS] fp32
+V_tile [TILE_COLS × HEAD_DIM] bf16
+→ ΔO [TILE_ROWS × HEAD_DIM] fp32
+
+// Step 3: Accumulate
+O_acc_out[i][d] = O_corrected[i][d] + ΔO[i][d]           // fp32 add
+</pre>
+
+<div class="data-desc">
+<strong>P×V Matrix Shape Analysis:</strong><br>
+P_tile: [16, 16] fp32 — each row is a partial softmax output for one Q position.<br>
+V_tile: [16, 128] bf16 — 16 V vectors of head_dim=128.<br>
+ΔO: [16, 128] fp32 — contribution to the attention output from this KV tile.<br>
+Total FLOPs per sub-block: 16 × 128 × 16 = 32,768 MACs.<br>
+Across all sub-blocks for one Q tile (L=512, Tq=32, Tk=64):
+  (32/16) × (64/16) × (128/16) = 2 × 4 × 8 = 64 sub-blocks → ~2.1M MACs per Q tile.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 8. attn_core.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-fsm">8. attn_core.sv — Attention FSM Controller <span class="badge badge-core">core</span></h2>
+
+<div class="module-card">
+<h3>attn_core.sv — FlashAttention Double-Loop Orchestrator</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Top-Level Controller</span>
+  <span class="arrow">→</span> Controls ALL other modules via handshake signals
+  <span class="arrow">←</span> Receives start/config from AXI4-Lite CSR
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>start</code></td><td>in</td><td>1</td><td>Start pulse from CSR (after Q/K/V are in DDR, config written)</td></tr>
+<tr><td><code>seq_len [15:0]</code></td><td>in</td><td>16</td><td>Current sequence length (from CSR, ≤ MAX_SEQ_LEN)</td></tr>
+<tr><td><code>gqa_group [2:0]</code></td><td>in</td><td>3</td><td>Current GQA group index (0..7)</td></tr>
+<tr><td><code>q_head [1:0]</code></td><td>in</td><td>2</td><td>Current Q head within group (0..3)</td></tr>
+<tr><td><code>done</code></td><td>out</td><td>1</td><td>High when all GQA groups + heads are complete</td></tr>
+<tr><td><code>busy</code></td><td>out</td><td>1</td><td>High when FSM is active (any state except IDLE/DONE)</td></tr>
+<tr><td colspan="4"><em>— Memory Control —</em></td></tr>
+<tr><td><code>kv_load_start</code>, <code>kv_load_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish K/V DDR→URAM load</td></tr>
+<tr><td><code>q_load_start</code>, <code>q_load_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish Q_tile DDR→Ping-Pong load</td></tr>
+<tr><td><code>o_write_start</code>, <code>o_write_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish O_tile writeback to DDR</td></tr>
+<tr><td colspan="4"><em>— Compute Control —</em></td></tr>
+<tr><td><code>mac_phase</code></td><td>out</td><td>1</td><td>0=Phase A (Q×K^T), 1=Phase B (P×V)</td></tr>
+<tr><td><code>mac_start</code>, <code>mac_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish one MAC sub-block computation</td></tr>
+<tr><td><code>softmax_start</code>, <code>softmax_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish one softmax sub-block</td></tr>
+<tr><td><code>kv_tile_first</code>, <code>kv_tile_last</code></td><td>out</td><td>1/1</td><td>Boundary flags for softmax_engine state management</td></tr>
+<tr><td colspan="4"><em>— Performance Counters —</em></td></tr>
+<tr><td><code>cycle_cnt [31:0]</code></td><td>out</td><td>32</td><td>Cycle counter for latency measurement</td></tr>
+<tr><td><code>mac_cycles [31:0]</code></td><td>out</td><td>32</td><td>MAC array active cycles (for utilization calculation)</td></tr>
+</table>
+
+<h4>FSM States &amp; Transitions</h4>
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> LOAD_KV: start=1
+    LOAD_KV --> Q_TILE_INIT: KV loaded to URAM
+
+    state Q_TILE_INIT {
+        [*] --> LOAD_Q: DMA Q_tile DDR→Ping-Pong
+        LOAD_Q --> INIT_SOFTMAX: m=-inf, l=0, O_acc=0
+        INIT_SOFTMAX --> [*]
+    }
+
+    Q_TILE_INIT --> KV_TILE_LOOP
+
+    state KV_TILE_LOOP {
+        [*] --> READ_KV_URAM: read K_tile, V_tile from URAM
+        READ_KV_URAM --> PHASE_A: Q×K^T on MAC array
+        PHASE_A --> SOFTMAX_BLOCK: S_block→Scale→EXP→Max→Sum
+        SOFTMAX_BLOCK --> PHASE_B: P_block×V_tile on MAC array
+        PHASE_B --> ACCUMULATE: ΔO→O_acc update
+        ACCUMULATE --> CHECK_KV: more KV tiles?
+        CHECK_KV --> READ_KV_URAM: yes
+        CHECK_KV --> [*]: no
+    }
+
+    KV_TILE_LOOP --> NORMALIZE: O = O_acc / l
+    NORMALIZE --> WRITE_O: bf16 truncate, DMA writeback
+    WRITE_O --> CHECK_Q: more Q tiles?
+    CHECK_Q --> Q_TILE_INIT: yes
+    CHECK_Q --> CHECK_HEAD: more Q heads?
+    CHECK_HEAD --> Q_TILE_INIT: yes (next head in GQA group)
+    CHECK_HEAD --> CHECK_GROUP: more GQA groups?
+    CHECK_GROUP --> LOAD_KV: yes (load new K/V from DDR)
+    CHECK_GROUP --> DONE
+
+    DONE --> IDLE: interrupt host
+</div>
+
+<div class="data-desc">
+<strong>Loop Nest Counter Management:</strong><br>
+The FSM maintains these nested loop counters internally:<br>
+<code>q_tile_idx</code> [0..MAX_N_Q_TILES-1] — outer Q tile loop<br>
+<code>kv_tile_idx</code> [0..MAX_N_KV_TILES-1] — inner KV tile loop<br>
+<code>head_idx</code> [0..3] — Q head within GQA group<br>
+<code>group_idx</code> [0..7] — GQA group<br><br>
+<strong>For each GQA group:</strong> K and V are the same for all 4 Q heads in the group.
+So K/V are loaded once per group, and the Q-tile loop runs 4 times (once per Q head).<br>
+<strong>Total iterations (L=512, Tq=32, Tk=64):</strong><br>
+8 groups × 4 heads × (512/32) Q tiles × (512/64) KV tiles = 8 × 4 × 16 × 8 = 4096 inner loop iterations.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 9. kv_cache_ram.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-kvcache">9. kv_cache_ram.sv — K/V URAM Cache <span class="badge badge-mem">mem</span></h2>
+
+<div class="module-card">
+<h3>kv_cache_ram.sv — Full-Sequence K/V On-Chip Storage</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Pre-Attention Storage</span>
+  <span class="arrow">←</span> K/V from DDR via AXI Stream (loaded ONCE at start)
+  <span class="arrow">→</span> K_tile/V_tile to attn_tile (read REPEATEDLY during Attention loop)
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>wr_en</code></td><td>in</td><td>1</td><td>Write enable (during LOAD_KV phase only)</td></tr>
+<tr><td><code>wr_addr [15:0]</code></td><td>in</td><td>16</td><td>Write address (linear: token_idx × head_dim + dim_idx)</td></tr>
+<tr><td><code>wr_data [15:0]</code></td><td>in</td><td>16</td><td>Write data: one bf16 element of K or V</td></tr>
+<tr><td><code>rd_en</code></td><td>in</td><td>1</td><td>Read enable (during Attention loop)</td></tr>
+<tr><td><code>rd_token_start [15:0]</code></td><td>in</td><td>16</td><td>Read start token index (kv_start in loop)</td></tr>
+<tr><td><code>rd_dim [6:0]</code></td><td>in</td><td>7</td><td>Read head dimension index (0..127)</td></tr>
+<tr><td><code>rd_data [TILE_KV-1:0][15:0]</code></td><td>out</td><td>TILE_KV×16</td><td>Read data: TILE_KV bf16 elements, one per token in this KV tile</td></tr>
+</table>
+
+<h4>Storage Organization</h4>
+<pre>
+K Cache: [MAX_SEQ_LEN × HEAD_DIM] bf16 elements
+  = 2048 × 128 × 2 bytes = 512 KB per KV head
+  For all 8 KV heads: 8 × 512 KB = 4 MB (K only)
+
+V Cache: same structure, another 4 MB
+
+Total K+V Cache: 8 MB (for all 8 KV heads, MAX_SEQ_LEN=2048)
+
+URAM budget on KV260: 64 × 288 Kb = 20.7 Mb ≈ 2.6 MB
+  → K+V for ALL 8 heads = 8 MB — exceeds URAM capacity at L=2048!
+
+Adaptive strategy:
+  L ≤ 512:   K+V = 1 MB + 1 MB = 2 MB → fits in URAM ✓
+  L ≤ 1024:  K+V = 2 MB + 2 MB = 4 MB → exceeds URAM ✗ → partial cache or BRAM spillover
+  L = 2048:  K+V = 4 MB + 4 MB = 8 MB → need multi-pass or reduced head caching
+
+For competition (likely seq_len ≤ 512): URAM caching is viable.
+For longer sequences: cache one GQA group at a time (1/8 of K/V = 0.5 MB @ L=2048).
+
+Multi-bank organization for parallel access:
+  TILE_KV=64 tokens read simultaneously → 64 parallel data paths
+  Bank partitioning: interleave by token index
+    Bank 0: tokens 0, 8, 16, ...
+    Bank 1: tokens 1, 9, 17, ...
+    ...
+    Bank 7: tokens 7, 15, 23, ...
+  8 banks × 8 tokens/bank = 64 tokens read in parallel
+</pre>
+
+<div class="data-desc kv">
+<strong>K/V Data Structure Details:</strong><br>
+<strong>K:</strong> Shape [L, 1024] bf16. For Llama3.1-8B: L tokens × 8 KV heads × 128 head_dim = L × 1024.<br>
+Each K element is a bf16 value representing one dimension of one key vector.<br>
+<strong>V:</strong> Shape [L, 1024] bf16. Same organization.<br>
+<strong>Access pattern:</strong> Sequential writes during LOAD_KV (streaming from DDR).
+Strided reads during Attention loop: for kv_start=0,64,128,..., read tokens [kv_start .. kv_start+63]
+across all 128 head dimensions. Each token's K/V is read 16 times (once per Q tile, for L=512, Tq=32).<br>
+<strong>This is why caching is critical:</strong> Without URAM cache, each K/V token would be re-read
+from DDR 16 times → 16× bandwidth amplification. With URAM, DDR read happens ONCE.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 10. tile_buffer.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-tilebuf">10. tile_buffer.sv — Q Tile Ping-Pong Buffer <span class="badge badge-mem">mem</span></h2>
+
+<div class="module-card">
+<h3>tile_buffer.sv — Streaming Q Input Buffer</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Input Buffer → MAC Array</span>
+  <span class="arrow">←</span> Q_tile from DDR via AXI Stream (streaming)
+  <span class="arrow">→</span> Q rows to attn_tile (broadcast)
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>wr_en</code></td><td>in</td><td>1</td><td>Write enable (from AXI Stream sink)</td></tr>
+<tr><td><code>wr_data [15:0]</code></td><td>in</td><td>16</td><td>Write data: one bf16 Q element (streaming from DDR)</td></tr>
+<tr><td><code>wr_bank_sel</code></td><td>in</td><td>1</td><td>Which bank to write: 0=A (receiving), 1=B (receiving)</td></tr>
+<tr><td><code>rd_bank_sel</code></td><td>in</td><td>1</td><td>Which bank to read: 0=A (computing), 1=B (computing)</td></tr>
+<tr><td><code>rd_row [4:0]</code></td><td>in</td><td>5</td><td>Read row index (0..TILE_Q-1 = 0..31)</td></tr>
+<tr><td><code>rd_data [15:0]</code></td><td>out</td><td>16</td><td>Read data: one bf16 Q element</td></tr>
+<tr><td><code>bank_ready</code></td><td>out</td><td>1</td><td>Current receive bank has a full Q_tile ready for computation</td></tr>
+</table>
+
+<h4>Ping-Pong Operation</h4>
+<pre>
+Time ──────────────────────────────────────────────────────────────→
+
+Bank A: [LOAD Q_tile_0] [──── IDLE ────] [LOAD Q_tile_2] [── IDLE ──] ...
+Bank B: [──── IDLE ────] [LOAD Q_tile_1] [──── IDLE ────] [LOAD Q_tile_3] ...
+
+MAC:    [── IDLE ──] [COMPUTE tile_0] [COMPUTE tile_1] [COMPUTE tile_2] ...
+
+Q_tile size: TILE_Q × head_dim = 32 × 128 × 2B = 8 KB
+DDR load time (15 GB/s effective): 8 KB / 15 GB/s ≈ 0.5 μs
+MAC compute time per Q tile (L=512, Tk=64): ~82 μs
+→ Loading is NOT the bottleneck; compute dominates by 160×
+→ Ping-Pong buffer of just 2×8 KB = 16 KB is sufficient
+</pre>
+
+<div class="data-desc">
+<strong>Q Data Stream Characteristics:</strong><br>
+Q is read from DDR exactly ONCE per Q_tile (not reused). Each Q_tile is 32 tokens × 128 dimensions × 2 bytes = 8 KB.
+After computation, the Q_tile data is discarded — no writeback needed.<br>
+<strong>This is the complement of K/V:</strong> K/V are read many times → cache in URAM.
+Q is read once → stream through with minimal buffering.
+Together this minimizes total on-chip memory usage.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 11. output_buffer.sv -->
+<!-- ================================================================ -->
+<h2 id="sec-outbuf">11. output_buffer.sv — Output Accumulator <span class="badge badge-mem">mem</span></h2>
+
+<div class="module-card">
+<h3>output_buffer.sv — O Accumulator &amp; Final Output Buffer</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Post-Compute → DDR Writeback</span>
+  <span class="arrow">←</span> ΔO_acc from psum_accum
+  <span class="arrow">↻</span> O_acc read-modify-write each KV tile
+  <span class="arrow">→</span> O_tile (bf16) to AXI Stream Source → DDR
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
+<tr><td><code>init_acc</code></td><td>in</td><td>1</td><td>Initialize all O_acc entries to 0 (at Q_tile start)</td></tr>
+<tr><td><code>update_en</code></td><td>in</td><td>1</td><td>Enable O_acc update (each KV tile)</td></tr>
+<tr><td><code>delta_o [TILE_ROWS-1:0][HEAD_DIM-1:0]</code></td><td>in</td><td>16×128×32</td><td>ΔO contribution from psum_accum (fp32)</td></tr>
+<tr><td><code>correction [TILE_ROWS-1:0]</code></td><td>in</td><td>16×32</td><td>Correction factor from softmax_engine</td></tr>
+<tr><td><code>normalize_en</code></td><td>in</td><td>1</td><td>Trigger final normalization (after last KV tile)</td></tr>
+<tr><td><code>l_state [TILE_ROWS-1:0]</code></td><td>in</td><td>16×32</td><td>Running sum from softmax_engine (for final division)</td></tr>
+<tr><td><code>o_read_en</code>, <code>o_read_addr</code></td><td>in</td><td>1/11</td><td>Read enable and address for DMA writeback</td></tr>
+<tr><td><code>o_data [15:0]</code></td><td>out</td><td>16</td><td>Output data (bf16) for AXI Stream Source → DDR</td></tr>
+</table>
+
+<h4>Internal Operation</h4>
+<pre>
+// O_acc: [TILE_Q × HEAD_DIM] fp32 register file
+// = 32 × 128 × 4 bytes = 16 KB (register or URAM)
+
+// On each KV tile completion:
+for row i ∈ [0..TILE_ROWS-1]:
+    for dim d ∈ [0..HEAD_DIM-1]:
+        O_acc[i][d] = O_acc[i][d] × correction[i] + delta_o[i][d]
+
+// On final normalization (after last KV tile):
+for row i ∈ [0..TILE_Q-1]:
+    for dim d ∈ [0..HEAD_DIM-1]:
+        O_out[i][d] = bf16( O_acc[i][d] / l_state[i] )
+        // fp32 divide → round-to-nearest-even → truncate mantissa to 7 bits → bf16
+
+// O_out [TILE_Q × HEAD_DIM] bf16 = 32 × 128 × 2B = 8 KB
+// Written back to DDR via AXI Stream
+</pre>
+</div>
+
+<!-- ================================================================ -->
+<!-- 12-14. AXI & TOP modules (condensed) -->
+<!-- ================================================================ -->
+
+<h2 id="sec-axi-lite">12. attn_axi_lite_slave.sv — AXI4-Lite CSR <span class="badge badge-axi">axi</span></h2>
+<div class="module-card">
+<h3>Control Register Interface</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Host ↔ FPGA Control Path</span>
+  <span class="arrow">←</span> AXI4-Lite from PS (MMIO)
+  <span class="arrow">→</span> CSR registers to attn_core, DMA engines
+</div>
+
+<h4>CSR Register Map</h4>
+<table>
+<tr><th>Address</th><th>Name</th><th>Bits</th><th>Access</th><th>Description</th></tr>
+<tr><td><code>0x000</code></td><td>CTRL</td><td>[0] start, [1] soft_reset</td><td>W</td><td>Write 1 to start attention, write 2 to reset</td></tr>
+<tr><td><code>0x004</code></td><td>STATUS</td><td>[0] busy, [1] done, [2] error</td><td>R</td><td>Read accelerator status</td></tr>
+<tr><td><code>0x008</code></td><td>SEQ_LEN</td><td>[15:0]</td><td>R/W</td><td>Current sequence length (≤ MAX_SEQ_LEN)</td></tr>
+<tr><td><code>0x00C</code></td><td>GQA_CONFIG</td><td>[2:0] groups, [1:0] heads/group</td><td>R/W</td><td>GQA configuration</td></tr>
+<tr><td><code>0x010</code></td><td>TILE_CONFIG</td><td>[7:0] TILE_Q, [7:0] TILE_KV</td><td>R/W</td><td>Tile size override (0 = use pkg default)</td></tr>
+<tr><td><code>0x020</code></td><td>Q_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address of Q matrix</td></tr>
+<tr><td><code>0x024</code></td><td>K_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address of K matrix</td></tr>
+<tr><td><code>0x028</code></td><td>V_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address of V matrix</td></tr>
+<tr><td><code>0x02C</code></td><td>O_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address for output O</td></tr>
+<tr><td><code>0x050</code></td><td>STREAM_DEST</td><td>[0] Q, [1] K, [2] V</td><td>R/W</td><td>Stream load destination select</td></tr>
+<tr><td><code>0x054</code></td><td>STREAM_LEN</td><td>[23:0]</td><td>R/W</td><td>Number of bytes to stream (write triggers DMA)</td></tr>
+<tr><td><code>0x060</code></td><td>RESULT_LEN</td><td>[23:0]</td><td>R</td><td>Bytes of output data available</td></tr>
+<tr><td><code>0x070</code></td><td>PERF_CYCLES</td><td>[31:0]</td><td>R</td><td>Performance counter: total cycles</td></tr>
+<tr><td><code>0x074</code></td><td>PERF_MAC_CYCLES</td><td>[31:0]</td><td>R</td><td>Performance counter: MAC active cycles</td></tr>
+</table>
+
+<div class="data-desc">
+<strong>AXI4-Lite Protocol:</strong> 32-bit data bus, single-beat transactions.
+Address width: 14 bits (supports up to 16KB CSR space).
+Used only for configuration and status — <strong>not</strong> for bulk data transfer (use AXIS for that).
+Directly reused from CIM project's <code>cim_axi_lite_slave.sv</code> (~95% code reuse).
+</div>
+</div>
+
+<h2 id="sec-axi-stream">13. attn_axi_stream_sink/source.sv — AXI4-Stream DMA <span class="badge badge-axi">axi</span></h2>
+<div class="module-card">
+<h3>Data Movement Engines</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">DDR ↔ FPGA Data Path</span>
+  <span class="arrow">Sink:</span> DDR → PL (MM2S) | <span class="arrow">Source:</span> PL → DDR (S2MM)
+</div>
+
+<div class="two-col">
+<div>
+<h4>attn_axi_stream_sink (DDR→PL)</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Dir</th><th>Width</th></tr>
+<tr><td><code>s_axis_tdata</code></td><td>in</td><td>32</td></tr>
+<tr><td><code>s_axis_tkeep</code></td><td>in</td><td>4</td></tr>
+<tr><td><code>s_axis_tlast</code></td><td>in</td><td>1</td></tr>
+<tr><td><code>s_axis_tvalid</code></td><td>in</td><td>1</td></tr>
+<tr><td><code>s_axis_tready</code></td><td>out</td><td>1</td></tr>
+<tr><td><code>data_out [15:0]</code></td><td>out</td><td>16</td></tr>
+<tr><td><code>dest</code></td><td>in</td><td>3</td></tr>
+</table>
+<p>Packs 2×bf16 per 32-bit AXIS beat.
+Routes data to: Q buffer, K cache, or V cache based on <code>dest</code>.</p>
+</div>
+<div>
+<h4>attn_axi_stream_source (PL→DDR)</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Dir</th><th>Width</th></tr>
+<tr><td><code>m_axis_tdata</code></td><td>out</td><td>32</td></tr>
+<tr><td><code>m_axis_tkeep</code></td><td>out</td><td>4</td></tr>
+<tr><td><code>m_axis_tlast</code></td><td>out</td><td>1</td></tr>
+<tr><td><code>m_axis_tvalid</code></td><td>out</td><td>1</td></tr>
+<tr><td><code>m_axis_tready</code></td><td>in</td><td>1</td></tr>
+<tr><td><code>data_in [15:0]</code></td><td>in</td><td>16</td></tr>
+</table>
+<p>Reads bf16 results from output_buffer.
+Packs 2×bf16 per 32-bit AXIS beat to DDR.</p>
+</div>
+</div>
+
+<div class="data-desc">
+<strong>AXI4-Stream Data Format:</strong><br>
+Each beat on the 32-bit AXIS bus carries 2 bf16 elements packed as {bf16_hi[15:0], bf16_lo[15:0]}.<br>
+<strong>K/V load burst:</strong> L×128 bf16 elements = L×128×2 bytes per head. For L=512: 128 KB per head.<br>
+At 32-bit bus width, this is 32K beats. At 15 GB/s effective DDR bandwidth: ~8.5 μs load time.<br>
+<strong>Q load:</strong> Per tile: 32×128×2B = 8 KB = 2K beats. ~0.5 μs per tile.<br>
+<strong>O writeback:</strong> Same as Q load. 8 KB per tile, ~0.5 μs.
+</div>
+</div>
+
+<h2 id="sec-top">14. attn_top.sv — Top-Level Wrapper <span class="badge badge-top">top</span></h2>
+<div class="module-card">
+<h3>attn_top.sv — Integration &amp; Platform Adaptation</h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">FPGA Boundary</span>
+  <span class="arrow">↔</span> External AXI interfaces (Lite + Stream)
+  <span class="arrow">→</span> Internal module instances + wiring + MUX
+</div>
+
+<p>Instantiates all modules, connects interfaces, handles clock domain crossing (if needed),
+and provides platform-specific adaptations. All internal modules are platform-agnostic;
+only <code>attn_top.sv</code> and constraints change per platform.</p>
+</div>
+
+<!-- ================================================================ -->
+<!-- 15. EXTENSION MODULES -->
+<!-- ================================================================ -->
+<h2 id="sec-extensions">15. Extension Modules <span class="badge badge-ext">ext</span></h2>
+
+<div class="note">
+<strong>Note on extensions:</strong> These modules are documented for architectural completeness.
+They may not all be implemented in hardware — some remain on the host (ARM CPU).
+They are included here to show where they fit in the full Llama3.1-8B attention pipeline
+and to provide clear interface contracts if implementation becomes feasible.
+</div>
+
+<!-- --- QKV Projection --- -->
+<div class="module-card">
+<h3>15.1 qkv_projection.sv — QKV Linear Projection <span class="badge badge-ext">ext</span></h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Before Attention (Preprocessing)</span>
+  <span class="arrow">←</span> X [L, 4096] bf16 (hidden states)
+  <span class="arrow">→</span> Q [L, 4096], K [L, 1024], V [L, 1024] bf16
+</div>
+
+<h4>Interface (if implemented in FPGA)</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>x_data [15:0]</code></td><td>in</td><td>16</td><td>Hidden state input. Streaming: L tokens × 4096 dims × bf16</td></tr>
+<tr><td><code>wq_data [15:0]</code></td><td>in</td><td>16</td><td>Wq weight [4096, 4096] bf16. 32 MB — too large for on-chip!</td></tr>
+<tr><td><code>wk_data [15:0]</code></td><td>in</td><td>16</td><td>Wk weight [4096, 1024] bf16. 8 MB</td></tr>
+<tr><td><code>wv_data [15:0]</code></td><td>in</td><td>16</td><td>Wv weight [4096, 1024] bf16. 8 MB</td></tr>
+<tr><td><code>q_out [15:0]</code></td><td>out</td><td>16</td><td>Q output. Streaming: L tokens × 4096 dims bf16 → DDR</td></tr>
+<tr><td><code>k_out [15:0]</code></td><td>out</td><td>16</td><td>K output. Streaming: L tokens × 1024 dims bf16 → DDR</td></tr>
+<tr><td><code>v_out [15:0]</code></td><td>out</td><td>16</td><td>V output. Streaming: L tokens × 1024 dims bf16 → DDR</td></tr>
+</table>
+
+<div class="data-desc ext">
+<strong>QKV Projection Computational Analysis:</strong><br>
+<strong>Q = X @ Wq^T:</strong> [L, 4096] × [4096, 4096] = L × 4096 × 4096 MACs.<br>
+For L=512: 512 × 4096 × 4096 ≈ 8.6 GMACs.<br>
+On a 256-MAC array at 200 MHz: 8.6G / (256 × 200M) ≈ 168 ms — <strong>dominates everything.</strong><br>
+K = X @ Wk^T: [L,4096] × [4096,1024] = L × 4096 × 1024 ≈ 2.1 GMACs (L=512).<br>
+V = X @ Wv^T: same ≈ 2.1 GMACs.<br>
+Total QKV projection: ~12.9 GMACs vs Attention: ~34.4M MACs (L=512, per GQA head pair).<br>
+<strong>Conclusion:</strong> QKV projection is ~375× more compute than Attention for L=512.
+It MUST stay on the host (ARM CPU or software preprocessing).
+<strong>Do not implement in FPGA for v1.0.</strong> Documented here for completeness and potential v2.0 with larger FPGA.
+</div>
+</div>
+
+<!-- --- RoPE --- -->
+<div class="module-card">
+<h3>15.2 rope_engine.sv — Rotary Position Embedding <span class="badge badge-ext">ext</span></h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">QKV Projection → Attention (on Q and K)</span>
+  <span class="arrow">←</span> Q/K vectors [head_dim] bf16 + position index
+  <span class="arrow">→</span> Rotated Q/K vectors [head_dim] bf16
+</div>
+
+<h4>Interface</h4>
+<table class="iface-table">
+<tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
+<tr><td><code>vec_in [HEAD_DIM-1:0][15:0]</code></td><td>in</td><td>128×16</td><td>Q or K vector for one head, one token position. 128 bf16 elements.</td></tr>
+<tr><td><code>pos [15:0]</code></td><td>in</td><td>16</td><td>Token position index (0..seq_len-1)</td></tr>
+<tr><td><code>vec_out [HEAD_DIM-1:0][15:0]</code></td><td>out</td><td>128×16</td><td>Rotated vector. Same shape as input.</td></tr>
+</table>
+
+<h4>Computation</h4>
+<pre>
+// RoPE applies pair-wise 2D rotation to consecutive dimensions:
+// For each pair (2i, 2i+1) where i ∈ [0..63]:
+//   θ_i = rope_theta^(-2i/head_dim) = 500000^(-2i/128)
+//   cos_pos = cos(pos × θ_i)    — precomputed, stored in ROM
+//   sin_pos = sin(pos × θ_i)    — precomputed, stored in ROM
+//
+//   x_2i'   = x_2i × cos_pos - x_{2i+1} × sin_pos
+//   x_2i+1' = x_2i × sin_pos + x_{2i+1} × cos_pos
+
+ROM storage: MAX_SEQ_LEN × (head_dim/2) × 2 (cos+sin) × 2 bytes (bf16)
+           = 2048 × 64 × 2 × 2 = 512 KB
+Stored in BRAM, indexed by position.
+
+Latency: 1 cycle per pair (2 bf16 mults + 1 add/sub), 64 pairs → 64 cycles per token.
+Can be pipelined: 4 pairs/cycle → 16 cycles per token.
+</pre>
+
+<div class="data-desc ext">
+<strong>RoPE Integration Point:</strong><br>
+RoPE must be applied to Q and K <strong>after</strong> QKV projection and reshape to heads,
+but <strong>before</strong> the attention computation.<br>
+For the v1.0 implementation: RoPE can be applied on the host side (ARM CPU) before
+writing Q and K to DDR. The FPGA attention accelerator receives pre-rotated Q and K.<br>
+Reason: RoPE is a lightweight element-wise operation (~2 MACs/element), and doing it
+on the host avoids adding a separate hardware module. If the host becomes a bottleneck,
+the rope_engine can be inserted between DDR load and the MAC array.
+</div>
+</div>
+
+<!-- --- Causal Mask --- -->
+<div class="module-card">
+<h3>15.3 causal_mask.sv — Causal Attention Mask <span class="badge badge-ext">ext</span></h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Integrated into Scale step (between MAC Phase A and Softmax)</span>
+</div>
+
+<pre>
+// Causal mask: token at position i can only attend to positions j ≤ i
+// mask[i][j] = 0 if j ≤ i, else -inf
+
+// In the tiled FlashAttention loop:
+// For Q_tile tokens at positions [q_start .. q_start+Tq-1]
+// For K_tile tokens at positions [kv_start .. kv_start+Tk-1]
+//
+// If kv_start + j > q_start + i:
+//     S[i][j] = -inf    (masked)
+//
+// This is a simple address comparator — no ROM needed.
+// Integrated into the Scale step: S_scaled = S/√128 + mask
+// Mask values: 0 (unmasked) or -65504 (≈ -inf in bf16)
+</pre>
+</div>
+
+<!-- --- RMSNorm --- -->
+<div class="module-card">
+<h3>15.4 rms_norm.sv — RMS Normalization <span class="badge badge-ext">ext</span></h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">Before Attention (Pre-Norm in Llama3)</span>
+  <span class="arrow">←</span> Hidden states X [L, 4096] bf16
+  <span class="arrow">→</span> Normalized X [L, 4096] bf16
+</div>
+
+<pre>
+// RMSNorm(x) = x / sqrt(mean(x²) + ε) × γ
+// where γ is a learnable scale parameter [4096] bf16
+//
+// Hardware implementation:
+// Step 1: Square: x² for each element (bf16 → fp32)
+// Step 2: Reduce sum: Σ(x²) across 4096 elements → 1 fp32 value
+// Step 3: Mean: sum/4096 + ε
+// Step 4: Inverse sqrt: 1/√mean (LUT or Newton iteration)
+// Step 5: Scale: x × inv_sqrt × γ → bf16
+
+// This is also a host-side operation for v1.0.
+// RMSNorm is applied before attention AND before FFN in Llama3's Pre-Norm architecture.
+</pre>
+</div>
+
+<!-- --- Output Projection --- -->
+<div class="module-card">
+<h3>15.5 output_projection.sv — Output Linear Projection <span class="badge badge-ext">ext</span></h3>
+
+<div class="pipeline-pos">
+  <span class="label">Pipeline Position:</span>
+  <span class="pos">After Attention (Post-processing)</span>
+  <span class="arrow">←</span> Concatenated attention output [L, 4096] bf16
+  <span class="arrow">→</span> O = Concat(head_outputs) × Wo^T [L, 4096] bf16
+</div>
+
+<pre>
+// O = Concat(all 32 head outputs) × Wo^T
+// = [L, 4096] × [4096, 4096] = L × 4096 × 4096 MACs
+// For L=512: ~8.6 GMACs — same order as Q projection.
+// Also kept on host for v1.0.
+//
+// Weight: Wo [4096, 4096] bf16 = 32 MB.
+</pre>
+</div>
+
+<!-- --- Full Llama3 Layer Context --- -->
+<div class="module-card">
+<h3>15.6 Full Llama3.1-8B Layer — Where Everything Fits</h3>
+
+<div class="mermaid">
+graph TB
+    X["Hidden States X<br/>[L, 4096] bf16"]
+
+    subgraph PRE_NORM["Pre-Attention (Host)"]
+        RMS1["RMSNorm<br/>x / RMS(x) × γ"]
+    end
+
+    subgraph QKV["QKV Projection (Host)"]
+        QPROJ["Q = X_norm @ Wq^T<br/>[L, 4096]"]
+        KPROJ["K = X_norm @ Wk^T<br/>[L, 1024]"]
+        VPROJ["V = X_norm @ Wv^T<br/>[L, 1024]"]
+    end
+
+    subgraph ROPE["RoPE (Host)"]
+        QROPE["Rotate Q"]
+        KROPE["Rotate K"]
+    end
+
+    subgraph ATTENTION["Attention (FPGA — THIS IS WHAT WE BUILD)"]
+        GQA["GQA: 8 groups × (4Q + 1KV)<br/>FlashAttention + Online Softmax"]
+    end
+
+    subgraph POST["Post-Attention (Host)"]
+        OPROJ["Concat × Wo^T<br/>[L, 4096]"]
+        RESIDUAL["+ X (residual)"]
+    end
+
+    subgraph FFN["FFN (Out of Scope)"]
+        RMS2["RMSNorm"]
+        SWIGLU["SwiGLU FFN"]
+        RESIDUAL2["+ residual"]
+    end
+
+    X --> RMS1 --> QPROJ --> QROPE --> GQA
+    RMS1 --> KPROJ --> KROPE --> GQA
+    RMS1 --> VPROJ --> GQA
+    GQA --> OPROJ --> RESIDUAL --> RMS2 --> SWIGLU --> RESIDUAL2
+    X --> RESIDUAL
+    RESIDUAL --> RESIDUAL2
+</div>
+
+<div class="data-desc">
+<strong>Scope boundary:</strong> The FPGA accelerator focuses on the <strong>GQA Attention</strong> block
+(colored above). Everything else — RMSNorm, QKV projection, RoPE, output projection, FFN —
+resides on the host (ARM Cortex-A53 or software preprocessing).<br>
+This division is driven by arithmetic intensity: Attention's O(L²) memory pattern benefits
+most from custom dataflow hardware, while the O(L) linear layers can be handled by the CPU
+with acceptable performance.
+</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- 16. END-TO-END DATA FLOW TRACE -->
+<!-- ================================================================ -->
+<h2 id="sec-end2end">16. End-to-End Data Flow Trace (Single GQA Head, L=512)</h2>
+
+<div class="module-card">
+<h3>Complete Data Lifecycle</h3>
+
+<pre>
+<span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
+║                        PHASE 0: HOST PREPROCESSING                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝</span>
+
+<span style="color: var(--orange)">[Host ARM]</span> X [512, 4096] bf16
+<span style="color: var(--orange)">[Host ARM]</span>   → RMSNorm(X)
+<span style="color: var(--orange)">[Host ARM]</span>   → Q = X_norm @ Wq^T → [512, 4096] bf16 → <span style="color: var(--accent)">DDR:Q</span>
+<span style="color: var(--orange)">[Host ARM]</span>   → K = X_norm @ Wk^T → [512, 1024] bf16 → <span style="color: var(--accent)">DDR:K</span>
+<span style="color: var(--orange)">[Host ARM]</span>   → V = X_norm @ Wv^T → [512, 1024] bf16 → <span style="color: var(--accent)">DDR:V</span>
+<span style="color: var(--orange)">[Host ARM]</span>   → Apply RoPE to Q, K
+<span style="color: var(--orange)">[Host ARM]</span>   → Write base addresses to CSR
+
+<span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
+║                        PHASE 1: K/V LOAD (ONCE)                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝</span>
+
+<span style="color: var(--orange)">[Host]</span> Write CSR_STREAM_DEST=K, CSR_STREAM_LEN=131072 → trigger DMA
+<span style="color: var(--accent)">[DDR:K]</span> → AXIS MM2S → <span style="color: var(--green)">[kv_cache_ram: K]</span>  512×128×2B = 128 KB, ~8.5 μs
+<span style="color: var(--orange)">[Host]</span> Write CSR_STREAM_DEST=V, CSR_STREAM_LEN=131072 → trigger DMA
+<span style="color: var(--accent)">[DDR:V]</span> → AXIS MM2S → <span style="color: var(--green)">[kv_cache_ram: V]</span>  512×128×2B = 128 KB, ~8.5 μs
+
+<span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
+║                   PHASE 2: ATTENTION DOUBLE LOOP (16 Q_tiles × 8 KV_tiles)    ║
+╚══════════════════════════════════════════════════════════════════════════════╝</span>
+
+<span style="color: var(--purple)">[FSM]</span> → ST_ATTN_LOOP
+<span style="color: var(--purple)">[FSM]</span>   q_tile = 0..15:                           <span style="color: var(--muted)">// outer loop</span>
+
+<span style="color: var(--muted)">  // --- Q_tile Load ---</span>
+<span style="color: var(--accent)">  [DDR:Q]</span> → AXIS MM2S → <span style="color: var(--green)">[tile_buffer: Bank A]</span>  32×128×2B = 8 KB, ~0.5 μs
+
+<span style="color: var(--muted)">  // --- Softmax State Init ---</span>
+  <span style="color: var(--red)">[softmax_engine]</span> m[0..31] = -inf, l[0..31] = 0
+  <span style="color: var(--green)">[output_buffer]</span> O_acc[0..31][0..127] = 0
+
+  <span style="color: var(--purple)">[FSM]</span>   kv_tile = 0..7:                        <span style="color: var(--muted)">// inner loop</span>
+
+<span style="color: var(--muted)">    // --- K/V Tile Read from URAM ---</span>
+    <span style="color: var(--green)">[kv_cache_ram]</span> → K_tile[64][128] bf16  (read from URAM, ~10ns)
+    <span style="color: var(--green)">[kv_cache_ram]</span> → V_tile[64][128] bf16  (read from URAM, ~10ns)
+
+<span style="color: var(--muted)">    // --- Phase A: Q×K^T, 8 sub-blocks ---</span>
+    <span style="color: var(--green)">[tile_buffer]</span> → Q[0..15][0..127] bf16
+    <span style="color: var(--green)">[kv_cache_ram]</span> → K[0..15][0..127] bf16
+    <span style="color: var(--accent)">[attn_tile]</span> 16×16 MAC: Q×K^T → S_block[16][16] fp32  <span style="color: var(--muted)">// ~128 cycles</span>
+    <span style="color: var(--accent)">[attn_tile]</span> → S_tile streams to softmax  <span style="color: var(--muted)">// NOT stored in SRAM</span>
+
+<span style="color: var(--muted)">    // --- Scale + Mask + Online Softmax ---</span>
+    <span style="color: var(--red)">[softmax_engine]</span> S/√128 + causal_mask → S_scaled[16][16] fp32
+    <span style="color: var(--red)">[softmax_engine]</span> row_max = max(S_scaled, axis=1)  <span style="color: var(--muted)">// log₂(16)=4 cycle reduction</span>
+    <span style="color: var(--red)">[softmax_engine]</span> m_new = max(m, row_max)
+    <span style="color: var(--red)">[softmax_engine]</span> correction = exp(m - m_new)       <span style="color: var(--muted)">// 1 cycle EXP LUT</span>
+    <span style="color: var(--red)">[softmax_engine]</span> P = exp(S_scaled - m_new)          <span style="color: var(--muted)">// 1 cycle/element EXP LUT</span>
+    <span style="color: var(--red)">[softmax_engine]</span> l = l*correction + sum(P)          <span style="color: var(--muted)">// log₂(16)=4 cycle reduction</span>
+    <span style="color: var(--red)">[softmax_engine]</span> P_tile → streams to MAC Phase B
+
+<span style="color: var(--muted)">    // --- Phase B: P×V + Accumulate ---</span>
+    <span style="color: var(--accent)">[attn_tile]</span> P_tile[16][16] × V_tile[16][128] → ΔO[16][128] fp32
+    <span style="color: var(--accent)">[psum_accum]</span> O_acc = O_acc × correction + ΔO
+    <span style="color: var(--green)">[output_buffer]</span> ← O_acc updated
+
+  <span style="color: var(--muted)">// --- After all KV tiles: normalize + writeback ---</span>
+  <span style="color: var(--red)">[softmax_engine]</span> O = O_acc / l  →  O_tile[32][128] bf16
+  <span style="color: var(--green)">[output_buffer]</span> → AXIS S2MM → <span style="color: var(--accent)">[DDR:O]</span>  8 KB, ~0.5 μs
+
+<span style="color: var(--purple)">[FSM]</span> → ST_DONE → interrupt host
+
+<span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
+║                      PHASE 3: HOST POSTPROCESSING                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝</span>
+
+<span style="color: var(--orange)">[Host ARM]</span> Read O from DDR
+<span style="color: var(--orange)">[Host ARM]</span> Concat all 32 head outputs → [L, 4096]
+<span style="color: var(--orange)">[Host ARM]</span> O = Concat × Wo^T → [L, 4096]
+<span style="color: var(--orange)">[Host ARM]</span> Residual: X + O → feed to next layer
+
+<span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
+║                            TIMING SUMMARY (L=512, 200MHz)                      ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ K/V load:  256 KB / 15 GB/s ≈ 17 μs            (once per GQA group, 8× total) ║
+║ Per Q tile: Q_load(0.5μs) + 8×KV_tile(~82μs) + O_write(0.5μs) ≈ 83 μs       ║
+║ Per head:   16 Q_tiles × 83 μs ≈ 1.33 ms                                      ║
+║ Per group:  4 heads × 1.33 ms ≈ 5.3 ms                                        ║
+║ All groups: 8 groups × 5.3 ms ≈ 42.5 ms                                       ║
+║ Total (1 layer): ~43 ms                                                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Without K/V URAM Cache: ~33 ms/GQA group → ~264 ms/layer → 6× slower        ║
+╚══════════════════════════════════════════════════════════════════════════════╝</span>
+</pre>
+</div>
+
+<!-- ================================================================ -->
+<!-- 17. FILE TREE -->
+<!-- ================================================================ -->
+<h2 id="sec-filetree">17. Complete File Tree</h2>
+
+<div class="module-card">
+<pre>
+LARA/
+├── hw/
+│   ├── rtl/
+│   │   ├── <span class="badge badge-pkg">pkg</span>  attn_pkg.sv              ← All parameters (single source of truth)
+│   │   ├── <span class="badge badge-core">core</span> bf16_mac.sv              ← Atomic bf16 PE (256 instantiations)
+│   │   │      attn_tile.sv             ← 16×16 MAC array (time-multiplexed)
+│   │   │      softmax_engine.sv        ← Online Softmax (EXP LUT + reduction trees)
+│   │   │      psum_accum.sv            ← Partial sum accumulator
+│   │   │      attn_core.sv             ← Top-level FSM (FlashAttention double loop)
+│   │   ├── <span class="badge badge-mem">mem</span>  kv_cache_ram.sv           ← K/V URAM cache (multi-bank, full sequence)
+│   │   │      tile_buffer.sv           ← Q tile Ping-Pong buffer
+│   │   │      output_buffer.sv         ← O accumulator + output buffer
+│   │   ├── <span class="badge badge-axi">axi</span>  attn_axi_lite_slave.sv    ← AXI4-Lite CSR (control registers)
+│   │   │      attn_axi_stream_sink.sv  ← AXIS data receive (DDR→PL)
+│   │   │      attn_axi_stream_source.sv← AXIS result send (PL→DDR)
+│   │   └── <span class="badge badge-top">top</span>  attn_top.sv               ← Top-level wrapper + MUX
+│   ├── tb/
+│   │   ├── tb_bf16_mac.sv
+│   │   ├── tb_attn_tile.sv
+│   │   ├── tb_softmax.sv
+│   │   ├── tb_attn_head.sv
+│   │   └── tb_attn_e2e.sv
+│   ├── scripts/
+│   │   ├── run_tb_bf16_mac.sh
+│   │   ├── run_tb_attn_tile.sh
+│   │   ├── run_regression.sh
+│   │   └── vivado_build.tcl
+│   └── constraints/
+│       └── attn_soc.xdc
+│
+├── sw/
+│   ├── attention_golden.py         ← bf16 bit-accurate Golden Model
+│   ├── attn_driver.py              ← PYNQ driver (MMIO + DMA)
+│   ├── extract_weights.py          ← .pth checkpoint → .hex weight export
+│   ├── benchmark.py                ← Performance measurement
+│   └── tests/
+│       ├── test_golden_model.py
+│       └── test_attn_driver.py
+│
+└── docs/
+    ├── code_organization.html      ← THIS FILE
+    ├── architecture_diagram.html   ← Top-level architecture diagrams
+    ├── dataflow_diagram.html       ← Data flow + FSM details
+    ├── mac_array_analysis.html     ← MAC array dimension analysis
+    └── track-b-roadmap.md          ← Learning roadmap + competition plan
+</pre>
+</div>
+
+<!-- ================================================================ -->
+<!-- FOOTER -->
+<!-- ================================================================ -->
+<div class="note" style="margin-top: 48px;">
+<strong>Document Version:</strong> 1.0 — 2026-07-07<br>
+<strong>Competition:</strong> FPT'26 Track B — "Llama3-8B or models with consistent parameters"<br>
+<strong>Target Platform:</strong> Kria KV260 (Zynq UltraScale+, Without AI Cores)<br>
+<strong>Key References:</strong> FlashAttention (Dao et al., 2022), SWAT (DAC 2024),
+FSA/SystolicAttention (EPFL, 2025), FLASH-D (2025), H-FA (2025)
+</div>
+
+</body>
+</html>
