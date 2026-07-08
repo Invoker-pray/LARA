@@ -12,3 +12,27 @@ memory.txt
 .claude/
 .venv/
 
+# Simulation artifacts
+VV/simv*
+VV/*.log
+VV/*.vcd
+VV/*.fsdb
+VV/*.daidir
+VV/csrc/
+VV/DVEfiles/
+VV/ucli.key
+VV/data/*.hex
+
+# Synthesis artifacts
+hw/*.log
+hw/*.jou
+hw/*.dcp
+hw/*.bit
+hw/*.hwh
+hw/*.xclbin
+hw/vivado_*
+
+# OS files
+.DS_Store
+Thumbs.db
+
