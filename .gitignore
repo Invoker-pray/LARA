@@ -12,3 +12,28 @@ memory.txt
 .claude/
 .venv/
 
+# Validation directories (develop branch only — never on master)
+python_godel/
+VV/
+
+# Simulation artifacts
+*.log
+*.vcd
+*.fsdb
+*.daidir
+csrc/
+DVEfiles/
+ucli.key
+simv*
+
+# Synthesis artifacts
+*.jou
+*.dcp
+*.bit
+*.hwh
+*.xclbin
+vivado_*
+
+# OS files
+.DS_Store
+Thumbs.db
