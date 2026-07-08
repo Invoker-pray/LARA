@@ -21,7 +21,6 @@ VV/*.daidir
 VV/csrc/
 VV/DVEfiles/
 VV/ucli.key
-VV/data/*.hex
 
 # Synthesis artifacts
 hw/*.log
