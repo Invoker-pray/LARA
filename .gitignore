@@ -1,4 +1,10 @@
-# Python-generated files
+# ============================================================================
+# .gitignore — LARA Attention Accelerator (master branch)
+# ============================================================================
+# master = deployment source only (hw/, sw/, docs/).
+# Validation directories (python_godel/, VV/) NEVER exist on master.
+
+# Python
 __pycache__/
 *.py[oc]
 build/
@@ -7,12 +13,14 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
-memory.txt
-.claude/
 .venv/
+.venv
 
-# Validation directories (develop branch only — never on master)
+# Claude / IDE
+.claude/
+memory.txt
+
+# Validation directories (develop only)
 python_godel/
 VV/
 
@@ -25,6 +33,7 @@ csrc/
 DVEfiles/
 ucli.key
 simv*
+*.key
 
 # Synthesis artifacts
 *.jou
@@ -32,8 +41,16 @@ simv*
 *.bit
 *.hwh
 *.xclbin
-vivado_*
+vivado_*.log
+vivado_*.jou
+vivado_project/
+*.xsa
 
-# OS files
+# EDA tool artifacts
+novas.conf
+novas.rc
+verdiLog/
+
+# OS
 .DS_Store
 Thumbs.db
