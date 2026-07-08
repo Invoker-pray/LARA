@@ -4,6 +4,20 @@
 <meta charset="UTF-8">
 <title>LARA Code Organization — Complete Module Architecture</title>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#58a6ff',
+      primaryTextColor: '#c9d1d9',
+      lineColor: '#30363d',
+      fontSize: '14px'
+    },
+    flowchart: { useMaxWidth: true, htmlLabels: true },
+    stateDiagram: { useMaxWidth: true }
+  });
+</script>
 <style>
   :root {
     --bg: #0d1117;
@@ -327,7 +341,7 @@ All derived values use <code>localparam</code> computed from pkg parameters.
   <td><strong>Sign</strong></td><td>[15]</td><td>0=positive, 1=negative</td>
 </tr>
 <tr>
-  <td><strong>Exponent</strong></td><td>[14:7]</td><td>8-bit, bias=127. Range: 2⁻¹²⁷ to 2¹²⁸</td>
+  <td><strong>Exponent</strong></td><td>[14:7]</td><td>8-bit, bias=127. Range: 2<sup>-127</sup> to 2<sup>128</sup></td>
 </tr>
 <tr>
   <td><strong>Mantissa</strong></td><td>[6:0]</td><td>7-bit fractional. Implicit leading 1 → effective 8-bit precision</td>
@@ -336,13 +350,13 @@ All derived values use <code>localparam</code> computed from pkg parameters.
 
 <div class="bit-field">
 <span class="bit-sign">S</span>
-<span class="bit-exp">E₇E₆E₅E₄E₃E₂E₁E₀</span>
-<span class="bit-mant">M₆M₅M₄M₃M₂M₁M₀</span>
+<span class="bit-exp">E<sub>7</sub>E<sub>6</sub>E<sub>5</sub>E<sub>4</sub>E<sub>3</sub>E<sub>2</sub>E<sub>1</sub>E<sub>0</sub></span>
+<span class="bit-mant">M<sub>6</sub>M<sub>5</sub>M<sub>4</sub>M<sub>3</sub>M<sub>2</sub>M<sub>1</sub>M<sub>0</sub></span>
 </div>
 
 <div class="data-desc">
 <strong>Value = (-1)^S × 2^(E-127) × 1.M</strong><br>
-Dynamic range ≈ fp32 (±3.4×10³⁸), precision ≈ 3 significant decimal digits<br>
+Dynamic range &asymp; fp32 (&plusmn;3.4&times;10<sup>38</sup>), precision &asymp; 3 significant decimal digits<br>
 <strong>Key property:</strong> bf16 → fp32 conversion is trivial — pad mantissa with 16 zeros. No rounding needed.<br>
 <strong>Storage:</strong> 2 bytes per element. Alignment: 16-bit boundary in memory.<br>
 <strong>Special values:</strong> E=0xFF, M≠0 → NaN; E=0xFF, M=0 → ±∞; E=0, M=0 → ±0; E=0, M≠0 → subnormal
@@ -639,7 +653,7 @@ for each S[i][j]:
 
 // Step 2: Find row-wise max (over this sub-block)
 for each row i:
-    row_max[i] = max(S_scaled[i][0..TILE_COLS-1])  // reduction tree, log₂(TILE_COLS) depth
+    row_max[i] = max(S_scaled[i][0..TILE_COLS-1])  // reduction tree, log<sub>2</sub>(TILE_COLS) depth
 
 // Step 3: Update running max
 m_new[i] = max(m[i], row_max[i])
@@ -678,6 +692,8 @@ At the end: l[i] = Σ(j=0..Tk-1) exp(S[i][j] - m_final[i]) — the softmax denom
 P_block × V_block after correcting the old O_acc by exp(m_old - m_new).
 At the end: O_acc[i][:] = Σ(j) P[i][j] × V[j][:] — the unnormalized attention output.<br><br>
 <strong>P_tile [16 × 16 × fp32]:</strong> The softmax output for this sub-block.
+</div>
+
 <h4>EXP Function Implementation</h4>
 <pre>
 Method: LUT + Linear Interpolation (recommended for v1.0)
@@ -701,7 +717,6 @@ Resource: 1 BRAM (18Kb, dual-port → 2 reads/cycle for 2 rows)
 This requires: 16 max-reduction trees, 16 sum-reduction trees, 16 EXP LUT ports (or time-multiplexed).
 This hardware cost is WHY the MAC array row count is capped at 16 — doubling to 32 would double
 the Softmax hardware, becoming the new bottleneck instead of DSP count.
-</div>
 </div>
 </div>
 
@@ -1277,12 +1292,12 @@ the rope_engine can be inserted between DDR load and the MAC array.
 </div>
 
 <pre>
-// RMSNorm(x) = x / sqrt(mean(x²) + ε) × γ
+// RMSNorm(x) = x / sqrt(mean(x<sup>2</sup>) + &epsilon;) &times; &gamma;
 // where γ is a learnable scale parameter [4096] bf16
 //
 // Hardware implementation:
-// Step 1: Square: x² for each element (bf16 → fp32)
-// Step 2: Reduce sum: Σ(x²) across 4096 elements → 1 fp32 value
+// Step 1: Square: x<sup>2</sup> for each element (bf16 &rarr; fp32)
+// Step 2: Reduce sum: &Sigma;(x<sup>2</sup>) across 4096 elements &rarr; 1 fp32 value
 // Step 3: Mean: sum/4096 + ε
 // Step 4: Inverse sqrt: 1/√mean (LUT or Newton iteration)
 // Step 5: Scale: x × inv_sqrt × γ → bf16
@@ -1363,7 +1378,7 @@ graph TB
 <strong>Scope boundary:</strong> The FPGA accelerator focuses on the <strong>GQA Attention</strong> block
 (colored above). Everything else — RMSNorm, QKV projection, RoPE, output projection, FFN —
 resides on the host (ARM Cortex-A53 or software preprocessing).<br>
-This division is driven by arithmetic intensity: Attention's O(L²) memory pattern benefits
+This division is driven by arithmetic intensity: Attention's O(L<sup>2</sup>) memory pattern benefits
 most from custom dataflow hardware, while the O(L) linear layers can be handled by the CPU
 with acceptable performance.
 </div>
@@ -1427,11 +1442,11 @@ with acceptable performance.
 
 <span style="color: var(--muted)">    // --- Scale + Mask + Online Softmax ---</span>
     <span style="color: var(--red)">[softmax_engine]</span> S/√128 + causal_mask → S_scaled[16][16] fp32
-    <span style="color: var(--red)">[softmax_engine]</span> row_max = max(S_scaled, axis=1)  <span style="color: var(--muted)">// log₂(16)=4 cycle reduction</span>
+    <span style="color: var(--red)">[softmax_engine]</span> row_max = max(S_scaled, axis=1)  <span style="color: var(--muted)">// log<sub>2</sub>(16)=4 cycle reduction</span>
     <span style="color: var(--red)">[softmax_engine]</span> m_new = max(m, row_max)
     <span style="color: var(--red)">[softmax_engine]</span> correction = exp(m - m_new)       <span style="color: var(--muted)">// 1 cycle EXP LUT</span>
     <span style="color: var(--red)">[softmax_engine]</span> P = exp(S_scaled - m_new)          <span style="color: var(--muted)">// 1 cycle/element EXP LUT</span>
-    <span style="color: var(--red)">[softmax_engine]</span> l = l*correction + sum(P)          <span style="color: var(--muted)">// log₂(16)=4 cycle reduction</span>
+    <span style="color: var(--red)">[softmax_engine]</span> l = l*correction + sum(P)          <span style="color: var(--muted)">// log<sub>2</sub>(16)=4 cycle reduction</span>
     <span style="color: var(--red)">[softmax_engine]</span> P_tile → streams to MAC Phase B
 
 <span style="color: var(--muted)">    // --- Phase B: P×V + Accumulate ---</span>
