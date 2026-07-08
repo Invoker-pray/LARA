@@ -43,6 +43,10 @@ module bf16_mac
     output logic [FP32_W-1:0]    out_fp32
 );
 
+  // Suppress unused-warning when C4_MUL_PIPE=0 (combinational mode)
+  logic _unused_clk_rst;
+  assign _unused_clk_rst = |{clk, rst_n};
+
   // ==================================================================
   // Stage 1: bf16 → fp32 Expansion + Multiply
   // ==================================================================

@@ -62,21 +62,18 @@ module tb_bf16_mac;
     logic [31:0] c_val;
     logic [31:0] g_val;
 
-    fd = $fopen("VV/data/bf16_mac_vectors.hex", "r");
+    fd = $fopen("data/bf16_mac_vectors.hex", "r");
     if (fd == 0) begin
-      $display("ERROR: Cannot open VV/data/bf16_mac_vectors.hex");
+      $display("ERROR: Cannot open data/bf16_mac_vectors.hex");
       $display("  Run: python python_godel/attention_golden.py --export-tb-data --module bf16_mac");
-      $fatal;
+      $finish;
     end
 
-    // Skip header line
-    $fgets(fd);
-
     for (i = 0; i < N_VECTORS; i++) begin
-      scan_result = $fscanf(fd, "%h %h %h %h\n", a_val, b_val, c_val, g_val);
+      scan_result = $fscanf(fd, "%h %h %h %h", a_val, b_val, c_val, g_val);
       if (scan_result != 4) begin
-        $display("ERROR: Failed to read vector %0d from hex file (got %0d values)", i, scan_result);
-        $fatal;
+        $display("ERROR: Failed to read vector %0d (scan_result=%0d)", i, scan_result);
+        $finish;
       end
       vec_a[i]      = a_val;
       vec_b[i]      = b_val;

@@ -1,4 +1,8 @@
-# Python-generated files
+# ============================================================================
+# .gitignore — LARA Attention Accelerator (develop branch)
+# ============================================================================
+
+# Python
 __pycache__/
 *.py[oc]
 build/
@@ -7,31 +11,51 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
-memory.txt
-.claude/
 .venv/
+.venv
 
-# Simulation artifacts
-VV/simv*
-VV/*.log
-VV/*.vcd
-VV/*.fsdb
-VV/*.daidir
-VV/csrc/
-VV/DVEfiles/
-VV/ucli.key
+# Claude / IDE
+.claude/
+memory.txt
 
-# Synthesis artifacts
-hw/*.log
-hw/*.jou
-hw/*.dcp
-hw/*.bit
-hw/*.hwh
-hw/*.xclbin
-hw/vivado_*
+# ============================================================================
+# Simulation artifacts (VCS / Verilator)
+# ============================================================================
+VV/sim/
+simv
+simv*
+*.daidir
+csrc/
+DVEfiles/
+ucli.key
+*.log
+*.vcd
+*.fsdb
+*.key
 
-# OS files
+# ============================================================================
+# Synthesis artifacts (Vivado)
+# ============================================================================
+*.jou
+*.dcp
+*.bit
+*.hwh
+*.xclbin
+vivado_*.log
+vivado_*.jou
+vivado_*.debug
+vivado_project/
+*.xsa
+
+# ============================================================================
+# EDA tool artifacts
+# ============================================================================
+novas.conf
+novas.rc
+verdiLog/
+
+# ============================================================================
+# OS
+# ============================================================================
 .DS_Store
 Thumbs.db
-

@@ -55,6 +55,10 @@ package attn_pkg;
   parameter bit  TILE_MAC_REUSE    = 1'b1;   // Time-multiplex MAC for Phase A+B
   parameter bit  C4_MUL_PIPE       = 1'b0;   // DSP48E2 M-register pipeline stage
 
+  // Pipeline depth parameters (higher = better timing, more latency)
+  parameter int  MAC_PIPE_STAGES    = 2;       // MAC array pipeline: {1=comb, 2=reg products+reduction}
+  parameter int  SOFTMAX_PIPE_STAGES = 2;      // Softmax pipeline: {2, 3} stages
+
   // ==================================================================
   // 3. Data Widths — Data Type Bit Widths
   // ==================================================================
@@ -154,11 +158,18 @@ package attn_pkg;
   parameter int EXP_LUT_DEPTH  = (1 << EXP_LUT_ADDR_W);    // = 1024
   parameter int EXP_LUT_DATA_W = FP32_W;                   // fp32 output
 
+  // Online Softmax constants
+  // sqrt(128) ≈ 11.313708, 1/sqrt(128) ≈ 0.088388
+  localparam real   HEAD_DIM_SQRT_REAL = 11.31370849898476;
+  localparam real   INV_SQRT_D_REAL    = 0.08838834764831845;
+  localparam [31:0] INV_SQRT_D_FP32    = 32'h3DB504F3;       // 1/sqrt(128) in fp32
+
   // ==================================================================
   // 7. CSR Address Map — AXI4-Lite Control/Status Registers
   // ==================================================================
   // 14-bit address space (16 KB). Organized by function groups.
   // All addresses must be 4-byte aligned (AXI4-Lite requirement).
+  parameter int CSR_ADDR_W = 14;
 
   // --- Control & Status (0x000–0x0FF) ---
   parameter logic [13:0] CSR_CTRL            = 14'h000;  // [0] start, [1] soft_reset, [31:2] reserved

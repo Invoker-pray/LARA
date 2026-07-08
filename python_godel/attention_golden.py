@@ -617,7 +617,6 @@ def export_bf16_mac_test_vectors(output_dir: str = "VV/data/"):
 
     filepath = os.path.join(output_dir, "bf16_mac_vectors.hex")
     with open(filepath, 'w') as f:
-        f.write("# bf16_mac test vectors: a_bf16 b_bf16 c_fp32 expected_fp32\n")
         for i in range(n_vectors):
             a_u16 = a[i].view(np.uint32) >> 16
             b_u16 = b[i].view(np.uint32) >> 16
@@ -626,6 +625,47 @@ def export_bf16_mac_test_vectors(output_dir: str = "VV/data/"):
             f.write(f"{a_u16:04x} {b_u16:04x} {c_u32:08x} {e_u32:08x}\n")
 
     print(f"Exported {n_vectors} bf16_mac test vectors → {filepath}")
+    return filepath
+
+
+def export_attn_tile_test_vectors(output_dir: str = "VV/data/"):
+    """Generate golden test vectors for attn_tile + psum_accum verification.
+
+    Format (hex):
+      Line 1: 16 bf16 Q values (Q[0..15])
+      Line 2: 16 bf16 K values (K[0..15])
+      Lines 3-18: 16×16 fp32 S matrix = Q_i × K_j (row-major)
+
+    attn_tile computes col_out[j] = Σ_i Q_i × K_j for each column j,
+    which is the column reduction of the outer product matrix.
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    np.random.seed(42)
+    # Generate 16 Q and 16 K values in bf16
+    Q_bf16 = fp32_to_bf16(np.random.randn(16).astype(np.float32) * 0.5)
+    K_bf16 = fp32_to_bf16(np.random.randn(16).astype(np.float32) * 0.5)
+
+    # Compute outer product Q × K^T in fp32
+    Q_fp32 = Q_bf16.astype(np.float32)
+    K_fp32 = K_bf16.astype(np.float32)
+    S_fp32 = np.outer(Q_fp32, K_fp32)  # [16, 16] = Q_i × K_j
+
+    filepath = os.path.join(output_dir, "attn_tile_vectors.hex")
+    with open(filepath, 'w') as f:
+        # Line 1: Q values
+        q_hex = ' '.join(f"{(Q_bf16[i].view(np.uint32) >> 16):04x}" for i in range(16))
+        f.write(q_hex + '\n')
+        # Line 2: K values
+        k_hex = ' '.join(f"{(K_bf16[i].view(np.uint32) >> 16):04x}" for i in range(16))
+        f.write(k_hex + '\n')
+        # Lines 3-18: S matrix (row-major)
+        for i in range(16):
+            s_hex = ' '.join(f"{S_fp32[i, j].view(np.uint32):08x}" for j in range(16))
+            f.write(s_hex + '\n')
+
+    print(f"Exported attn_tile golden data → {filepath}")
     return filepath
 
 
@@ -673,7 +713,7 @@ def main():
     parser.add_argument('--export-tb-data', action='store_true',
                         help='Export test vectors for RTL testbenches')
     parser.add_argument('--module', type=str, default='all',
-                        choices=['all', 'bf16_mac', 'attention'],
+                        choices=['all', 'bf16_mac', 'attn_tile', 'attention'],
                         help='Module to export test vectors for')
     parser.add_argument('--output-dir', type=str, default='VV/data/',
                         help='Output directory for exported test data')
@@ -738,6 +778,8 @@ def main():
         print("=" * 60)
         if args.module in ('all', 'bf16_mac'):
             export_bf16_mac_test_vectors(args.output_dir)
+        if args.module in ('all', 'attn_tile'):
+            export_attn_tile_test_vectors(args.output_dir)
         if args.module in ('all', 'attention'):
             export_attention_test_data(args.seq_len, args.output_dir)
         print()

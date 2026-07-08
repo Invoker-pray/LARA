@@ -1,15 +1,15 @@
 #!/bin/bash
 # ============================================================================
-# run_tb_bf16_mac.sh — VCS simulation for bf16 MAC unit test
+# run_tb_psum_accum.sh — VCS simulation for psum_accum standalone test
 # ============================================================================
-# Usage: cd LARA && bash VV/scripts/run_tb_bf16_mac.sh
-# Output: VV/sim/tb_bf16_mac/
+# Usage: cd LARA && bash VV/scripts/run_tb_psum_accum.sh
+# Output: VV/sim/tb_psum_accum/
 # ============================================================================
 
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 set -e
 
-TB_NAME="tb_bf16_mac"
+TB_NAME="tb_psum_accum"
 SIM_DIR="VV/sim/${TB_NAME}"
 mkdir -p "${SIM_DIR}"
 
@@ -17,27 +17,18 @@ mkdir -p "${SIM_DIR}"
 WRAPPER_DIR="$(pwd)/${SIM_DIR}/.gcc_wrapper"
 mkdir -p "${WRAPPER_DIR}"
 REAL_GCC="$(command -v gcc)"
-cat > "${WRAPPER_DIR}/gcc" << EOF
+cat > "${WRAPPER_DIR}/gcc" << GCCEOF
 #!/bin/bash
 exec ${REAL_GCC} -Wno-error=implicit-function-declaration "\$@"
-EOF
+GCCEOF
 chmod +x "${WRAPPER_DIR}/gcc"
 export PATH="${WRAPPER_DIR}:${PATH}"
-
-# Generate test vectors if missing
-if [ ! -f "VV/data/bf16_mac_vectors.hex" ]; then
-    echo "[Pre] Generating golden test vectors..."
-    python3 python_godel/attention_golden.py --export-tb-data --module bf16_mac
-fi
 
 echo "============================================================"
 echo "Compiling ${TB_NAME} with VCS..."
 echo "============================================================"
 
 cd "${SIM_DIR}"
-
-# Symlink to data directory
-ln -sf ../../../VV/data data
 
 vcs -full64 -sverilog \
     -timescale=1ns/1ps \
@@ -46,7 +37,7 @@ vcs -full64 -sverilog \
     -l compile.log \
     +incdir+../../../hw/rtl/pkg \
     ../../../hw/rtl/pkg/attn_pkg.sv \
-    ../../../hw/rtl/core/bf16_mac.sv \
+    ../../../hw/rtl/core/psum_accum.sv \
     ../../../VV/tb/${TB_NAME}.sv \
     -o simv
 

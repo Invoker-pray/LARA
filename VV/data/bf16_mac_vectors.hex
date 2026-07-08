@@ -1,4 +1,3 @@
-# bf16_mac test vectors: a_bf16 b_bf16 c_fp32 expected_fp32
 bf9f 3efa 3f2a0000 3d6ba000
 be85 3fcb bf0a0000 bf737700
 3ec4 bf2c 3f540000 3f122800

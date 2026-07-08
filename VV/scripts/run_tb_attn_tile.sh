@@ -1,15 +1,15 @@
 #!/bin/bash
 # ============================================================================
-# run_tb_bf16_mac.sh — VCS simulation for bf16 MAC unit test
+# run_tb_attn_tile.sh — VCS simulation for attn_tile MAC array test
 # ============================================================================
-# Usage: cd LARA && bash VV/scripts/run_tb_bf16_mac.sh
-# Output: VV/sim/tb_bf16_mac/
+# Usage: cd LARA && bash VV/scripts/run_tb_attn_tile.sh
+# Output: VV/sim/tb_attn_tile/
 # ============================================================================
 
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 set -e
 
-TB_NAME="tb_bf16_mac"
+TB_NAME="tb_attn_tile"
 SIM_DIR="VV/sim/${TB_NAME}"
 mkdir -p "${SIM_DIR}"
 
@@ -25,9 +25,9 @@ chmod +x "${WRAPPER_DIR}/gcc"
 export PATH="${WRAPPER_DIR}:${PATH}"
 
 # Generate test vectors if missing
-if [ ! -f "VV/data/bf16_mac_vectors.hex" ]; then
+if [ ! -f "VV/data/attn_tile_vectors.hex" ]; then
     echo "[Pre] Generating golden test vectors..."
-    python3 python_godel/attention_golden.py --export-tb-data --module bf16_mac
+    python3 python_godel/attention_golden.py --export-tb-data --module attn_tile
 fi
 
 echo "============================================================"
@@ -46,7 +46,7 @@ vcs -full64 -sverilog \
     -l compile.log \
     +incdir+../../../hw/rtl/pkg \
     ../../../hw/rtl/pkg/attn_pkg.sv \
-    ../../../hw/rtl/core/bf16_mac.sv \
+    ../../../hw/rtl/core/attn_tile.sv \
     ../../../VV/tb/${TB_NAME}.sv \
     -o simv
 
