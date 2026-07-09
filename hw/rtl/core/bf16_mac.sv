@@ -62,6 +62,7 @@ module bf16_mac
   assign b_fp32 = {b_bf16, 16'b0};
 
   // --- bf16 Multiply (DSP48E2-inferable) ---
+  (* use_dsp = "yes" *) // Force DSP48E2 inference for Vivado synthesis
   // Mantissa: 8-bit × 8-bit → 16-bit product fits in DSP48E2 27×18 mult.
   // Exponent: 8-bit + 8-bit - 127 in LUT.
   // Sign: XOR in LUT.

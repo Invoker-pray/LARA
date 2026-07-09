@@ -33,8 +33,8 @@ module tile_buffer
 
   localparam int BUF_ELEMS = TILE_Q * HEAD_DIM;  // 32 × 128 = 4096
 
-  logic [BF16_W-1:0] buf0 [0:BUF_ELEMS-1];
-  logic [BF16_W-1:0] buf1 [0:BUF_ELEMS-1];
+  (* ram_style = "block" *) logic [BF16_W-1:0] buf0 [0:BUF_ELEMS-1];
+  (* ram_style = "block" *) logic [BF16_W-1:0] buf1 [0:BUF_ELEMS-1];
 
   // Write counters
   logic [11:0] wr_cnt;  // 0..4095

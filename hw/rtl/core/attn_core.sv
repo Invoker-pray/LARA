@@ -55,8 +55,10 @@ module attn_core
     output logic        error,           // sticky: illegal config detected
 
     // --- Performance Counters ---
-    output logic [31:0] cycle_cnt,
-    output logic [31:0] mac_cycles
+    output logic [31:0] cycle_cnt,       // total cycles from start to done
+    output logic [31:0] mac_cycles,      // cycles where MAC array is active
+    output logic [31:0] stall_cycles,    // cycles waiting for DMA/memory
+    output logic        perf_valid       // pulse when performance data is ready
 );
 
   attn_state_t state, next_state;
@@ -118,13 +120,30 @@ module attn_core
   // ==================================================================
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      cycle_cnt  <= 32'd0;
-      mac_cycles <= 32'd0;
+      cycle_cnt    <= 32'd0;
+      mac_cycles   <= 32'd0;
+      stall_cycles <= 32'd0;
+      perf_valid   <= 1'b0;
     end else begin
-      if (state == ST_IDLE) cycle_cnt <= 32'd0;
-      else cycle_cnt <= cycle_cnt + 32'd1;
+      if (state == ST_IDLE) begin
+        cycle_cnt    <= 32'd0;
+        mac_cycles   <= 32'd0;
+        stall_cycles <= 32'd0;
+      end else begin
+        cycle_cnt <= cycle_cnt + 32'd1;
+      end
       if (state == ST_QK_DOT || state == ST_AV_DOT)
         mac_cycles <= mac_cycles + 32'd1;
+      // Stall cycles: waiting for external done signals
+      if ((state == ST_LOAD_KV && !kv_load_done) ||
+          (state == ST_Q_INIT  && !q_load_done)  ||
+          (state == ST_WRITE_O && !o_write_done))
+        stall_cycles <= stall_cycles + 32'd1;
+      // Perf valid pulse at DONE
+      if (state == ST_DONE)
+        perf_valid <= 1'b1;
+      else
+        perf_valid <= 1'b0;
     end
   end
 

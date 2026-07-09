@@ -53,7 +53,7 @@ package attn_pkg;
 
   parameter int  TILE_SPLIT_FACTOR = 2;      // Column split factor {1, 2, 4}
   parameter bit  TILE_MAC_REUSE    = 1'b1;   // Time-multiplex MAC for Phase A+B
-  parameter bit  C4_MUL_PIPE       = 1'b0;   // DSP48E2 M-register pipeline stage
+  parameter bit  C4_MUL_PIPE       = 1'b1;   // DSP48E2 M-register: 1=registered (≥100MHz), 0=combinational (≤60MHz)
 
   // Pipeline depth parameters (higher = better timing, more latency)
   parameter int  MAC_PIPE_STAGES    = 2;       // MAC array pipeline: {1=comb, 2=reg products+reduction}

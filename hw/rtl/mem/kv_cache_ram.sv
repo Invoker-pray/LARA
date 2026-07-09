@@ -35,7 +35,7 @@ module kv_cache_ram
   localparam int TOTAL_ELEMS = MAX_SEQ_LEN * HEAD_DIM;  // 2048 × 128 = 262144
 
   // Single-port write, multi-port read (TILE_KV parallel reads)
-  logic [BF16_W-1:0] mem [0:TOTAL_ELEMS-1];
+  (* ram_style = "block" *) logic [BF16_W-1:0] mem [0:TOTAL_ELEMS-1];
 
   // ==================================================================
   // Write Logic
