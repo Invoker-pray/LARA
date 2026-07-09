@@ -21,25 +21,26 @@ module tile_buffer
     // Read port (to MAC array)
     input  logic                       rd_en,
     input  logic [4:0]                 rd_row,        // Q row within tile (0..TILE_Q-1)
+    input  logic [4:0]                 rd_row_start,  // block row base for parallel read
     input  logic [6:0]                 rd_dim,        // head-dim index (0..HEAD_DIM-1)
     output logic [BF16_W-1:0]          rd_data,
+    output logic [BF16_W-1:0]          rd_block_data [TILE_ROWS],
 
-    // Buffer select (controlled by FSM)
-    input  logic                       buf_sel,       // 0=write to buf0/read from buf1, 1=write to buf1/read from buf0
+    // Explicit ping-pong bank control
+    input  logic                       wr_bank_sel,   // bank receiving current streamed Q tile
+    input  logic                       rd_bank_sel,   // bank feeding current compute tile
 
     // Tile boundary
-    output logic                       tile_ready     // high when current write buffer is full
+    output logic                       bank_ready     // high when current write bank is full
 );
 
   localparam int BUF_ELEMS = TILE_Q * HEAD_DIM;  // 32 × 128 = 4096
 
-  logic [BF16_W-1:0] buf0 [0:BUF_ELEMS-1];
-  logic [BF16_W-1:0] buf1 [0:BUF_ELEMS-1];
+  (* ram_style = "block" *) logic [BF16_W-1:0] buf0 [0:BUF_ELEMS-1];
+  (* ram_style = "block" *) logic [BF16_W-1:0] buf1 [0:BUF_ELEMS-1];
 
   // Write counters
   logic [11:0] wr_cnt;  // 0..4095
-  logic        wr_buf_sel;  // which buffer we're writing to
-
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       wr_cnt <= 12'd0;
@@ -54,7 +55,7 @@ module tile_buffer
   // Write logic
   always_ff @(posedge clk) begin
     if (wr_en) begin
-      if (!buf_sel)
+      if (!wr_bank_sel)
         buf0[wr_cnt] <= wr_data;
       else
         buf1[wr_cnt] <= wr_data;
@@ -64,14 +65,22 @@ module tile_buffer
   // Read logic: read from OTHER buffer
   always_comb begin
     rd_data = 16'd0;
+    for (int bri = 0; bri < TILE_ROWS; bri++)
+      rd_block_data[bri] = 16'd0;
+
     if (rd_en) begin
-      if (!buf_sel)
-        rd_data = buf1[rd_row * HEAD_DIM + rd_dim];  // writing buf0, reading buf1
-      else
-        rd_data = buf0[rd_row * HEAD_DIM + rd_dim];  // writing buf1, reading buf0
+      if (!rd_bank_sel) begin
+        rd_data = buf0[rd_row * HEAD_DIM + rd_dim];
+        for (int bri = 0; bri < TILE_ROWS; bri++)
+          rd_block_data[bri] = buf0[(rd_row_start + bri[4:0]) * HEAD_DIM + rd_dim];
+      end else begin
+        rd_data = buf1[rd_row * HEAD_DIM + rd_dim];
+        for (int bri = 0; bri < TILE_ROWS; bri++)
+          rd_block_data[bri] = buf1[(rd_row_start + bri[4:0]) * HEAD_DIM + rd_dim];
+      end
     end
   end
 
-  assign tile_ready = (wr_cnt == BUF_ELEMS - 1);
+  assign bank_ready = (wr_cnt == BUF_ELEMS - 1);
 
 endmodule

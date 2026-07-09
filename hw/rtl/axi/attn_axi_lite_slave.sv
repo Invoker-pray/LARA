@@ -44,6 +44,9 @@ module attn_axi_lite_slave
     output logic [15:0]            seq_len,
     output logic [2:0]             gqa_group,
     output logic [1:0]             q_head,
+    output logic [1:0]             stream_dest,
+    output logic [31:0]            stream_len,
+    output logic [31:0]            result_len,
     input  logic                   done,
     input  logic [31:0]            cycle_cnt,
     input  logic [31:0]            mac_cycles
@@ -77,6 +80,8 @@ module attn_axi_lite_slave
     if (!rst_n) begin
       s_axi_bvalid <= 1'b0;
       s_axi_bresp  <= 2'b00;
+      for (int i = 0; i < 16; i++)
+        reg_file[i] <= 32'd0;
     end else begin
       if (aw_acked && w_acked && !s_axi_bvalid) begin
         s_axi_bvalid <= 1'b1;
@@ -88,12 +93,12 @@ module attn_axi_lite_slave
 
       // Status register updates (read-only from host perspective)
       if (done)
-        reg_file[CSR_STATUS][0] <= 1'b1;
+        reg_file[CSR_STATUS[5:2]][0] <= 1'b1;
       if (start)
-        reg_file[CSR_STATUS][0] <= 1'b0;
-      reg_file[CSR_STATUS][3:1] <= 3'd0;
-      reg_file[CSR_PERF_CYCLES] <= cycle_cnt;
-      reg_file[CSR_PERF_STALLS] <= mac_cycles;
+        reg_file[CSR_STATUS[5:2]][0] <= 1'b0;
+      reg_file[CSR_STATUS[5:2]][3:1] <= 3'd0;
+      reg_file[CSR_PERF_CYCLES[5:2]] <= cycle_cnt;
+      reg_file[CSR_PERF_STALLS[5:2]] <= mac_cycles;
     end
   end
 
@@ -121,10 +126,13 @@ module attn_axi_lite_slave
   end
 
   // Map registers to control signals
-  assign start     = reg_file[CSR_CTRL][0];
-  assign seq_len   = reg_file[CSR_SEQ_LEN][15:0];
-  assign gqa_group = reg_file[CSR_HEAD_IDX][2:0];
-  assign q_head    = reg_file[CSR_HEAD_IDX][1:0];
+  assign start     = reg_file[CSR_CTRL[5:2]][0];
+  assign seq_len   = reg_file[CSR_SEQ_LEN[5:2]][15:0];
+  assign gqa_group = reg_file[CSR_HEAD_IDX[5:2]][4:2];
+  assign q_head    = reg_file[CSR_HEAD_IDX[5:2]][1:0];
+  assign stream_dest = reg_file[CSR_STREAM_DEST[5:2]][1:0];
+  assign stream_len  = reg_file[CSR_STREAM_LEN[5:2]];
+  assign result_len  = reg_file[CSR_RESULT_LEN[5:2]];
 
   // Status registers (merged into write-response always_ff to avoid
   // multiple driver conflict)

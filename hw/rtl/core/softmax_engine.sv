@@ -43,6 +43,13 @@ module softmax_engine
     input  logic                           causal_mask_en, // enable causal masking
     input  logic [15:0]                    q_tile_start,   // absolute Q row start index
     input  logic [15:0]                    kv_tile_start,  // absolute K col start index
+    input  logic [4:0]                     active_rows,    // valid rows in this 16x16 block
+    input  logic [4:0]                     active_cols,    // valid cols in this 16x16 block
+
+    // --- Optional State Context Load (for time-multiplexed microtiles) ---
+    input  logic                           state_load,
+    input  logic [FP32_W-1:0]              state_m_in [TILE_ROWS],
+    input  logic [FP32_W-1:0]              state_l_in [TILE_ROWS],
 
     // --- Running State (maintained across KV tiles) ---
     output logic [FP32_W-1:0]              m_state [TILE_ROWS],   // running max per row
@@ -75,7 +82,7 @@ module softmax_engine
   initial begin
     integer fd;
     fd = $fopen("data/exp_lut.hex", "r");
-    if (fd) begin
+    if (fd != 0) begin
       for (int li = 0; li < LUT_DEPTH; li++)
         $fscanf(fd, "%h", exp_lut[li]);
       $fclose(fd);
@@ -129,6 +136,7 @@ module softmax_engine
   logic                           kv_tile_first_r, kv_tile_last_r;
   logic                           causal_mask_en_r;
   logic [15:0]                    q_tile_start_r, kv_tile_start_r;
+  logic [4:0]                     active_rows_r, active_cols_r;
 
   // Stage 1 computed values
   shortreal row_max_s1   [TILE_ROWS];
@@ -148,14 +156,25 @@ module softmax_engine
 
   // sqrt(128) ≈ 11.3137, 1/sqrt(128) ≈ 0.088388 (from pkg: INV_SQRT_D_FP32)
 
+`ifndef SYNTHESIS
   always_comb begin
     integer ri, ci;
+    logic row_valid, col_valid;
     for (ri = 0; ri < TILE_ROWS; ri++) begin
-      // Find row max over TILE_COLS
+      row_valid = (ri < active_rows);
       row_max_s1[ri] = -1.0e30; // -inf approximation
       for (ci = 0; ci < TILE_COLS; ci++) begin
-        S_scaled[ri][ci] = $bitstoshortreal(s_data[ri][ci])
-                         * $bitstoshortreal(INV_SQRT_D_FP32);
+        col_valid = (ci < active_cols);
+        if (row_valid && col_valid) begin
+          S_scaled[ri][ci] = $bitstoshortreal(s_data[ri][ci])
+                           * $bitstoshortreal(INV_SQRT_D_FP32);
+        end else begin
+          S_scaled[ri][ci] = -1.0e30;
+        end
+        if (row_valid && col_valid && causal_mask_en) begin
+          if ((q_tile_start + 16'(ri)) < (kv_tile_start + 16'(ci)))
+            S_scaled[ri][ci] = -1.0e30;
+        end
         if (S_scaled[ri][ci] > row_max_s1[ri])
           row_max_s1[ri] = S_scaled[ri][ci];
       end
@@ -174,6 +193,8 @@ module softmax_engine
       causal_mask_en_r <= 1'b0;
       q_tile_start_r   <= 16'd0;
       kv_tile_start_r  <= 16'd0;
+      active_rows_r    <= 5'd0;
+      active_cols_r    <= 5'd0;
       for (ri = 0; ri < TILE_ROWS; ri++) begin
         m_old_s1[ri] <= 0.0;
         for (ci = 0; ci < TILE_COLS; ci++)
@@ -186,6 +207,8 @@ module softmax_engine
       causal_mask_en_r <= causal_mask_en;
       q_tile_start_r   <= q_tile_start;
       kv_tile_start_r  <= kv_tile_start;
+      active_rows_r    <= active_rows;
+      active_cols_r    <= active_cols;
       for (ri = 0; ri < TILE_ROWS; ri++) begin
         m_old_s1[ri] <= $bitstoshortreal(m_state[ri]);
         for (ci = 0; ci < TILE_COLS; ci++)
@@ -201,11 +224,13 @@ module softmax_engine
 
   always_comb begin
     integer ri, ci;
+    logic row_valid, col_valid;
     shortreal m_old_val, row_max_val, m_new_val;
     shortreal correction_val, l_old_val;
     shortreal row_exp_sum;
 
     for (ri = 0; ri < TILE_ROWS; ri++) begin
+      row_valid = (ri < active_rows_r);
       m_old_val = m_old_s1[ri];
       row_max_val = row_max_s1[ri];
 
@@ -217,39 +242,53 @@ module softmax_engine
         l_old_val = $bitstoshortreal(l_state[ri]);
       end
 
-      // Update running max
-      if (m_old_val > row_max_val)
-        m_new_val = m_old_val;
-      else
-        m_new_val = row_max_val;
+      if (!row_valid) begin
+        correction_s[ri] = 1.0;
+        m_new[ri] = m_old_val;
+        l_new[ri] = l_old_val;
+        for (ci = 0; ci < TILE_COLS; ci++)
+          P_shortreal[ri][ci] = 0.0;
+      end else begin
+        // Update running max
+        if (m_old_val > row_max_val)
+          m_new_val = m_old_val;
+        else
+          m_new_val = row_max_val;
 
-      // Correction factor: exp(m_old - m_new)
-      correction_val = exp_lookup(m_old_val - m_new_val);
-      correction_s[ri] = correction_val;
+        // Correction factor: exp(m_old - m_new)
+        correction_val = exp_lookup(m_old_val - m_new_val);
+        correction_s[ri] = correction_val;
 
-      // Running max output
-      m_new[ri] = m_new_val;
+        // Running max output
+        m_new[ri] = m_new_val;
 
-      // Compute P and row sum
-      row_exp_sum = 0.0;
-      for (ci = 0; ci < TILE_COLS; ci++) begin
-        shortreal S_shifted, P_val;
-        S_shifted = $bitstoshortreal(s_data_r[ri][ci])                         * $bitstoshortreal(INV_SQRT_D_FP32)
-                    - m_new_val;
+        // Compute P and row sum
+        row_exp_sum = 0.0;
+        for (ci = 0; ci < TILE_COLS; ci++) begin
+          shortreal S_shifted, P_val;
+          logic masked;
+          col_valid = (ci < active_cols_r);
+          masked = !col_valid;
+          S_shifted = $bitstoshortreal(s_data_r[ri][ci]) * $bitstoshortreal(INV_SQRT_D_FP32)
+                      - m_new_val;
 
-        // Causal masking: mask out future positions (q_pos < k_pos → -inf)
-        if (causal_mask_en_r) begin
-          if ((q_tile_start_r + 16'(ri)) < (kv_tile_start_r + 16'(ci)))
-            S_shifted = -100.0;  // effectively -inf, exp(-100) ≈ 3.7e-44 ≈ 0
+          // Causal masking: mask out future positions (q_pos < k_pos → -inf)
+          if (causal_mask_en_r && col_valid) begin
+            if ((q_tile_start_r + 16'(ri)) < (kv_tile_start_r + 16'(ci)))
+              masked = 1'b1;
+          end
+
+          if (masked)
+            P_val = 0.0;
+          else
+            P_val = exp_lookup(S_shifted);
+          P_shortreal[ri][ci] = P_val;
+          row_exp_sum = row_exp_sum + P_val;
         end
 
-        P_val = exp_lookup(S_shifted);
-        P_shortreal[ri][ci] = P_val;
-        row_exp_sum = row_exp_sum + P_val;
+        // Update running sum: l_new = l_old * correction + row_exp_sum
+        l_new[ri] = l_old_val * correction_val + row_exp_sum;
       end
-
-      // Update running sum: l_new = l_old * correction + row_exp_sum
-      l_new[ri] = l_old_val * correction_val + row_exp_sum;
     end
   end
 
@@ -270,9 +309,17 @@ module softmax_engine
       end
     end else begin
       p_valid <= s_valid_r;  // 2-cycle pipeline delay from s_valid
-      done    <= s_valid_r && kv_tile_last_r;
+      done    <= s_valid_r;
 
-      if (s_valid_r) begin
+      if (state_load) begin
+        p_valid <= 1'b0;
+        done    <= 1'b0;
+        for (ri = 0; ri < TILE_ROWS; ri++) begin
+          m_state[ri]   <= state_m_in[ri];
+          l_state[ri]   <= state_l_in[ri];
+          correction[ri] <= 32'd0;
+        end
+      end else if (s_valid_r) begin
         for (ri = 0; ri < TILE_ROWS; ri++) begin
           m_state[ri]   <= $shortrealtobits(m_new[ri]);
           l_state[ri]   <= $shortrealtobits(l_new[ri]);
@@ -283,5 +330,161 @@ module softmax_engine
       end
     end
   end
+
+
+`else
+  logic [31:0] sm_row_max [TILE_ROWS];
+  logic [31:0] sm_m_new [TILE_ROWS];
+  logic [31:0] sm_l_new [TILE_ROWS];
+  logic [31:0] sm_corr [TILE_ROWS];
+  logic [31:0] sm_p [TILE_ROWS][TILE_COLS];
+
+  function automatic logic [31:0] exp_lookup_bits(input logic [31:0] x);
+    logic signed [23:0] x_q;
+    integer idx_num;
+    integer idx;
+    begin
+      x_q = fp32_to_q8_15(x);
+      if (x_q < -24'sd262144) x_q = -24'sd262144;
+      else if (x_q > 24'sd0)  x_q = 24'sd0;
+
+      idx_num = integer'(x_q) + 262144;
+      idx = (idx_num * (LUT_DEPTH - 1)) >>> 18;
+      if (idx < 0) idx = 0;
+      else if (idx >= LUT_DEPTH) idx = LUT_DEPTH - 1;
+      exp_lookup_bits = exp_lut[idx];
+    end
+  endfunction
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      s_valid_r        <= 1'b0;
+      kv_tile_first_r  <= 1'b0;
+      kv_tile_last_r   <= 1'b0;
+      causal_mask_en_r <= 1'b0;
+      q_tile_start_r   <= 16'd0;
+      kv_tile_start_r  <= 16'd0;
+      active_rows_r    <= 5'd0;
+      active_cols_r    <= 5'd0;
+      for (int ri = 0; ri < TILE_ROWS; ri++) begin
+        for (int ci = 0; ci < TILE_COLS; ci++)
+          s_data_r[ri][ci] <= 32'd0;
+      end
+    end else begin
+      s_valid_r        <= s_valid;
+      kv_tile_first_r  <= kv_tile_first;
+      kv_tile_last_r   <= kv_tile_last;
+      causal_mask_en_r <= causal_mask_en;
+      q_tile_start_r   <= q_tile_start;
+      kv_tile_start_r  <= kv_tile_start;
+      active_rows_r    <= active_rows;
+      active_cols_r    <= active_cols;
+      for (int ri = 0; ri < TILE_ROWS; ri++) begin
+        for (int ci = 0; ci < TILE_COLS; ci++)
+          s_data_r[ri][ci] <= s_data[ri][ci];
+      end
+    end
+  end
+
+  always_comb begin
+    for (int ri = 0; ri < TILE_ROWS; ri++) begin
+      logic [31:0] row_max_val;
+      logic [31:0] m_old_val;
+      logic [31:0] l_old_val;
+      logic [31:0] row_sum_val;
+
+      sm_row_max[ri] = 32'hFF80_0000;
+      sm_m_new[ri]   = 32'hFF80_0000;
+      sm_l_new[ri]   = 32'd0;
+      sm_corr[ri]    = 32'd0;
+      row_max_val = 32'hFF80_0000;
+      for (int ci = 0; ci < TILE_COLS; ci++) begin
+        logic [31:0] scaled_val;
+        integer q_pos;
+        integer kv_pos;
+        scaled_val = fp32_mul(s_data_r[ri][ci], INV_SQRT_D_FP32);
+        if (causal_mask_en_r) begin
+          q_pos = integer'(q_tile_start_r) + ri;
+          kv_pos = integer'(kv_tile_start_r) + ci;
+          if (q_pos < kv_pos)
+            scaled_val = 32'hFF80_0000;
+        end
+        row_max_val = fp32_max(row_max_val, scaled_val);
+      end
+
+      m_old_val = kv_tile_first_r ? 32'hFF80_0000 : m_state[ri];
+      l_old_val = kv_tile_first_r ? 32'd0 : l_state[ri];
+
+      sm_row_max[ri] = row_max_val;
+      sm_m_new[ri]   = fp32_max(m_old_val, row_max_val);
+      sm_corr[ri]    = exp_lookup_bits(fp32_sub(m_old_val, sm_m_new[ri]));
+
+      row_sum_val = 32'd0;
+      for (int ci = 0; ci < TILE_COLS; ci++) begin
+        logic [31:0] scaled_val;
+        logic [31:0] shifted_val;
+        logic        masked;
+        integer q_pos;
+        integer kv_pos;
+
+        q_pos = 0;
+        kv_pos = 0;
+        masked = 1'b0;
+        scaled_val = fp32_mul(s_data_r[ri][ci], INV_SQRT_D_FP32);
+        shifted_val = fp32_sub(scaled_val, sm_m_new[ri]);
+        sm_p[ri][ci] = 32'd0;
+
+        if (causal_mask_en_r) begin
+          q_pos = integer'(q_tile_start_r) + ri;
+          kv_pos = integer'(kv_tile_start_r) + ci;
+          if (q_pos < kv_pos)
+            masked = 1'b1;
+        end
+
+        if (masked)
+          sm_p[ri][ci] = 32'd0;
+        else
+          sm_p[ri][ci] = exp_lookup_bits(shifted_val);
+        row_sum_val = fp32_add(row_sum_val, sm_p[ri][ci]);
+      end
+
+      sm_l_new[ri] = fp32_add(fp32_mul(l_old_val, sm_corr[ri]), row_sum_val);
+    end
+  end
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      p_valid <= 1'b0;
+      done    <= 1'b0;
+      for (int ri = 0; ri < TILE_ROWS; ri++) begin
+        m_state[ri]    <= 32'hFF80_0000;
+        l_state[ri]    <= 32'd0;
+        correction[ri] <= 32'd0;
+        for (int ci = 0; ci < TILE_COLS; ci++)
+          p_data[ri][ci] <= 32'd0;
+      end
+    end else begin
+      p_valid <= s_valid_r;
+      done    <= s_valid_r;
+      if (state_load) begin
+        p_valid <= 1'b0;
+        done    <= 1'b0;
+        for (int ri = 0; ri < TILE_ROWS; ri++) begin
+          m_state[ri]    <= state_m_in[ri];
+          l_state[ri]    <= state_l_in[ri];
+          correction[ri] <= 32'd0;
+        end
+      end else if (s_valid_r) begin
+        for (int ri = 0; ri < TILE_ROWS; ri++) begin
+          m_state[ri]    <= sm_m_new[ri];
+          l_state[ri]    <= sm_l_new[ri];
+          correction[ri] <= sm_corr[ri];
+          for (int ci = 0; ci < TILE_COLS; ci++)
+            p_data[ri][ci] <= sm_p[ri][ci];
+        end
+      end
+    end
+  end
+`endif
 
 endmodule

@@ -1,8 +1,6 @@
 # ============================================================================
-# .gitignore — LARA Attention Accelerator (master branch)
+# .gitignore — LARA Attention Accelerator (develop branch)
 # ============================================================================
-# master = deployment source only (hw/, sw/, docs/).
-# Validation directories (python_godel/, VV/) NEVER exist on master.
 
 # Python
 __pycache__/
@@ -20,37 +18,52 @@ wheels/
 .claude/
 memory.txt
 
-# Validation directories (develop only)
-python_godel/
-VV/
-
-# Simulation artifacts
-*.log
-*.vcd
-*.fsdb
+# ============================================================================
+# Simulation artifacts (VCS / Verilator)
+# ============================================================================
+VV/sim/
+simv
+simv*
 *.daidir
 csrc/
 DVEfiles/
 ucli.key
-simv*
+*.log
+*.vcd
+*.fsdb
 *.key
 
-# Synthesis artifacts
+# ============================================================================
+# Synthesis artifacts (Vivado)
+# ============================================================================
 *.jou
 *.dcp
 *.bit
 *.hwh
 *.xclbin
+*.xsa
 vivado_*.log
 vivado_*.jou
+vivado_*.debug
+vivado_proj/
 vivado_project/
-*.xsa
+.Xil/
+*.str
+*.rpt
+.hw/
+.ip_user_files/
+*.cache/
 
+
+# ============================================================================
 # EDA tool artifacts
+# ============================================================================
 novas.conf
 novas.rc
 verdiLog/
 
+# ============================================================================
 # OS
+# ============================================================================
 .DS_Store
 Thumbs.db
