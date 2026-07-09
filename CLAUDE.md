@@ -87,7 +87,7 @@ LARA/
 │   │   │   ├── attn_axi_lite_slave.sv  # AXI4-Lite CSR
 │   │   │   ├── attn_axi_stream_sink.sv # AXIS data receive (DDR→PL)
 │   │   │   └── attn_axi_stream_source.sv # AXIS result send (PL→DDR)
-│   │   └── attn_top.v                # Top-level wrapper in Verilog
+│   │   └── attn_top.sv                # Top-level wrapper in Verilog
 │   ├── constraints/
 │   │   └── attn_soc.xdc
 │   └── scripts/

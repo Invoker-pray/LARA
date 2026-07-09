@@ -1,9 +1,13 @@
 // ============================================================================
 // tb_attn_e2e.sv — End-to-End FlashAttention Test (L=16, Single Head)
 // ============================================================================
-// Chains: Q_buf→MAC→psum→softmax→MAC→psum→obuf(+correction)→O
-// Depth iteration: 128 cycles Phase A, 128 cycles Phase B
-// Compares final O[16][128] against Python golden model.
+// This test exercises the current deployable datapath shape:
+//   Phase A: QxK^T on one 16x16 block over HEAD_DIM=128
+//   Softmax: one online-softmax update on the 16x16 score block
+//   Phase B: P_block x V_block over 8 output-dimension microblocks (16 dims each)
+//   Output: output_buffer correction + normalize + bf16 streamout
+//
+// The test compares the full O[16][128] stream against Python golden data.
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -32,19 +36,22 @@ module tb_attn_e2e;
   // ==================================================================
   logic [15:0] mac_row [TILE_ROWS];
   logic [15:0] mac_col [TILE_COLS];
-  logic [31:0] mac_col_out [TILE_COLS];
-
-  logic psum_en, psum_clear;
-  logic [31:0] psum_in [TILE_COLS];
-  logic [31:0] psum_out [TILE_COLS];
+  logic [31:0] mac_block_out [TILE_ROWS][TILE_COLS];
+  logic mac_clear_accum;
+  logic mac_accum_en;
 
   logic s_valid, p_valid, softmax_done;
   logic kv_tile_first, kv_tile_last;
   logic [31:0] s_block [TILE_ROWS][TILE_COLS];
   logic [31:0] p_block [TILE_ROWS][TILE_COLS];
   logic [31:0] m_state [TILE_ROWS], l_state [TILE_ROWS], correction [TILE_ROWS];
+  logic sm_state_load;
+  logic [31:0] sm_state_m_in [TILE_ROWS];
+  logic [31:0] sm_state_l_in [TILE_ROWS];
 
   logic obuf_update, obuf_norm;
+  logic obuf_clear_bank, obuf_clear_bank_sel;
+  logic obuf_bank_sel;
   logic [4:0] obuf_row;
   logic [31:0] obuf_data [HEAD_DIM];
   logic obuf_valid;
@@ -52,22 +59,19 @@ module tb_attn_e2e;
   logic [4:0] obuf_o_row;
   logic [6:0] obuf_o_dim;
 
+  logic [31:0] delta_o [0:TILE_ROWS-1][0:HEAD_DIM-1];
+  logic [15:0] O_seen [0:L-1][0:HD-1];
+
   // ==================================================================
   // DUT Instances
   // ==================================================================
-  attn_tile u_mac (.clk,.rst_n,.phase_sel(1'b0),.row_data(mac_row),.col_data(mac_col),.split_phase(2'd0),.accum_en(1'b1),.col_out(mac_col_out));
-  softmax_engine u_sm(.clk,.rst_n,.s_valid,.s_data(s_block),.kv_tile_first,.kv_tile_last,.causal_mask_en(1'b1),.q_tile_start(16'd0),.kv_tile_start(16'd0),.m_state,.l_state,.p_valid,.p_data(p_block),.correction,.done(softmax_done));
-  psum_accum u_psum(.clk,.rst_n,.clear(psum_clear),.en(psum_en),.tile_col(psum_in),.en_lo(1'b0),.en_hi(1'b0),.col_lo('{default:32'd0}),.col_hi('{default:32'd0}),.en_q0(1'b0),.en_q1(1'b0),.en_q2(1'b0),.en_q3(1'b0),.col_q0('{default:32'd0}),.col_q1('{default:32'd0}),.col_q2('{default:32'd0}),.col_q3('{default:32'd0}),.psum(psum_out));
-  output_buffer u_obuf(.clk,.rst_n,.acc_update(obuf_update),.acc_row(obuf_row),.acc_data(obuf_data),.correction(correction),.normalize(obuf_norm),.l_state(l_state),.o_valid(obuf_valid),.o_row(obuf_o_row),.o_dim(obuf_o_dim),.o_data(obuf_out));
+  attn_tile u_mac (.clk,.rst_n,.phase_sel(1'b0),.row_data(mac_row),.col_data(mac_col),.split_phase(2'd2),.clear_accum(mac_clear_accum),.accum_en(mac_accum_en),.block_out(mac_block_out),.col_out());
+  softmax_engine u_sm(.clk,.rst_n,.s_valid,.s_data(s_block),.kv_tile_first,.kv_tile_last,.causal_mask_en(1'b1),.q_tile_start(16'd0),.kv_tile_start(16'd0),.active_rows(TILE_ROWS),.active_cols(TILE_COLS),.state_load(sm_state_load),.state_m_in(sm_state_m_in),.state_l_in(sm_state_l_in),.m_state,.l_state,.p_valid,.p_data(p_block),.correction,.done(softmax_done));
+  output_buffer u_obuf(.clk,.rst_n,.clear_bank(obuf_clear_bank),.clear_bank_sel(obuf_clear_bank_sel),.acc_update(obuf_update),.acc_row(obuf_row),.acc_data(obuf_data),.correction(correction),.bank_sel(obuf_bank_sel),.normalize(obuf_norm),.l_state(l_state),.o_valid(obuf_valid),.o_row(obuf_o_row),.o_dim(obuf_o_dim),.o_data(obuf_out));
 
   // ==================================================================
-  // Depth Counter
+  // Block Progress
   // ==================================================================
-  logic [6:0] depth;
-  logic       phase;  // 0=Phase A (QK^T), 1=Phase B (PV)
-  logic       depth_last;
-  assign depth_last = (depth == HD - 1);
-
   // ==================================================================
   // Load test data from hex files
   // ==================================================================
@@ -85,16 +89,32 @@ module tb_attn_e2e;
   // ==================================================================
   // Main Test
   // ==================================================================
-  integer err, ri, ci, di;
+  integer err, ri, ci, di, blk, got_count;
+`ifndef SYNTHESIS
+  shortreal got_val, exp_val, diff_val;
+`endif
   initial begin
-    clk = 0; rst_n = 0;
+    clk = 1'b0; rst_n = 1'b0;
     err = 0;
-    phase = 1'b0; depth = 7'd0;
-    psum_en = 1'b0; psum_clear = 1'b1;
+    mac_clear_accum = 1'b0;
+    mac_accum_en = 1'b0;
     s_valid = 1'b0;
     kv_tile_first = 1'b1; kv_tile_last = 1'b1;
     obuf_update = 1'b0; obuf_norm = 1'b0;
+    obuf_clear_bank = 1'b0; obuf_clear_bank_sel = 1'b0;
+    sm_state_load = 1'b0;
+    obuf_bank_sel = 1'b0;
     obuf_row = 5'd0;
+    for (ri = 0; ri < TILE_ROWS; ri++) begin
+      sm_state_m_in[ri] = 32'hFF80_0000;
+      sm_state_l_in[ri] = 32'd0;
+    end
+    for (ri = 0; ri < TILE_ROWS; ri++)
+      for (di = 0; di < HEAD_DIM; di++)
+        delta_o[ri][di] = 32'd0;
+    for (ri = 0; ri < L; ri++)
+      for (di = 0; di < HD; di++)
+        O_seen[ri][di] = 16'd0;
 
     $display("TB: attn_e2e — L=%0d, HD=%0d", L, HD);
 
@@ -105,89 +125,139 @@ module tb_attn_e2e;
     load_data("data/e2e_O_L16.hex", O_golden);
     $display("Loaded Q,K,V,O golden data");
 
-    #20 rst_n = 1;
-    @(posedge clk); @(posedge clk);
-    psum_clear <= 1'b0;
+    #20 rst_n = 1'b1;
+    @(posedge clk);
+    @(posedge clk);
 
     // ================================================================
     // Phase A: Q×K^T — iterate depth 0..127
     // ================================================================
     $display("Phase A: QxK^T (depth 0..127)...");
-    for (depth = 0; depth < HD; depth++) begin
-      // Drive Q[row][depth] and K[col][depth] to MAC
+    for (ri = 0; ri < TILE_ROWS; ri++)
+      mac_row[ri] = Q_mem[ri][0];
+    for (ci = 0; ci < TILE_COLS; ci++)
+      mac_col[ci] = K_mem[ci][0];
+    mac_clear_accum = 1'b1;
+    mac_accum_en = 1'b0;
+    @(posedge clk);
+    #1;
+
+    for (di = 0; di < HD; di++) begin
+      mac_clear_accum = (di == 0);
+      mac_accum_en = 1'b1;
       for (ri = 0; ri < TILE_ROWS; ri++)
-        mac_row[ri] = Q_mem[ri][depth];
+        mac_row[ri] = Q_mem[ri][di];
       for (ci = 0; ci < TILE_COLS; ci++)
-        mac_col[ci] = K_mem[ci][depth];
-
-      @(negedge clk); // let MAC combinational settle
-      // Accumulate MAC output in psum
-      for (ci = 0; ci < TILE_COLS; ci++)
-        psum_in[ci] = mac_col_out[ci];
-      psum_en <= 1'b1;
+        mac_col[ci] = K_mem[ci][di];
       @(posedge clk);
-      psum_en <= 1'b0;
+      #1;
     end
+    mac_clear_accum = 1'b0;
+    mac_accum_en = 1'b1;
+    @(posedge clk);
+    #1;
+    mac_accum_en = 1'b0;
 
-    // Route psum → softmax s_block
     for (ri = 0; ri < TILE_ROWS; ri++)
       for (ci = 0; ci < TILE_COLS; ci++)
-        s_block[ri][ci] = psum_out[ci];
-    s_valid <= 1'b1;
-    @(posedge clk);
-    s_valid <= 1'b0;
-    psum_clear <= 1'b1;
-    @(posedge clk);
-    psum_clear <= 1'b0;
+        s_block[ri][ci] = mac_block_out[ri][ci];
 
-    // Wait for softmax pipeline
-    repeat(3) @(posedge clk);
+    s_valid = 1'b1;
+    @(posedge clk);
+    #1;
+    s_valid = 1'b0;
+    wait (p_valid === 1'b1);
+    @(posedge clk);
+    #1;
+    // ================================================================
+    // Phase B: P×V — 8 output-dimension blocks of width 16
+    // ================================================================
+    $display("Phase B: PxV (8 output blocks)...");
+    for (blk = 0; blk < HEAD_DIM / TILE_COLS; blk++) begin
+      for (ri = 0; ri < TILE_ROWS; ri++)
+        mac_row[ri] = p_block[ri][0][31:16];
+      for (ci = 0; ci < TILE_COLS; ci++)
+        mac_col[ci] = V_mem[0][blk * TILE_COLS + ci];
+      mac_clear_accum = 1'b1;
+      mac_accum_en = 1'b0;
+      @(posedge clk);
+      #1;
 
-    // ================================================================
-    // Phase B: P×V — iterate dim 0..127
-    // ================================================================
-    $display("Phase B: PxV (dim 0..127)...");
-    for (depth = 0; depth < HD; depth++) begin
-      // Drive P[row][col] and V[col][depth] to MAC
-      for (ri = 0; ri < TILE_ROWS; ri++) begin
-        // P is fp32 in p_block, cast to bf16 for MAC
-        mac_row[ri] = p_block[ri][depth[3:0]][31:16]; // simplified
+      for (di = 0; di < TILE_COLS; di++) begin
+        mac_clear_accum = (di == 0);
+        mac_accum_en = 1'b1;
+        for (ri = 0; ri < TILE_ROWS; ri++)
+          mac_row[ri] = p_block[ri][di][31:16];
+        for (ci = 0; ci < TILE_COLS; ci++)
+          mac_col[ci] = V_mem[di][blk * TILE_COLS + ci];
+        @(posedge clk);
+        #1;
       end
-      for (ci = 0; ci < TILE_COLS; ci++)
-        mac_col[ci] = V_mem[ci][depth];
-
-      @(negedge clk);
-      for (ci = 0; ci < TILE_COLS; ci++)
-        psum_in[ci] = mac_col_out[ci];
-      psum_en <= 1'b1;
+      mac_clear_accum = 1'b0;
+      mac_accum_en = 1'b1;
       @(posedge clk);
-      psum_en <= 1'b0;
+      #1;
+      mac_accum_en = 1'b0;
+      for (ri = 0; ri < TILE_ROWS; ri++)
+        for (ci = 0; ci < TILE_COLS; ci++)
+          delta_o[ri][blk * TILE_COLS + ci] = mac_block_out[ri][ci];
     end
+    mac_clear_accum = 1'b0;
 
-    // Route to output_buffer with correction
+    // Route full 128-dim row updates into output_buffer.
     for (ri = 0; ri < TILE_ROWS; ri++) begin
-      obuf_row <= ri[4:0];
+      obuf_row = ri[4:0];
       for (di = 0; di < HEAD_DIM; di++)
-        obuf_data[di] = psum_out[di % TILE_COLS];
-      obuf_update <= 1'b1;
+        obuf_data[di] = delta_o[ri][di];
+      obuf_update = 1'b1;
       @(posedge clk);
-      obuf_update <= 1'b0;
+      #1;
+      obuf_update = 1'b0;
     end
 
-    // Normalize
-    obuf_norm <= 1'b1;
-    repeat(5) @(posedge clk);
-    obuf_norm <= 1'b0;
+    // output_buffer normalizes the bank opposite to bank_sel.
+    obuf_bank_sel = 1'b1;
+    obuf_norm = 1'b1;
+    @(posedge clk);
+    #1;
+    obuf_norm = 1'b0;
 
     // ================================================================
     // Compare output with golden (sequential readout from obuf)
     // ================================================================
     $display("Comparing output with golden...");
-    repeat(300) @(posedge clk); // wait for normalization output sequence
+    got_count = 0;
+    while (got_count < (L * HD)) begin
+      @(posedge clk);
+      #1;
+      if (obuf_valid) begin
+        O_seen[obuf_o_row][obuf_o_dim] = obuf_out;
+`ifndef SYNTHESIS
+        got_val = $bitstoshortreal({obuf_out, 16'b0});
+        exp_val = $bitstoshortreal({O_golden[obuf_o_row][obuf_o_dim], 16'b0});
+        diff_val = got_val - exp_val;
+        if (diff_val < 0.0)
+          diff_val = -diff_val;
+        if (diff_val > 0.05) begin
+`else
+        if (obuf_out !== O_golden[obuf_o_row][obuf_o_dim]) begin
+`endif
+          err = err + 1;
+          if (err <= 16) begin
+            $display("Mismatch row=%0d dim=%0d got=%h exp=%h",
+                     obuf_o_row, obuf_o_dim, obuf_out, O_golden[obuf_o_row][obuf_o_dim]);
+          end
+        end
+        got_count = got_count + 1;
+      end
+    end
 
-    // Check final O against golden (simplified: compare a few positions)
-    $display("E2E test complete. O_acc data path exercised.");
-    $display("Check O_acc values manually against Python golden.");
+    if (err == 0) begin
+      $display("ALL E2E CHECKS PASSED");
+    end else begin
+      $display("E2E FAILED with %0d mismatches", err);
+      $fatal(1);
+    end
 
     $finish;
   end

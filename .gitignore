@@ -41,11 +41,19 @@ ucli.key
 *.bit
 *.hwh
 *.xclbin
+*.xsa
 vivado_*.log
 vivado_*.jou
 vivado_*.debug
+vivado_proj/
 vivado_project/
-*.xsa
+.Xil/
+*.str
+*.rpt
+.hw/
+.ip_user_files/
+*.cache/
+
 
 # ============================================================================
 # EDA tool artifacts

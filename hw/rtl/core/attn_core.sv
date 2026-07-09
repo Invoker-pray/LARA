@@ -35,6 +35,9 @@ module attn_core
     input  logic        q_load_done,
     output logic        o_write_start,
     input  logic        o_write_done,
+    output logic        buf_sel,          // Q ping-pong bank select (toggles per Q tile)
+    output logic        o_bank_sel,       // O_acc bank select (toggles per Q tile)
+    output logic        group_advance,    // pulse: advance to next GQA group, KV must be reloaded
 
     // --- Compute Control ---
     output logic        mac_phase,
@@ -48,7 +51,7 @@ module attn_core
     // --- Position Output (to softmax_engine for causal masking) ---
     output logic [15:0] q_tile_start,    // absolute Q row start this tile
     output logic [15:0] kv_tile_start,   // absolute K col start this tile
-    output logic [4:0]  active_q_rows,   // valid Q rows in this tile (1..TILE_Q)
+    output logic [5:0]  active_q_rows,   // valid Q rows in this tile (1..TILE_Q)
     output logic [6:0]  active_kv_cols,  // valid K/V cols in this tile (1..TILE_KV)
 
     // --- Error flag ---
@@ -75,22 +78,22 @@ module attn_core
 
   // Position computation
   logic [15:0] q_pos_start, kv_pos_start;
-  logic [4:0]  active_q;
+  logic [5:0]  active_q;
   logic [6:0]  active_kv;
 
   always_comb begin
-    n_q_tiles  = (seq_len_r + TILE_Q  - 1) / TILE_Q;
-    n_kv_tiles = (seq_len_r + TILE_KV - 1) / TILE_KV;
-    q_pos_start  = q_pos_base_r + q_tile_idx * TILE_Q;
-    kv_pos_start = kv_pos_base_r + kv_tile_idx * TILE_KV;
+    n_q_tiles  = 8'((seq_len_r + TILE_Q  - 1) / TILE_Q);
+    n_kv_tiles = 8'((seq_len_r + TILE_KV - 1) / TILE_KV);
+    q_pos_start  = 16'(q_pos_base_r + q_tile_idx * TILE_Q);
+    kv_pos_start = 16'(kv_pos_base_r + kv_tile_idx * TILE_KV);
     // Active rows in current Q tile
     active_q = (q_tile_idx == n_q_tiles - 1 && (seq_len_r % TILE_Q) != 0)
-               ? seq_len_r[4:0] - q_tile_idx[4:0] * TILE_Q[4:0]
-               : TILE_Q[4:0];
+               ? 6'(seq_len_r - q_tile_idx * TILE_Q)
+               : 6'(TILE_Q);
     // Active cols in current KV tile
     active_kv = (kv_tile_idx == n_kv_tiles - 1 && (seq_len_r % TILE_KV) != 0)
-                ? seq_len_r[6:0] - kv_tile_idx[6:0] * TILE_KV[6:0]
-                : TILE_KV[6:0];
+                ? 7'(seq_len_r - kv_tile_idx * TILE_KV)
+                : 7'(TILE_KV);
   end
 
   // Output position + active rows/cols
@@ -108,11 +111,10 @@ module attn_core
   logic cfg_valid;
   always_comb begin
     cfg_valid = 1'b1;
-    if (seq_len == 16'd0)                         cfg_valid = 1'b0;
-    if (seq_len > MAX_SEQ_LEN)                     cfg_valid = 1'b0;
-    if (cfg_q_pos_base + seq_len > MAX_SEQ_LEN)   cfg_valid = 1'b0;
-    if (cfg_kv_pos_base + seq_len > MAX_SEQ_LEN)  cfg_valid = 1'b0;
-    if (seq_len == 16'd0)                          cfg_valid = 1'b0;
+    if (seq_len == 16'd0)                           cfg_valid = 1'b0;
+    if (seq_len > 16'(MAX_SEQ_LEN))                cfg_valid = 1'b0;
+    if (cfg_q_pos_base + seq_len > 16'(MAX_SEQ_LEN))  cfg_valid = 1'b0;
+    if (cfg_kv_pos_base + seq_len > 16'(MAX_SEQ_LEN)) cfg_valid = 1'b0;
   end
 
   // ==================================================================
@@ -161,6 +163,8 @@ module attn_core
       q_pos_base_r <= 16'd0;
       kv_pos_base_r<= 16'd0;
       causal_r     <= 1'b0;
+      buf_sel      <= 1'b0;
+      o_bank_sel   <= 1'b0;
       done         <= 1'b0;
       error        <= 1'b0;
     end else begin
@@ -172,6 +176,10 @@ module attn_core
         q_pos_base_r  <= cfg_q_pos_base;
         kv_pos_base_r <= cfg_kv_pos_base;
         causal_r      <= cfg_causal;
+        q_tile_idx    <= 8'd0;
+        kv_tile_idx   <= 8'd0;
+        head_cnt      <= 2'd0;
+        group_cnt     <= 3'd0;
         done          <= 1'b0;  // clear sticky done
         error         <= 1'b0;  // clear sticky error
       end
@@ -187,6 +195,9 @@ module attn_core
           if (q_load_done) kv_tile_idx <= 8'd0;
         end
         ST_AV_DOT: begin
+          if (mac_done && kv_tile_last && q_tile_idx < n_q_tiles - 1) begin
+            // Prefetch next Q tile: q_load_start fires during NORMALIZE+WRITE_O
+          end
           if (mac_done) begin
             if (kv_tile_idx < n_kv_tiles - 1)
               kv_tile_idx <= kv_tile_idx + 8'd1;
@@ -196,6 +207,8 @@ module attn_core
           if (o_write_done) begin
             if (q_tile_idx < n_q_tiles - 1) begin
               q_tile_idx <= q_tile_idx + 8'd1;
+              buf_sel    <= ~buf_sel;   // toggle Q ping-pong bank
+              o_bank_sel <= ~o_bank_sel; // toggle O_acc bank
             end else begin
               q_tile_idx <= 8'd0;
               if (head_cnt < 2'd3) begin
@@ -265,6 +278,7 @@ module attn_core
     softmax_start  = 1'b0;
     kv_tile_first  = 1'b0;
     kv_tile_last   = 1'b0;
+    group_advance  = 1'b0;
     busy           = (state != ST_IDLE && state != ST_DONE && state != ST_ERROR);
 
     case (state)
@@ -289,8 +303,18 @@ module attn_core
         mac_phase     = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
         kv_tile_last  = (kv_tile_idx == n_kv_tiles - 1);
+        if (kv_tile_last && q_tile_idx < n_q_tiles - 1)
+          q_load_start = 1'b1;
       end
-      ST_WRITE_O: if (!o_write_done) o_write_start = 1'b1;
+      ST_WRITE_O: begin
+        if (!o_write_done)
+          o_write_start = 1'b1;
+        if (o_write_done &&
+            (q_tile_idx == n_q_tiles - 1) &&
+            (head_cnt == 2'd3) &&
+            (group_cnt < 3'd7))
+          group_advance = 1'b1;
+      end
       default: ;
     endcase
   end

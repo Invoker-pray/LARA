@@ -44,7 +44,7 @@
 - attn_axi_stream_sink.sv — 3目标路由，溢出/不足检测 (8/8 PASS)
 - attn_axi_stream_source.sv — 5状态 FSM，2:1 打包
 
-**顶层**：attn_top.v — generate-based MUX，深度迭代控制
+**顶层**：attn_top.sv — generate-based MUX，深度迭代控制
 
 **扩展** (未来参考)：qkv_projection.sv, rms_norm.sv
 

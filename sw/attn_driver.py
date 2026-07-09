@@ -37,6 +37,7 @@ CSR_SEQ_LEN     = 0x008
 CSR_STREAM_SRC  = 0x020
 CSR_STREAM_LEN  = 0x028
 CSR_STREAM_DEST = 0x02C
+CSR_HEAD_IDX    = 0x014
 CSR_RESULT_DST  = 0x050
 CSR_RESULT_LEN  = 0x058
 CSR_PERF_CYCLES = 0x100
@@ -45,6 +46,11 @@ CSR_PERF_CYCLES = 0x100
 DEST_K_CACHE = 0
 DEST_V_CACHE = 1
 DEST_Q_BUF   = 2
+
+HEAD_DIM = 128
+N_Q_HEADS = 32
+N_KV_HEADS = 8
+GQA_GROUP_SIZE = N_Q_HEADS // N_KV_HEADS
 
 
 class AttentionAccelerator:
@@ -69,6 +75,8 @@ class AttentionAccelerator:
             self.mmio = None
             self._hw_ready = False
             print("Mock driver initialized — set HAS_PYNQ=True for hardware.")
+        self._send_cache = {}
+        self._recv_cache = {}
 
     @property
     def hw_ready(self) -> bool:
@@ -79,7 +87,8 @@ class AttentionAccelerator:
     # ==================================================================
 
     def configure(self, seq_len: int, q_addr: int, k_addr: int,
-                  v_addr: int, o_addr: int):
+                  v_addr: int, o_addr: int,
+                  gqa_group: int = 0, q_head: int = 0):
         """
         Configure the accelerator for one attention computation.
 
@@ -96,6 +105,7 @@ class AttentionAccelerator:
             return
 
         self.mmio.write(CSR_SEQ_LEN, seq_len)
+        self.mmio.write(CSR_HEAD_IDX, ((gqa_group & 0x7) << 2) | (q_head & 0x3))
         # Stream source/dest addresses set per transfer (see load/readback)
 
     def start(self):
@@ -129,6 +139,16 @@ class AttentionAccelerator:
     # Data Transfer
     # ==================================================================
 
+    def _get_buffer(self, cache: dict, nbytes: int):
+        """Reuse PYNQ DMA buffers to avoid per-tile allocate/free overhead."""
+        if not HAS_PYNQ:
+            return None
+        buf = cache.get(nbytes)
+        if buf is None:
+            buf = allocate(shape=(nbytes,), dtype=np.uint8)
+            cache[nbytes] = buf
+        return buf
+
     def load_kv_cache(self, K: np.ndarray, V: np.ndarray):
         """
         Load K and V matrices into URAM caches.
@@ -142,8 +162,8 @@ class AttentionAccelerator:
         v_bytes = V.view(np.uint16).tobytes()
 
         if HAS_PYNQ:
-            k_buf = allocate(shape=(len(k_bytes),), dtype=np.uint8)
-            v_buf = allocate(shape=(len(v_bytes),), dtype=np.uint8)
+            k_buf = self._get_buffer(self._send_cache, len(k_bytes))
+            v_buf = self._get_buffer(self._send_cache, len(v_bytes))
             k_buf[:] = np.frombuffer(k_bytes, dtype=np.uint8)
             v_buf[:] = np.frombuffer(v_bytes, dtype=np.uint8)
 
@@ -169,7 +189,7 @@ class AttentionAccelerator:
         q_bytes = Q_tile.view(np.uint16).tobytes()
 
         if HAS_PYNQ:
-            q_buf = allocate(shape=(len(q_bytes),), dtype=np.uint8)
+            q_buf = self._get_buffer(self._send_cache, len(q_bytes))
             q_buf[:] = np.frombuffer(q_bytes, dtype=np.uint8)
             self.mmio.write(CSR_STREAM_DEST, DEST_Q_BUF)
             self.mmio.write(CSR_STREAM_LEN, len(q_bytes))
@@ -188,7 +208,7 @@ class AttentionAccelerator:
         o_size = L * 4096 * 2  # bytes
 
         if HAS_PYNQ:
-            o_buf = allocate(shape=(o_size,), dtype=np.uint8)
+            o_buf = self._get_buffer(self._recv_cache, o_size)
             self.mmio.write(CSR_RESULT_LEN, o_size)
             self.dma_recv.transfer(o_buf)
             self.dma_recv.wait()
@@ -198,14 +218,103 @@ class AttentionAccelerator:
             print(f"READBACK O: [{L}x4096] = {o_size} bytes")
             return np.zeros((L, 4096), dtype=np.float16)
 
+    def run_attention_group(
+        self,
+        Q_group: np.ndarray,
+        K_head: np.ndarray,
+        V_head: np.ndarray,
+        seq_len: int = None,
+        group_idx: int = 0,
+        collect_profile: bool = False,
+    ):
+        """
+        Run one GQA group: 4 Q heads share one KV head.
+
+        Args:
+            Q_group: [L, GQA_GROUP_SIZE*HEAD_DIM] bf16-equivalent
+            K_head:  [L, HEAD_DIM]
+            V_head:  [L, HEAD_DIM]
+        Returns:
+            O_group: [L, GQA_GROUP_SIZE*HEAD_DIM]
+        """
+        L = Q_group.shape[0] if seq_len is None else seq_len
+        o_group = np.zeros_like(Q_group)
+        profile = {
+            "group_idx": group_idx,
+            "q_heads": [],
+            "kv_load_s": 0.0,
+        }
+
+        t0 = time.perf_counter()
+        self.load_kv_cache(K_head, V_head)
+        profile["kv_load_s"] = time.perf_counter() - t0
+
+        for qh in range(GQA_GROUP_SIZE):
+            q_slice = Q_group[:, qh * HEAD_DIM:(qh + 1) * HEAD_DIM]
+            self.configure(L, 0, 0, 0, 0, gqa_group=group_idx, q_head=qh)
+            result = self.run_attention(
+                q_slice, K_head, V_head, seq_len=L,
+                collect_profile=True, reuse_kv_cache=True
+            )
+            o_head, q_prof = result
+            o_group[:, qh * HEAD_DIM:(qh + 1) * HEAD_DIM] = o_head
+            profile["q_heads"].append(q_prof)
+
+        if collect_profile:
+            return o_group, profile
+        return o_group
+
+    def run_attention_gqa(
+        self,
+        Q: np.ndarray,
+        K: np.ndarray,
+        V: np.ndarray,
+        seq_len: int = None,
+        collect_profile: bool = False,
+    ):
+        """
+        Execute all GQA groups while reusing each group's KV cache once.
+
+        Expected shapes:
+            Q: [L, N_Q_HEADS*HEAD_DIM]
+            K: [L, N_KV_HEADS*HEAD_DIM]
+            V: [L, N_KV_HEADS*HEAD_DIM]
+        """
+        L = Q.shape[0] if seq_len is None else seq_len
+        O = np.zeros_like(Q)
+        profiles = []
+
+        for group_idx in range(N_KV_HEADS):
+            q_lo = group_idx * GQA_GROUP_SIZE * HEAD_DIM
+            q_hi = q_lo + GQA_GROUP_SIZE * HEAD_DIM
+            kv_lo = group_idx * HEAD_DIM
+            kv_hi = kv_lo + HEAD_DIM
+
+            result = self.run_attention_group(
+                Q[:, q_lo:q_hi],
+                K[:, kv_lo:kv_hi],
+                V[:, kv_lo:kv_hi],
+                seq_len=L,
+                group_idx=group_idx,
+                collect_profile=True,
+            )
+            o_group, group_profile = result
+            O[:, q_lo:q_hi] = o_group
+            profiles.append(group_profile)
+
+        if collect_profile:
+            return O, profiles
+        return O
+
     # ==================================================================
     # High-Level API
     # ==================================================================
 
     def run_attention(
         self, Q: np.ndarray, K: np.ndarray, V: np.ndarray,
-        seq_len: int = None
-    ) -> np.ndarray:
+        seq_len: int = None, collect_profile: bool = False,
+        reuse_kv_cache: bool = False
+    ):
         """
         Run full attention computation for one GQA group (one KV head, 4 Q heads).
 
@@ -219,9 +328,19 @@ class AttentionAccelerator:
         """
         L = Q.shape[0] if seq_len is None else seq_len
         print(f"Attention: L={L}")
+        profile = {
+            "kv_load_s": 0.0,
+            "q_load_s": 0.0,
+            "compute_s": 0.0,
+            "readback_s": 0.0,
+            "tiles": [],
+        }
 
         # 1. Load K/V cache (once per GQA group)
-        self.load_kv_cache(K, V)
+        if not reuse_kv_cache:
+            t0 = time.perf_counter()
+            self.load_kv_cache(K, V)
+            profile["kv_load_s"] = time.perf_counter() - t0
 
         # 2. For each Q tile (TILE_Q=32):
         #    a. Load Q tile to ping-pong buffer
@@ -236,16 +355,36 @@ class AttentionAccelerator:
             q_end = min(q_start + 32, L)
             Q_tile = Q[q_start:q_end]
 
+            t0 = time.perf_counter()
             self.load_q_tile(Q_tile)
+            q_load_s = time.perf_counter() - t0
+            profile["q_load_s"] += q_load_s
+
+            t0 = time.perf_counter()
             self.start()
             self.wait_done()
+            compute_s = time.perf_counter() - t0
+            profile["compute_s"] += compute_s
 
+            t0 = time.perf_counter()
             O_tile = self.readback_o(q_end - q_start)
+            readback_s = time.perf_counter() - t0
+            profile["readback_s"] += readback_s
             O[q_start:q_end] = O_tile
 
             perf = self.read_perf()
             print(f"  Tile {tile_idx}: cycles={perf['cycles']}")
+            profile["tiles"].append({
+                "tile_idx": tile_idx,
+                "q_rows": q_end - q_start,
+                "q_load_s": q_load_s,
+                "compute_s": compute_s,
+                "readback_s": readback_s,
+                "cycles": perf["cycles"],
+            })
 
+        if collect_profile:
+            return O, profile
         return O
 
 

@@ -247,4 +247,181 @@ package attn_pkg;
     return (a + b - 1) / b;
   endfunction
 
+  // ================================================================
+  // 10. fp32 Helper Functions — synthesizable bit-level arithmetic
+  // ================================================================
+  function automatic logic [31:0] fp32_negate(input logic [31:0] a);
+    return {~a[31], a[30:0]};
+  endfunction
+
+  function automatic logic fp32_is_zero(input logic [31:0] a);
+    return (a[30:0] == 31'd0);
+  endfunction
+
+  function automatic logic fp32_is_inf(input logic [31:0] a);
+    return (a[30:23] == 8'hFF) && (a[22:0] == 23'd0);
+  endfunction
+
+  function automatic logic fp32_is_nan(input logic [31:0] a);
+    return (a[30:23] == 8'hFF) && (a[22:0] != 23'd0);
+  endfunction
+
+  function automatic logic fp32_gt(input logic [31:0] a, input logic [31:0] b);
+    begin
+      if (a == b) return 1'b0;
+      if (a[31] != b[31]) return b[31];
+      if (!a[31]) return (a[30:0] > b[30:0]);
+      else        return (a[30:0] < b[30:0]);
+    end
+  endfunction
+
+  function automatic logic [31:0] fp32_max(input logic [31:0] a, input logic [31:0] b);
+    return fp32_gt(a, b) ? a : b;
+  endfunction
+
+  function automatic logic [31:0] fp32_add(input logic [31:0] a, input logic [31:0] b);
+    logic        sign_a, sign_b, sign_large, sign_res;
+    logic [7:0]  exp_a, exp_b, exp_large;
+    logic [23:0] mant_a, mant_b;
+    logic        a_larger, effective_sub;
+    logic [24:0] mant_large, mant_small, mant_small_shifted, mant_sum;
+    logic [7:0]  exp_res;
+    logic [22:0] frac_res;
+    integer      shift;
+    integer      lz;
+    begin
+      if (fp32_is_nan(a) || fp32_is_nan(b)) return 32'h7FC0_0000;
+      if (fp32_is_zero(a)) return b;
+      if (fp32_is_zero(b)) return a;
+
+      sign_a = a[31]; sign_b = b[31];
+      exp_a  = (a[30:23] == 8'd0) ? 8'd1 : a[30:23];
+      exp_b  = (b[30:23] == 8'd0) ? 8'd1 : b[30:23];
+      mant_a = (a[30:23] == 8'd0) ? {1'b0, a[22:0]} : {1'b1, a[22:0]};
+      mant_b = (b[30:23] == 8'd0) ? {1'b0, b[22:0]} : {1'b1, b[22:0]};
+
+      a_larger = (exp_a > exp_b) || ((exp_a == exp_b) && (mant_a >= mant_b));
+      exp_large = a_larger ? exp_a : exp_b;
+      mant_large = {1'b0, (a_larger ? mant_a : mant_b)};
+      mant_small = {1'b0, (a_larger ? mant_b : mant_a)};
+      sign_large = a_larger ? sign_a : sign_b;
+      effective_sub = sign_a ^ sign_b;
+
+      shift = a_larger ? (integer'(exp_a) - integer'(exp_b))
+                       : (integer'(exp_b) - integer'(exp_a));
+      mant_small_shifted = (shift >= 25) ? 25'd0 : (mant_small >> shift);
+      mant_sum = effective_sub ? (mant_large - mant_small_shifted)
+                               : (mant_large + mant_small_shifted);
+
+      if (mant_sum == 25'd0) return 32'd0;
+
+      sign_res = sign_large;
+      if (mant_sum[24]) begin
+        exp_res = exp_large + 8'd1;
+        frac_res = mant_sum[23:1];
+      end else begin
+        lz = 0;
+        while ((lz < 24) && !mant_sum[23-lz]) lz++;
+        exp_res = exp_large - lz[7:0];
+        frac_res = (mant_sum[22:0] << lz);
+      end
+      return {sign_res, exp_res, frac_res};
+    end
+  endfunction
+
+  function automatic logic [31:0] fp32_sub(input logic [31:0] a, input logic [31:0] b);
+    return fp32_add(a, fp32_negate(b));
+  endfunction
+
+  function automatic logic [31:0] fp32_mul(input logic [31:0] a, input logic [31:0] b);
+    logic sign_a, sign_b, sign_p;
+    logic [7:0] exp_a, exp_b, exp_p;
+    logic [23:0] mant_a, mant_b;
+    logic [47:0] mant_prod;
+    logic [22:0] frac_p;
+    begin
+      if (fp32_is_nan(a) || fp32_is_nan(b)) return 32'h7FC0_0000;
+      if (fp32_is_zero(a) || fp32_is_zero(b)) return {a[31]^b[31], 31'd0};
+      if (fp32_is_inf(a) || fp32_is_inf(b)) return {a[31]^b[31], 8'hFF, 23'd0};
+
+      sign_a = a[31]; sign_b = b[31]; sign_p = sign_a ^ sign_b;
+      exp_a  = a[30:23]; exp_b = b[30:23];
+      mant_a = {1'b1, a[22:0]};
+      mant_b = {1'b1, b[22:0]};
+      mant_prod = ({24'd0, mant_a} * {24'd0, mant_b});
+
+      if (mant_prod[47]) begin
+        exp_p = exp_a + exp_b - 8'd126;
+        frac_p = mant_prod[46:24];
+      end else begin
+        exp_p = exp_a + exp_b - 8'd127;
+        frac_p = mant_prod[45:23];
+      end
+      return {sign_p, exp_p, frac_p};
+    end
+  endfunction
+
+  function automatic logic signed [23:0] fp32_to_q8_15(input logic [31:0] a);
+    logic sign_a;
+    logic [7:0] exp_a;
+    logic [23:0] mant_a;
+    logic signed [39:0] tmp;
+    integer shift;
+    begin
+      if (fp32_is_zero(a)) return 24'sd0;
+      sign_a = a[31];
+      exp_a  = a[30:23];
+      mant_a = {1'b1, a[22:0]};
+      shift = integer'(exp_a) - 127 - 23 + 15;
+      if (shift >= 0) tmp = $signed({15'd0, 1'b0, mant_a}) <<< shift;
+      else            tmp = $signed({15'd0, 1'b0, mant_a}) >>> (-shift);
+      if (sign_a) tmp = -tmp;
+      return tmp[23:0];
+    end
+  endfunction
+
+  function automatic logic [15:0] fp32_to_bf16(input logic [31:0] a);
+    logic round_up;
+    logic [15:0] upper;
+    begin
+      upper = a[31:16];
+      round_up = a[15] && (|a[14:0] || upper[0]);
+      fp32_to_bf16 = upper + round_up;
+    end
+  endfunction
+
+  function automatic logic [31:0] fp32_recip(input logic [31:0] a);
+    logic [7:0] exp_a, exp_r;
+    logic [23:0] mant_a;
+    logic [23:0] recip_q23, recip_norm;
+    logic [22:0] frac_r;
+    logic sign_r;
+    logic [46:0] dividend;
+    logic [46:0] recip_full;
+    begin
+      if (fp32_is_nan(a)) return 32'h7FC0_0000;
+      if (fp32_is_zero(a)) return {a[31], 8'hFF, 23'd0};
+      if (fp32_is_inf(a))  return {a[31], 31'd0};
+      sign_r = a[31];
+      exp_a  = a[30:23];
+      mant_a = {1'b1, a[22:0]};
+      dividend = 47'd1 << 46;
+      recip_full = dividend / {23'd0, mant_a};
+      recip_q23 = recip_full[23:0];
+      if (recip_q23[23]) begin
+        exp_r = 8'd254 - exp_a;
+        recip_norm = recip_q23;
+      end else begin
+        exp_r = 8'd253 - exp_a;
+        recip_norm = recip_q23 << 1;
+      end
+      frac_r = recip_norm[22:0];
+      return {sign_r, exp_r, frac_r};
+    end
+  endfunction
+
+  function automatic logic [31:0] fp32_div(input logic [31:0] a, input logic [31:0] b);
+    return fp32_mul(a, fp32_recip(b));
+  endfunction
+
 endpackage

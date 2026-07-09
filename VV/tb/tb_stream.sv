@@ -69,12 +69,15 @@ module tb_stream;
 
   // BFM: send one AXIS beat (tready always 1 when !overflow)
   task axis_send(input logic [31:0] data, input logic last);
-    s_axis_tdata  <= data;
-    s_axis_tvalid <= 1'b1;
-    s_axis_tlast  <= last;
-    @(posedge sink_clk);
-    #1;  // let NBAs settle
-    s_axis_tvalid <= 1'b0;
+    begin
+      s_axis_tdata  <= data;
+      s_axis_tvalid <= 1'b1;
+      s_axis_tlast  <= last;
+      do @(posedge sink_clk); while (!s_axis_tready);
+      #1;
+      s_axis_tvalid <= 1'b0;
+      s_axis_tlast  <= 1'b0;
+    end
   endtask
 
   // BFM: send a full aligned transfer

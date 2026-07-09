@@ -9,7 +9,11 @@ module tb_softmax;
   logic clk, rst_n, s_valid, kv_tile_first, kv_tile_last, p_valid, done;
   logic causal_mask_en;
   logic [15:0] q_tile_start, kv_tile_start;
+  logic [4:0] active_rows, active_cols;
   logic [31:0] s_data [TILE_ROWS][TILE_COLS];
+  logic state_load;
+  logic [31:0] state_m_in [TILE_ROWS];
+  logic [31:0] state_l_in [TILE_ROWS];
   logic [31:0] m_state [TILE_ROWS];
   logic [31:0] l_state [TILE_ROWS];
   logic [31:0] p_data  [TILE_ROWS][TILE_COLS];
@@ -31,6 +35,13 @@ module tb_softmax;
   initial begin
     clk = 0; rst_n = 0; s_valid = 0; kv_tile_first = 0; kv_tile_last = 0;
     causal_mask_en = 0; q_tile_start = 16'd0; kv_tile_start = 16'd0;
+    active_rows = TILE_ROWS;
+    active_cols = TILE_COLS;
+    state_load = 1'b0;
+    for (ri = 0; ri < TILE_ROWS; ri++) begin
+      state_m_in[ri] = 32'hFF80_0000;
+      state_l_in[ri] = 32'd0;
+    end
     err = 0;
 
     // Load golden vectors
