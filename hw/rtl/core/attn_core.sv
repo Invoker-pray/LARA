@@ -12,9 +12,7 @@
 //       ST_AV_DOT]*→ST_NORMALIZE→ST_WRITE_O→ST_DONE
 // ============================================================================
 
-module attn_core
-  import attn_pkg::*;
-(
+module attn_core (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -53,11 +51,14 @@ module attn_core
 
     // --- Error flag ---
     output logic        error,           // sticky: illegal config detected
+    output logic [7:0]  error_code,      // sticky reason code
 
     // --- Performance Counters ---
     output logic [31:0] cycle_cnt,
     output logic [31:0] mac_cycles
 );
+  import attn_pkg::*;
+
 
   attn_state_t state, next_state;
 
@@ -144,6 +145,7 @@ module attn_core
       causal_r     <= 1'b0;
       done         <= 1'b0;
       error        <= 1'b0;
+      error_code   <= ERR_NONE;
     end else begin
       state <= next_state;
 
@@ -155,6 +157,7 @@ module attn_core
         causal_r      <= cfg_causal;
         done          <= 1'b0;  // clear sticky done
         error         <= 1'b0;  // clear sticky error
+        error_code    <= ERR_NONE;
       end
 
       case (state)
@@ -193,7 +196,8 @@ module attn_core
           done <= 1'b1;  // sticky done
         end
         ST_ERROR: begin
-          error <= 1'b1; // sticky error
+          error      <= 1'b1; // sticky error
+          error_code <= ERR_BAD_CFG;
         end
         default: ;
       endcase

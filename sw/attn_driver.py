@@ -1,281 +1,293 @@
 #!/usr/bin/env python3
 """
-attn_driver.py — PYNQ Driver for LARA Attention Accelerator
+PYNQ driver for the Phase-1 attention accelerator contract.
 
-KV260 on-board control: loads bitstream, configures DMA, drives attention
-computation, and reads back results via AXI4-Lite + AXI4-Stream DMA.
-
-Requires: PYNQ v2.7+ with pynq.overlay and pynq.lib.dma
-
-Usage:
-  python attn_driver.py --bitstream lara_attention.bit --check
+Main mode: full_run_preload_then_start
+  1. Software starts PYNQ DMA transfers for complete K, V, and Q tensors.
+  2. CSR_STREAM_DEST/CSR_STREAM_LEN configure the PL-side stream checker only.
+  3. A single CSR_CTRL.start launches the full-run core transaction.
+  4. Software receives the complete O tensor through the output DMA.
 """
 
-import numpy as np
-import os
-import sys
+from __future__ import annotations
+
 import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
-# ============================================================================
-# PYNQ Imports (available on KV260, mock for development)
-# ============================================================================
+import numpy as np
+
 try:
-    from pynq import Overlay, allocate
-    from pynq.lib import DmaWindow
+    from pynq import Overlay, allocate  # type: ignore
     HAS_PYNQ = True
-except ImportError:
+except ImportError:  # pragma: no cover - exercised on non-KV260 hosts
+    Overlay = None
+    allocate = None
     HAS_PYNQ = False
-    print("WARNING: PYNQ not available (development mode). Using mock driver.")
 
 
-# ============================================================================
-# CSR Address Map (from attn_pkg.sv §7)
-# ============================================================================
-CSR_CTRL        = 0x000
-CSR_STATUS      = 0x004
-CSR_SEQ_LEN     = 0x008
-CSR_STREAM_SRC  = 0x020
-CSR_STREAM_LEN  = 0x028
+# CSR map, mirrored from src/hw/rtl/pkg/attn_pkg.sv
+CSR_CTRL = 0x000
+CSR_STATUS = 0x004
+CSR_SEQ_LEN = 0x008
+CSR_Q_POS_BASE = 0x00C
+CSR_KV_POS_BASE = 0x010
+CSR_CFG = 0x014
+CSR_ERROR_CODE = 0x018
+CSR_STREAM_LEN = 0x028
 CSR_STREAM_DEST = 0x02C
-CSR_RESULT_DST  = 0x050
-CSR_RESULT_LEN  = 0x058
+CSR_RESULT_LEN = 0x058
 CSR_PERF_CYCLES = 0x100
+CSR_PERF_MAC_CYCLES = 0x108
 
-# Stream destinations
+CTRL_START = 1 << 0
+CTRL_CLEAR_STATUS = 1 << 1
+STATUS_START_READY = 1 << 0
+STATUS_BUSY = 1 << 1
+STATUS_DONE = 1 << 2
+STATUS_ERROR = 1 << 3
+STATUS_STREAM_ERROR = 1 << 4
+
 DEST_K_CACHE = 0
 DEST_V_CACHE = 1
-DEST_Q_BUF   = 2
+DEST_Q_BUF = 2
+
+HEAD_DIM = 128
+N_Q_HEADS = 32
+N_KV_HEADS = 8
+MAX_SEQ_LEN = 2048
+BF16_BYTES = 2
+
+ERR_NONE = 0x00
+ERR_BAD_CFG = 0x01
+ERR_BUSY_START = 0x02
+ERR_STREAM_LEN = 0x10
+ERR_STREAM_DEST = 0x11
+ERR_RESULT_LEN = 0x12
+
+
+class MockMMIO:
+    """Small MMIO stand-in for workstation tests."""
+
+    def __init__(self) -> None:
+        self.regs: dict[int, int] = {CSR_STATUS: STATUS_START_READY}
+        self.trace: list[tuple[str, int, int]] = []
+
+    def write(self, offset: int, value: int) -> None:
+        value = int(value) & 0xFFFFFFFF
+        self.trace.append(("write", offset, value))
+        if offset == CSR_CTRL:
+            if value & CTRL_CLEAR_STATUS:
+                self.regs[CSR_STATUS] = STATUS_START_READY
+                self.regs[CSR_ERROR_CODE] = ERR_NONE
+            if value & CTRL_START:
+                self.regs[CSR_STATUS] = STATUS_DONE | STATUS_START_READY
+            return
+        self.regs[offset] = value
+
+    def read(self, offset: int) -> int:
+        value = self.regs.get(offset, 0)
+        self.trace.append(("read", offset, value))
+        return value
+
+
+class MockDMAChannel:
+    def __init__(self, name: str = "dma") -> None:
+        self.name = name
+        self.last_buffer: Optional[np.ndarray] = None
+        self.trace: list[tuple[str, str, int]] = []
+
+    def transfer(self, buf: np.ndarray) -> None:
+        self.last_buffer = buf
+        self.trace.append(("transfer", self.name, int(buf.nbytes)))
+
+    def wait(self) -> None:
+        self.trace.append(("wait", self.name, 0))
+        return
+
+
+@dataclass(frozen=True)
+class TensorByteCounts:
+    q_bytes: int
+    k_bytes: int
+    v_bytes: int
+    o_bytes: int
 
 
 class AttentionAccelerator:
-    """PYNQ driver for LARA attention accelerator."""
+    """Driver matching docs/spec/interfaces.md full-run control contract."""
 
-    def __init__(self, bitstream_path: str = None):
-        """
-        Load bitstream and initialize DMA.
-
-        Args:
-            bitstream_path: path to .bit or .hwh file
-        """
+    def __init__(self, bitstream_path: str | None = None, overlay: Any | None = None) -> None:
         if HAS_PYNQ:
-            self.overlay = Overlay(bitstream_path)
+            self.overlay = overlay if overlay is not None else Overlay(bitstream_path)
             self.dma_send = self.overlay.axi_dma_0.sendchannel
             self.dma_recv = self.overlay.axi_dma_0.recvchannel
-            self.mmio = self.overlay.attn_accel_0.mmio  # AXI4-Lite
+            self.mmio = self.overlay.attn_accel_0.mmio
             self._hw_ready = True
         else:
-            self.dma_send = None
-            self.dma_recv = None
-            self.mmio = None
+            self.overlay = None
+            self.dma_send = MockDMAChannel("send")
+            self.dma_recv = MockDMAChannel("recv")
+            self.mmio = MockMMIO()
             self._hw_ready = False
-            print("Mock driver initialized — set HAS_PYNQ=True for hardware.")
 
     @property
     def hw_ready(self) -> bool:
         return self._hw_ready
 
-    # ==================================================================
-    # Configuration
-    # ==================================================================
+    @staticmethod
+    def byte_counts(seq_len: int) -> TensorByteCounts:
+        AttentionAccelerator._validate_seq_len(seq_len)
+        return TensorByteCounts(
+            q_bytes=N_Q_HEADS * seq_len * HEAD_DIM * BF16_BYTES,
+            k_bytes=N_KV_HEADS * seq_len * HEAD_DIM * BF16_BYTES,
+            v_bytes=N_KV_HEADS * seq_len * HEAD_DIM * BF16_BYTES,
+            o_bytes=N_Q_HEADS * seq_len * HEAD_DIM * BF16_BYTES,
+        )
 
-    def configure(self, seq_len: int, q_addr: int, k_addr: int,
-                  v_addr: int, o_addr: int):
-        """
-        Configure the accelerator for one attention computation.
+    @staticmethod
+    def _validate_seq_len(seq_len: int) -> None:
+        if seq_len <= 0 or seq_len > MAX_SEQ_LEN:
+            raise ValueError(f"seq_len must be in 1..{MAX_SEQ_LEN}, got {seq_len}")
 
-        Args:
-            seq_len:   sequence length (≤ MAX_SEQ_LEN)
-            q_addr:    Q data DDR physical address
-            k_addr:    K data DDR physical address
-            v_addr:    V data DDR physical address
-            o_addr:    O (output) DDR physical address
-        """
-        if self.mmio is None:
-            print(f"CONFIG: seq_len={seq_len}, Q={q_addr:#x}, K={k_addr:#x}, "
-                  f"V={v_addr:#x}, O={o_addr:#x}")
-            return
+    @staticmethod
+    def _as_u16_contiguous(array: np.ndarray, expected_shape: tuple[int, ...], name: str) -> np.ndarray:
+        if array.shape != expected_shape:
+            raise ValueError(f"{name} shape must be {expected_shape}, got {array.shape}")
+        if array.dtype == np.uint16:
+            return np.ascontiguousarray(array)
+        return np.ascontiguousarray(array.view(np.uint16))
+
+    def clear_status(self) -> None:
+        self.mmio.write(CSR_CTRL, CTRL_CLEAR_STATUS)
+
+    def configure(self, seq_len: int, q_pos_base: int = 0, kv_pos_base: int = 0, causal: bool = True) -> None:
+        self._validate_seq_len(seq_len)
+        if q_pos_base < 0 or kv_pos_base < 0:
+            raise ValueError("position bases must be non-negative")
+        if q_pos_base + seq_len > MAX_SEQ_LEN or kv_pos_base + seq_len > MAX_SEQ_LEN:
+            raise ValueError("position base + seq_len exceeds MAX_SEQ_LEN")
 
         self.mmio.write(CSR_SEQ_LEN, seq_len)
-        # Stream source/dest addresses set per transfer (see load/readback)
+        self.mmio.write(CSR_Q_POS_BASE, q_pos_base)
+        self.mmio.write(CSR_KV_POS_BASE, kv_pos_base)
+        self.mmio.write(CSR_CFG, 1 if causal else 0)
 
-    def start(self):
-        """Pulse start bit."""
-        if self.mmio:
-            self.mmio.write(CSR_CTRL, 0x1)  # start=1
+    def _transfer_to_device(self, dest: int, payload_u16: np.ndarray) -> None:
+        byte_len = payload_u16.nbytes
+        self.mmio.write(CSR_STREAM_DEST, dest)
+        self.mmio.write(CSR_STREAM_LEN, byte_len)
+
+        if HAS_PYNQ:
+            buf = allocate(shape=(byte_len,), dtype=np.uint8)
+            buf[:] = payload_u16.view(np.uint8).reshape(-1)
+        else:
+            buf = payload_u16.view(np.uint8).reshape(-1).copy()
+
+        self.dma_send.transfer(buf)
+        self.dma_send.wait()
+
+    def preload_k(self, k_heads: np.ndarray, seq_len: int) -> None:
+        expected = (N_KV_HEADS, seq_len, HEAD_DIM)
+        self._transfer_to_device(DEST_K_CACHE, self._as_u16_contiguous(k_heads, expected, "K"))
+
+    def preload_v(self, v_heads: np.ndarray, seq_len: int) -> None:
+        expected = (N_KV_HEADS, seq_len, HEAD_DIM)
+        self._transfer_to_device(DEST_V_CACHE, self._as_u16_contiguous(v_heads, expected, "V"))
+
+    def preload_q(self, q_heads: np.ndarray, seq_len: int) -> None:
+        expected = (N_Q_HEADS, seq_len, HEAD_DIM)
+        self._transfer_to_device(DEST_Q_BUF, self._as_u16_contiguous(q_heads, expected, "Q"))
+
+    def start(self) -> None:
+        status = self.mmio.read(CSR_STATUS)
+        if not (status & STATUS_START_READY):
+            raise RuntimeError("accelerator is not ready to accept start")
+        self.mmio.write(CSR_CTRL, CTRL_START)
+
+    def status(self) -> int:
+        return self.mmio.read(CSR_STATUS)
 
     def is_done(self) -> bool:
-        """Poll done flag."""
-        if self.mmio:
-            return bool(self.mmio.read(CSR_STATUS) & 0x2)
-        return True
+        return bool(self.status() & STATUS_DONE)
 
-    def wait_done(self, timeout_ms: int = 5000):
-        """Block until computation completes."""
-        t0 = time.time()
+    def check_errors(self) -> None:
+        status = self.status()
+        if status & (STATUS_ERROR | STATUS_STREAM_ERROR):
+            code = self.mmio.read(CSR_ERROR_CODE) & 0xFF
+            raise RuntimeError(f"accelerator error status=0x{status:08x}, code=0x{code:02x}")
+
+    def wait_done(self, timeout_ms: int = 5000) -> None:
+        deadline = time.time() + timeout_ms / 1000.0
         while not self.is_done():
-            if (time.time() - t0) * 1000 > timeout_ms:
-                raise TimeoutError("Attention accelerator timed out")
+            self.check_errors()
+            if time.time() > deadline:
+                raise TimeoutError("attention accelerator timed out")
             time.sleep(0.001)
+        self.check_errors()
 
-    def read_perf(self) -> dict:
-        """Read performance counters."""
-        if self.mmio is None:
-            return {"cycles": 0, "mac_cycles": 0}
+    def readback_o(self, seq_len: int) -> np.ndarray:
+        counts = self.byte_counts(seq_len)
+        self.mmio.write(CSR_RESULT_LEN, counts.o_bytes)
+
+        if HAS_PYNQ:
+            out_buf = allocate(shape=(counts.o_bytes,), dtype=np.uint8)
+        else:
+            out_buf = np.zeros((counts.o_bytes,), dtype=np.uint8)
+
+        self.dma_recv.transfer(out_buf)
+        self.dma_recv.wait()
+        return np.frombuffer(out_buf.tobytes(), dtype=np.uint16).reshape(N_Q_HEADS, seq_len, HEAD_DIM)
+
+    def read_perf(self) -> dict[str, int]:
         return {
             "cycles": self.mmio.read(CSR_PERF_CYCLES),
+            "mac_cycles": self.mmio.read(CSR_PERF_MAC_CYCLES),
         }
 
-    # ==================================================================
-    # Data Transfer
-    # ==================================================================
-
-    def load_kv_cache(self, K: np.ndarray, V: np.ndarray):
-        """
-        Load K and V matrices into URAM caches.
-
-        Args:
-            K: [L, 1024] bf16 (8 KV heads × 128 dim)
-            V: [L, 1024] bf16
-        """
-        L = K.shape[0]
-        k_bytes = K.view(np.uint16).tobytes()
-        v_bytes = V.view(np.uint16).tobytes()
-
-        if HAS_PYNQ:
-            k_buf = allocate(shape=(len(k_bytes),), dtype=np.uint8)
-            v_buf = allocate(shape=(len(v_bytes),), dtype=np.uint8)
-            k_buf[:] = np.frombuffer(k_bytes, dtype=np.uint8)
-            v_buf[:] = np.frombuffer(v_bytes, dtype=np.uint8)
-
-            self.mmio.write(CSR_STREAM_DEST, DEST_K_CACHE)
-            self.mmio.write(CSR_STREAM_LEN, len(k_bytes))
-            self.dma_send.transfer(k_buf)
-            self.dma_send.wait()
-
-            self.mmio.write(CSR_STREAM_DEST, DEST_V_CACHE)
-            self.mmio.write(CSR_STREAM_LEN, len(v_bytes))
-            self.dma_send.transfer(v_buf)
-            self.dma_send.wait()
-        else:
-            print(f"LOAD: K[{L}x1024] + V[{L}x1024] = {len(k_bytes)+len(v_bytes)} bytes")
-
-    def load_q_tile(self, Q_tile: np.ndarray):
-        """
-        Load one Q tile [TILE_Q, 4096] bf16 into ping-pong buffer.
-
-        Args:
-            Q_tile: [32, 4096] bf16 (TILE_Q rows × N_Q_HEADS × HEAD_DIM)
-        """
-        q_bytes = Q_tile.view(np.uint16).tobytes()
-
-        if HAS_PYNQ:
-            q_buf = allocate(shape=(len(q_bytes),), dtype=np.uint8)
-            q_buf[:] = np.frombuffer(q_bytes, dtype=np.uint8)
-            self.mmio.write(CSR_STREAM_DEST, DEST_Q_BUF)
-            self.mmio.write(CSR_STREAM_LEN, len(q_bytes))
-            self.dma_send.transfer(q_buf)
-            self.dma_send.wait()
-        else:
-            print(f"LOAD Q: {Q_tile.shape} = {len(q_bytes)} bytes")
-
-    def readback_o(self, L: int) -> np.ndarray:
-        """
-        Read back O result [L, 4096] bf16 from DDR.
-
-        Returns:
-            O: [L, 4096] bf16 numpy array
-        """
-        o_size = L * 4096 * 2  # bytes
-
-        if HAS_PYNQ:
-            o_buf = allocate(shape=(o_size,), dtype=np.uint8)
-            self.mmio.write(CSR_RESULT_LEN, o_size)
-            self.dma_recv.transfer(o_buf)
-            self.dma_recv.wait()
-            O = np.frombuffer(o_buf.tobytes(), dtype=np.uint16).reshape(L, 4096)
-            return O.view(np.float16)  # interpret as bf16
-        else:
-            print(f"READBACK O: [{L}x4096] = {o_size} bytes")
-            return np.zeros((L, 4096), dtype=np.float16)
-
-    # ==================================================================
-    # High-Level API
-    # ==================================================================
-
     def run_attention(
-        self, Q: np.ndarray, K: np.ndarray, V: np.ndarray,
-        seq_len: int = None
+        self,
+        q_heads: np.ndarray,
+        k_heads: np.ndarray,
+        v_heads: np.ndarray,
+        *,
+        seq_len: int | None = None,
+        q_pos_base: int = 0,
+        kv_pos_base: int = 0,
+        causal: bool = True,
+        timeout_ms: int = 5000,
     ) -> np.ndarray:
-        """
-        Run full attention computation for one GQA group (one KV head, 4 Q heads).
-
-        Args:
-            Q: [L, N_Q_HEADS*HEAD_DIM] bf16 (= [L, 4096] for Llama3)
-            K: [L, N_KV_HEADS*HEAD_DIM] bf16 (= [L, 1024])
-            V: [L, N_KV_HEADS*HEAD_DIM] bf16 (= [L, 1024])
-            seq_len: current sequence length
-        Returns:
-            O: [L, N_Q_HEADS*HEAD_DIM] bf16 (= [L, 4096])
-        """
-        L = Q.shape[0] if seq_len is None else seq_len
-        print(f"Attention: L={L}")
-
-        # 1. Load K/V cache (once per GQA group)
-        self.load_kv_cache(K, V)
-
-        # 2. For each Q tile (TILE_Q=32):
-        #    a. Load Q tile to ping-pong buffer
-        #    b. Start computation
-        #    c. Wait for completion
-        #    d. Read back O tile
-        O = np.zeros_like(Q)
-        n_q_tiles = (L + 31) // 32  # ceil(L/TILE_Q)
-
-        for tile_idx in range(n_q_tiles):
-            q_start = tile_idx * 32
-            q_end = min(q_start + 32, L)
-            Q_tile = Q[q_start:q_end]
-
-            self.load_q_tile(Q_tile)
-            self.start()
-            self.wait_done()
-
-            O_tile = self.readback_o(q_end - q_start)
-            O[q_start:q_end] = O_tile
-
-            perf = self.read_perf()
-            print(f"  Tile {tile_idx}: cycles={perf['cycles']}")
-
-        return O
+        """Run one full attention transaction with head-major tensors."""
+        L = int(seq_len if seq_len is not None else q_heads.shape[1])
+        self.configure(L, q_pos_base=q_pos_base, kv_pos_base=kv_pos_base, causal=causal)
+        self.clear_status()
+        self.preload_k(k_heads, L)
+        self.preload_v(v_heads, L)
+        self.preload_q(q_heads, L)
+        self.mmio.write(CSR_RESULT_LEN, self.byte_counts(L).o_bytes)
+        self.start()
+        self.wait_done(timeout_ms=timeout_ms)
+        return self.readback_o(L)
 
 
-# ============================================================================
-# Self-Test (Mock)
-# ============================================================================
-
-def _self_test():
-    """Verify driver interface without hardware."""
+def _self_test() -> None:
     accel = AttentionAccelerator()
-    assert not accel.hw_ready, "Mock should report hw_ready=False"
+    assert not accel.hw_ready
 
-    L = 64
-    Q = np.zeros((L, 4096), dtype=np.float16)
-    K = np.zeros((L, 1024), dtype=np.float16)
-    V = np.zeros((L, 1024), dtype=np.float16)
+    seq_len = 16
+    counts = accel.byte_counts(seq_len)
+    assert counts.q_bytes == 32 * seq_len * 128 * 2
+    assert counts.k_bytes == 8 * seq_len * 128 * 2
+    assert counts.v_bytes == counts.k_bytes
+    assert counts.o_bytes == counts.q_bytes
 
-    accel.configure(L, 0x10000000, 0x11000000, 0x12000000, 0x13000000)
-    accel.start()
-    accel.wait_done()
-
-    O = accel.run_attention(Q, K, V)
-    assert O.shape == (L, 4096), f"O shape: {O.shape}"
-    print("Driver self-test PASSED")
+    q = np.zeros((N_Q_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+    k = np.zeros((N_KV_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+    v = np.zeros((N_KV_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+    o = accel.run_attention(q, k, v, seq_len=seq_len)
+    assert o.shape == (N_Q_HEADS, seq_len, HEAD_DIM)
+    print("attn_driver full-run mock self-test PASSED")
 
 
 if __name__ == "__main__":
-    if "--check" in sys.argv:
-        _self_test()
-    else:
-        print("PYNQ driver for LARA attention accelerator.")
-        print(f"HAS_PYNQ={HAS_PYNQ}")
-        print("Usage: python attn_driver.py --check")
+    _self_test()

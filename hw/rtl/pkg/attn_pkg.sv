@@ -172,17 +172,18 @@ package attn_pkg;
   parameter int CSR_ADDR_W = 14;
 
   // --- Control & Status (0x000–0x0FF) ---
-  parameter logic [13:0] CSR_CTRL            = 14'h000;  // [0] start, [1] soft_reset, [31:2] reserved
-  parameter logic [13:0] CSR_STATUS          = 14'h004;  // [0] busy, [1] done, [2] error, [31:3] reserved
+  parameter logic [13:0] CSR_CTRL            = 14'h000;  // [0] start, [1] clear_status, [31:2] reserved
+  parameter logic [13:0] CSR_STATUS          = 14'h004;  // [0] start_ready, [1] busy, [2] done, [3] error, [4] stream_error
   parameter logic [13:0] CSR_SEQ_LEN         = 14'h008;  // Actual sequence length for this inference (≤ MAX_SEQ_LEN)
-  parameter logic [13:0] CSR_Q_TILE_IDX      = 14'h00C;  // Current Q tile index (read-only debug)
-  parameter logic [13:0] CSR_KV_TILE_IDX     = 14'h010;  // Current KV tile index (read-only debug)
-  parameter logic [13:0] CSR_HEAD_IDX        = 14'h014;  // Current Q head index (0..31), driver sets before start
+  parameter logic [13:0] CSR_Q_POS_BASE      = 14'h00C;  // Absolute Q position base for causal mask
+  parameter logic [13:0] CSR_KV_POS_BASE     = 14'h010;  // Absolute K/V position base for causal mask
+  parameter logic [13:0] CSR_CFG             = 14'h014;  // [0] causal, [31:1] reserved
+  parameter logic [13:0] CSR_ERROR_CODE      = 14'h018;  // Sticky error code until clear_status or accepted start
 
   // --- Data Stream Control (0x020–0x04F) ---
   parameter logic [13:0] CSR_STREAM_SRC      = 14'h020;  // DDR source address [31:0] for next stream
   parameter logic [13:0] CSR_STREAM_SRC_HI   = 14'h024;  // DDR source address [63:32] (reserved for 64-bit)
-  parameter logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Stream length in bytes. Write triggers DMA start.
+  parameter logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Stream length in bytes for PL-side checker only
   parameter logic [13:0] CSR_STREAM_DEST     = 14'h02C;  // Stream destination select: 0=K_CACHE, 1=V_CACHE, 2=Q_BUF
 
   // --- Result Stream Control (0x050–0x07F) ---
@@ -193,9 +194,18 @@ package attn_pkg;
   // --- Performance Counters (0x100–0x1FF) ---
   parameter logic [13:0] CSR_PERF_CYCLES     = 14'h100;  // Total cycle count [31:0]
   parameter logic [13:0] CSR_PERF_CYCLES_HI  = 14'h104;  // Total cycle count [63:32]
-  parameter logic [13:0] CSR_PERF_STALLS     = 14'h108;  // Stall cycles (waiting for DDR/URAM)
+  parameter logic [13:0] CSR_PERF_MAC_CYCLES = 14'h108;  // MAC-active cycles
   parameter logic [13:0] CSR_PERF_Q_TILES    = 14'h10C;  // Number of Q tiles processed
   parameter logic [13:0] CSR_PERF_KV_TILES   = 14'h110;  // Number of KV tiles processed
+
+  typedef enum logic [7:0] {
+    ERR_NONE        = 8'h00,
+    ERR_BAD_CFG     = 8'h01,
+    ERR_BUSY_START  = 8'h02,
+    ERR_STREAM_LEN  = 8'h10,
+    ERR_STREAM_DEST = 8'h11,
+    ERR_RESULT_LEN  = 8'h12
+  } error_code_t;
 
   // ==================================================================
   // 8. FSM State Enum — Attention Controller State Machine
