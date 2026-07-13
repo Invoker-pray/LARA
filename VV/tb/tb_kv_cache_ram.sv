@@ -9,26 +9,49 @@ module tb_kv_cache_ram;
   logic [15:0] rd_vec_token_idx;
   logic [15:0] wr_data;
   logic [6:0]  rd_dim, rd_vec_dim_start;
-  logic [15:0] rd_data [TILE_KV];
-  logic [15:0] rd_vec_data [TILE_COLS];
+  logic [15:0] rd_data_token [TILE_KV];
+  logic [15:0] rd_vec_data_token [TILE_COLS];
+  logic [15:0] rd_data_vec [TILE_KV];
+  logic [15:0] rd_vec_data_vec [TILE_COLS];
+  logic tick_marker;
+  logic settle_marker;
 
   integer err, tok;
 
-  kv_cache_ram dut (
+  kv_cache_ram dut_token (
     .clk, .rst_n,
     .wr_en, .wr_addr, .wr_data,
-    .rd_en, .rd_token_start, .rd_dim, .rd_data,
-    .rd_vec_en, .rd_vec_token_idx, .rd_vec_dim_start, .rd_vec_data
+    .rd_en, .rd_token_start, .rd_dim, .rd_data(rd_data_token),
+    .rd_vec_en, .rd_vec_token_idx, .rd_vec_dim_start, .rd_vec_data(rd_vec_data_token)
+  );
+
+  kv_cache_ram #(.TOKEN_PARALLEL_READ(1'b0)) dut_vec (
+    .clk, .rst_n,
+    .wr_en, .wr_addr, .wr_data,
+    .rd_en, .rd_token_start, .rd_dim, .rd_data(rd_data_vec),
+    .rd_vec_en, .rd_vec_token_idx, .rd_vec_dim_start, .rd_vec_data(rd_vec_data_vec)
   );
 
   always #5 clk = ~clk;
+
+  task automatic tick;
+    begin
+      @(posedge clk) tick_marker = ~tick_marker;
+    end
+  endtask
+
+  task automatic settle;
+    begin
+      #1 settle_marker = ~settle_marker;
+    end
+  endtask
 
   task automatic write_elem(input int token_idx, input int dim_idx, input logic [15:0] data);
     begin
       wr_en   <= 1'b1;
       wr_addr <= 16'(token_idx * HEAD_DIM + dim_idx);
       wr_data <= data;
-      @(posedge clk);
+      tick();
       wr_en   <= 1'b0;
       wr_addr <= '0;
       wr_data <= '0;
@@ -41,15 +64,15 @@ module tb_kv_cache_ram;
       rd_en <= 1'b1;
       rd_token_start <= 16'(token_base);
       rd_dim <= 7'(dim_idx);
-      @(posedge clk);
-      #1;
+      tick();
+      settle();
       rd_en <= 1'b0;
 
       for (tok = 0; tok < TILE_KV; tok++) begin
         exp_val = 16'(((token_base + tok) << 8) | dim_idx);
-        if (rd_data[tok] !== exp_val) begin
+        if (rd_data_token[tok] !== exp_val) begin
           $display("FAIL read tile=%0d dim=%0d tok=%0d got=0x%04h exp=0x%04h",
-                   token_base, dim_idx, tok, rd_data[tok], exp_val);
+                   token_base, dim_idx, tok, rd_data_token[tok], exp_val);
           err++;
         end
       end
@@ -62,15 +85,15 @@ module tb_kv_cache_ram;
       rd_vec_en <= 1'b1;
       rd_vec_token_idx <= 16'(token_idx);
       rd_vec_dim_start <= 7'(dim_base);
-      @(posedge clk);
-      #1;
+      tick();
+      settle();
       rd_vec_en <= 1'b0;
 
       for (tok = 0; tok < TILE_COLS; tok++) begin
         exp_val = 16'(((token_idx << 8) | (dim_base + tok)));
-        if (rd_vec_data[tok] !== exp_val) begin
+        if (rd_vec_data_vec[tok] !== exp_val) begin
           $display("FAIL vec token=%0d dim=%0d slot=%0d got=0x%04h exp=0x%04h",
-                   token_idx, dim_base, tok, rd_vec_data[tok], exp_val);
+                   token_idx, dim_base, tok, rd_vec_data_vec[tok], exp_val);
           err++;
         end
       end
@@ -89,11 +112,13 @@ module tb_kv_cache_ram;
     rd_dim = '0;
     rd_vec_token_idx = '0;
     rd_vec_dim_start = '0;
+    tick_marker = 1'b0;
+    settle_marker = 1'b0;
     err = 0;
 
     $display("TB: kv_cache_ram banked read test");
     #20 rst_n = 1'b1;
-    @(posedge clk);
+    tick();
 
     // Fill two TILE_KV groups across dims 0..31 with easy-to-check patterns.
     for (int dim_idx = 0; dim_idx < 32; dim_idx++) begin

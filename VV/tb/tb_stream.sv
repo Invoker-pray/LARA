@@ -34,11 +34,13 @@ module tb_stream;
   logic        src_data_valid;
   logic [15:0] src_data_in;
   logic        src_data_last;
+  logic        src_data_ready;
   logic [31:0] src_cfg_len;
   logic [31:0] m_axis_tdata;
   logic        m_axis_tvalid, m_axis_tready, m_axis_tlast;
   logic [31:0] bytes_sent;
   logic        src_done;
+  logic        src_done_seen;
 
   // ==================================================================
   // DUT Instances (share clock)
@@ -54,6 +56,7 @@ module tb_stream;
   attn_axi_stream_source u_src (
     .clk(sink_clk), .rst_n(sink_rst_n),
     .data_valid(src_data_valid), .data_in(src_data_in), .data_last(src_data_last),
+    .data_ready(src_data_ready),
     .cfg_len(src_cfg_len),
     .m_axis_tdata, .m_axis_tvalid, .m_axis_tready, .m_axis_tlast,
     .bytes_sent, .done(src_done)
@@ -61,11 +64,57 @@ module tb_stream;
 
   always #5 sink_clk = ~sink_clk;
 
+  always_ff @(posedge sink_clk or negedge sink_rst_n) begin
+    if (!sink_rst_n)
+      src_done_seen <= 1'b0;
+    else if (src_done)
+      src_done_seen <= 1'b1;
+  end
+
   // ==================================================================
   // Test Infrastructure
   // ==================================================================
   integer err_cnt, test_num;
   integer byte_cnt, expected_bytes;
+  logic tick_marker;
+  logic settle_marker;
+
+  task automatic tick;
+    begin
+      @(posedge sink_clk) tick_marker = ~tick_marker;
+    end
+  endtask
+
+  task automatic settle;
+    begin
+      #1 settle_marker = ~settle_marker;
+    end
+  endtask
+
+  task automatic wait_ready;
+    begin
+      do tick(); while (!s_axis_tready);
+    end
+  endtask
+
+  task automatic wait_cycles(input integer n);
+    integer wi;
+    begin
+      for (wi = 0; wi < n; wi = wi + 1)
+        tick();
+    end
+  endtask
+
+  task automatic src_send(input logic [15:0] data, input logic last);
+    begin
+      src_data_in    <= data;
+      src_data_last  <= last;
+      src_data_valid <= 1'b1;
+      do tick(); while (!src_data_ready);
+      src_data_valid <= 1'b0;
+      src_data_last  <= 1'b0;
+    end
+  endtask
 
   // BFM: send one AXIS beat (tready always 1 when !overflow)
   task axis_send(input logic [31:0] data, input logic last);
@@ -73,8 +122,8 @@ module tb_stream;
       s_axis_tdata  <= data;
       s_axis_tvalid <= 1'b1;
       s_axis_tlast  <= last;
-      do @(posedge sink_clk); while (!s_axis_tready);
-      #1;
+      wait_ready();
+      settle();
       s_axis_tvalid <= 1'b0;
       s_axis_tlast  <= 1'b0;
     end
@@ -98,16 +147,18 @@ module tb_stream;
     cfg_burst <= 4'd0;
     src_data_valid <= 1'b0;
     m_axis_tready <= 1'b1;
-    repeat(3) @(posedge sink_clk);
+    wait_cycles(3);
     sink_rst_n <= 1'b1;
-    repeat(2) @(posedge sink_clk);
+    wait_cycles(2);
   endtask
 
   // ==================================================================
   // Main Test Sequence
   // ==================================================================
   initial begin
-    sink_clk = 0; sink_rst_n = 0;
+    sink_clk = 1'b0; sink_rst_n = 1'b0;
+    tick_marker = 1'b0;
+    settle_marker = 1'b0;
     err_cnt = 0; test_num = 0;
 
     $display("============================================");
@@ -124,9 +175,9 @@ module tb_stream;
     cfg_dest  <= 2'd0;     // K cache
     cfg_burst <= 4'd8;     // 8-beat burst
     expected_bytes = 32;
-    @(posedge sink_clk);
+    tick();
     axis_send_aligned(8);
-    repeat(5) @(posedge sink_clk);
+    wait_cycles(5);
 
     if (bytes_received != expected_bytes) begin
       $display("FAIL T1: bytes_received=%0d exp=%0d", bytes_received, expected_bytes);
@@ -147,11 +198,11 @@ module tb_stream;
     do_reset;
     cfg_len   <= 32'd32;  // 32 bytes total
     cfg_dest  <= 2'd1;
-    @(posedge sink_clk);
+    tick();
     axis_send_aligned(4);  // 16 bytes
-    #1;
+    settle();
     axis_send_aligned(4);  // 16 bytes
-    repeat(5) @(posedge sink_clk);
+    wait_cycles(5);
     if (bytes_received != 32) begin
       $display("FAIL T2: got %0d exp 32", bytes_received); err_cnt++;
     end
@@ -163,9 +214,9 @@ module tb_stream;
     test_num = 3; $display("--- Test %0d: Overflow detection ---", test_num);
     do_reset;
     cfg_len <= 32'd8;  // only 8 bytes expected
-    @(posedge sink_clk);
+    tick();
     axis_send_aligned(4);  // 16 bytes sent → overflow!
-    repeat(5) @(posedge sink_clk);
+    wait_cycles(5);
     if (!overflow) begin
       $display("FAIL T3: overflow NOT detected (cfg_len=8, sent 16 bytes)"); err_cnt++;
     end
@@ -177,9 +228,9 @@ module tb_stream;
     test_num = 4; $display("--- Test %0d: Underflow detection ---", test_num);
     do_reset;
     cfg_len <= 32'd32;  // expect 32 bytes
-    @(posedge sink_clk);
+    tick();
     axis_send_aligned(2);  // only 8 bytes sent
-    repeat(5) @(posedge sink_clk);
+    wait_cycles(5);
     if (!underflow) begin
       $display("FAIL T4: underflow NOT detected (cfg_len=32, only 8 sent)"); err_cnt++;
     end
@@ -191,20 +242,20 @@ module tb_stream;
     test_num = 5; $display("--- Test %0d: Backpressure ---", test_num);
     do_reset;
     cfg_len <= 32'd16;
-    @(posedge sink_clk);
+    tick();
     // Send first beat
     s_axis_tdata  <= 32'hBEEF0001;
     s_axis_tvalid <= 1'b1;
     s_axis_tlast  <= 1'b0;
-    @(posedge sink_clk);
+    tick();
     // Backpressure: tready is always 1, so backpressure tested via data_valid stalling
     // Wait for tready cycle
-    while (!s_axis_tready) @(posedge sink_clk);
+    wait_ready();
     s_axis_tvalid <= 1'b0;
     // Send remaining beats
-    repeat(2) @(posedge sink_clk);
+    wait_cycles(2);
     axis_send(32'hBEEF0002, 1'b1);
-    repeat(5) @(posedge sink_clk);
+    wait_cycles(5);
     $display("  Test 5: stream stable under backpressure");
 
     // ================================================================
@@ -213,16 +264,16 @@ module tb_stream;
     test_num = 6; $display("--- Test %0d: Destination routing ---", test_num);
     do_reset;
     // Send to K cache
-    cfg_dest <= 2'd0; cfg_len <= 32'd4; @(posedge sink_clk);
+    cfg_dest <= 2'd0; cfg_len <= 32'd4; tick();
     axis_send_aligned(1);
-    repeat(3) @(posedge sink_clk);
+    wait_cycles(3);
     if (dest_sel != 2'd0) begin
       $display("FAIL T6: dest_sel=%0d for K cache (exp 0)", dest_sel); err_cnt++;
     end
     // Send to V cache
-    cfg_dest <= 2'd1; cfg_len <= 32'd4; @(posedge sink_clk);
+    cfg_dest <= 2'd1; cfg_len <= 32'd4; tick();
     axis_send_aligned(1);
-    repeat(3) @(posedge sink_clk);
+    wait_cycles(3);
     if (dest_sel != 2'd1) begin
       $display("FAIL T6: dest_sel=%0d for V cache (exp 1)", dest_sel); err_cnt++;
     end
@@ -234,22 +285,19 @@ module tb_stream;
     test_num = 7; $display("--- Test %0d: Source packer ---", test_num);
     do_reset;
     src_cfg_len <= 32'd4;
-    @(posedge sink_clk); @(posedge sink_clk);
-    // First 16-bit word
-    src_data_valid <= 1'b1;
-    src_data_in    <= 16'hCAFE;
-    src_data_last  <= 1'b0;
-    @(posedge sink_clk);
-    // Second 16-bit word (completes one 32-bit beat)
-    src_data_in    <= 16'hBABE;
-    src_data_last  <= 1'b1;
-    @(posedge sink_clk);
-    src_data_valid <= 1'b0;
-    repeat(5) @(posedge sink_clk);
+    tick(); tick();
+    src_send(16'hCAFE, 1'b0);
+    src_send(16'hBABE, 1'b1);
+    wait_cycles(5);
     $display("  Test 7: bytes_sent=%0d m_tdata=0x%08h", bytes_sent, m_axis_tdata);
-    // Source packer collects 2×16-bit to form 1×32-bit = 4 bytes
-    if (bytes_sent < 4) begin
-      $display("  NOTE: source 2-stage collection, bytes=%0d (expected >=4)", bytes_sent);
+    if (bytes_sent != 4) begin
+      $display("FAIL T7: bytes_sent=%0d (exp 4)", bytes_sent); err_cnt++;
+    end
+    if (!src_done_seen) begin
+      $display("FAIL T7: src_done not observed"); err_cnt++;
+    end
+    if (m_axis_tdata != 32'hBABE_CAFE) begin
+      $display("FAIL T7: m_tdata=0x%08h (exp 0xBABECAFE)", m_axis_tdata); err_cnt++;
     end
 
     // ================================================================
@@ -258,14 +306,14 @@ module tb_stream;
     test_num = 8; $display("--- Test %0d: Idle gaps ---", test_num);
     do_reset;
     cfg_len <= 32'd16;
-    @(posedge sink_clk);
+    tick();
     axis_send(32'h1111_1111, 1'b0);
-    repeat(4) @(posedge sink_clk);  // idle gap
+    wait_cycles(4);  // idle gap
     axis_send(32'h2222_2222, 1'b0);
-    repeat(4) @(posedge sink_clk);  // idle gap
+    wait_cycles(4);  // idle gap
     axis_send(32'h3333_3333, 1'b0);
     axis_send(32'h4444_4444, 1'b1);
-    repeat(5) @(posedge sink_clk);
+    wait_cycles(5);
     if (bytes_received != 16) begin
       $display("FAIL T8: bytes_received=%0d (exp 16)", bytes_received); err_cnt++;
     end

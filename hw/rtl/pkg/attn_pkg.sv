@@ -34,9 +34,9 @@ package attn_pkg;
   // parallel. Increasing rows means doubling the Softmax hardware, which
   // becomes the bottleneck before DSP count does (see mac_array_analysis.html).
 
-  parameter int TILE_ROWS   = 16;            // Q-dimension parallelism (Softmax-limited)
-  parameter int TILE_COLS   = 16;            // K/V-dimension parallelism
-  parameter int TILE_ELEMS  = TILE_ROWS * TILE_COLS;  // = 256 PEs total
+  localparam int TILE_ROWS   = 16;            // Q-dimension parallelism (Softmax-limited)
+  localparam int TILE_COLS   = 16;            // K/V-dimension parallelism
+  localparam int TILE_ELEMS  = TILE_ROWS * TILE_COLS;  // = 256 PEs total
 
   // ==================================================================
   // 2. Pipeline Split — One-Click Rollback Mechanism
@@ -51,13 +51,13 @@ package attn_pkg;
   // Rollback path: set SPLIT_FACTOR=1 → all generate blocks fall back to
   // the safe single-cycle path. No RTL changes needed.
 
-  parameter int  TILE_SPLIT_FACTOR = 2;      // Column split factor {1, 2, 4}
-  parameter bit  TILE_MAC_REUSE    = 1'b1;   // Time-multiplex MAC for Phase A+B
-  parameter bit  C4_MUL_PIPE       = 1'b1;   // DSP48E2 M-register: 1=registered (≥100MHz), 0=combinational (≤60MHz)
+  localparam int  TILE_SPLIT_FACTOR = 2;      // Column split factor {1, 2, 4}
+  localparam bit  TILE_MAC_REUSE    = 1'b1;   // Time-multiplex MAC for Phase A+B
+  localparam bit  C4_MUL_PIPE       = 1'b1;   // DSP48E2 M-register: 1=registered (≥100MHz), 0=combinational (≤60MHz)
 
   // Pipeline depth parameters (higher = better timing, more latency)
-  parameter int  MAC_PIPE_STAGES    = 2;       // MAC array pipeline: {1=comb, 2=reg products+reduction}
-  parameter int  SOFTMAX_PIPE_STAGES = 2;      // Softmax pipeline: {2, 3} stages
+  localparam int  MAC_PIPE_STAGES    = 2;       // MAC array pipeline: {1=comb, 2=reg products+reduction}
+  localparam int  SOFTMAX_PIPE_STAGES = 2;      // Softmax pipeline: {2, 3} stages
 
   // ==================================================================
   // 3. Data Widths — Data Type Bit Widths
@@ -67,11 +67,11 @@ package attn_pkg;
   // bf16 → fp32: pad lower 16 mantissa bits with zeros (no rounding needed).
   // fp32 → bf16: truncate lower 16 mantissa bits (round-to-nearest-even).
 
-  parameter int BF16_EXP_W   = 8;            // bf16 exponent width (bias=127)
-  parameter int BF16_MANT_W  = 7;            // bf16 mantissa width (7-bit explicit + 1 implicit = 8 effective)
-  parameter int BF16_W       = 16;           // bf16 total width
-  parameter int FP32_W       = 32;           // fp32 (IEEE 754 single precision)
-  parameter int PSUM_W       = 32;           // Partial sum accumulator width
+  localparam int BF16_EXP_W   = 8;            // bf16 exponent width (bias=127)
+  localparam int BF16_MANT_W  = 7;            // bf16 mantissa width (7-bit explicit + 1 implicit = 8 effective)
+  localparam int BF16_W       = 16;           // bf16 total width
+  localparam int FP32_W       = 32;           // fp32 (IEEE 754 single precision)
+  localparam int PSUM_W       = 32;           // Partial sum accumulator width
 
   // Derived bit positions (for bit-slice clarity in RTL)
   localparam int BF16_SIGN_POS  = 15;
@@ -93,11 +93,15 @@ package attn_pkg;
   //   V: [L, 1024] = [L, N_KV_HEADS × HEAD_DIM]  —  8 heads × 128 = 1024
   //   O: [L, 4096] = [L, N_Q_HEADS × HEAD_DIM]   — 32 heads × 128 = 4096
 
-  parameter int MAX_SEQ_LEN   = 2048;         // Maximum sequence length supported
-  parameter int HEAD_DIM      = 128;          // Attention head dimension (Llama3)
-  parameter int N_Q_HEADS     = 32;           // Number of query heads
-  parameter int N_KV_HEADS    = 8;            // Number of key/value heads (GQA)
-  parameter int GQA_GROUP_SIZE = N_Q_HEADS / N_KV_HEADS;  // = 4 Q heads per KV head
+  // KV260 full-cache deploy target:
+  //   seq_len <= 512 keeps one KV group's K+V footprint within on-chip URAM.
+  // Longer contexts require the not-yet-implemented streaming fallback path, so
+  // keep the synthesized configuration at 512 for a board-realistic bitstream.
+  localparam int MAX_SEQ_LEN   = 512;          // Maximum deployed sequence length
+  localparam int HEAD_DIM      = 128;          // Attention head dimension (Llama3)
+  localparam int N_Q_HEADS     = 32;           // Number of query heads
+  localparam int N_KV_HEADS    = 8;            // Number of key/value heads (GQA)
+  localparam int GQA_GROUP_SIZE = N_Q_HEADS / N_KV_HEADS;  // = 4 Q heads per KV head
 
   // ==================================================================
   // 5. Tiling — FlashAttention Block Sizes
@@ -112,8 +116,8 @@ package attn_pkg;
   //   - Match URAM read granularity (multiple banks read in parallel)
   //   - Keep Softmax m/l state update cost amortized over 64 columns
 
-  parameter int TILE_Q   = 32;               // Q tile size (rows per outer iteration)
-  parameter int TILE_KV  = 64;               // K/V tile size (rows per inner iteration)
+  localparam int TILE_Q   = 32;               // Q tile size (rows per outer iteration)
+  localparam int TILE_KV  = 64;               // K/V tile size (rows per inner iteration)
 
   // ==================================================================
   // 6. Memory Sizing — Auto-Derived from Above Parameters
@@ -123,40 +127,40 @@ package attn_pkg;
   // are changed.
 
   // --- Tile counts ---
-  parameter int MAX_N_Q_TILES  = (MAX_SEQ_LEN + TILE_Q  - 1) / TILE_Q;   // ceil(L / TILE_Q)
-  parameter int MAX_N_KV_TILES = (MAX_SEQ_LEN + TILE_KV - 1) / TILE_KV;  // ceil(L / TILE_KV)
+  localparam int MAX_N_Q_TILES  = (MAX_SEQ_LEN + TILE_Q  - 1) / TILE_Q;   // ceil(L / TILE_Q)
+  localparam int MAX_N_KV_TILES = (MAX_SEQ_LEN + TILE_KV - 1) / TILE_KV;  // ceil(L / TILE_KV)
 
   // --- KV Cache (URAM, per KV head) ---
   // K and V are fully cached in URAM to eliminate DDR re-reads.
   // At L=512: 512 × 128 × 2B = 128 KB per head. K+V = 256 KB per GQA group.
-  // For L=2048: 2048 × 128 × 2B = 512 KB per head. K+V = 1 MB per group.
-  // 8 GQA groups × 1 MB = 8 MB — DOES NOT FIT in KV260 URAM (2.6 MB).
-  // For L>512, the controller must serialize GQA groups (load one group's K/V at a time).
-  parameter int KV_CACHE_DEPTH    = MAX_SEQ_LEN;          // Rows per head (= L)
-  parameter int KV_CACHE_ELEMS    = HEAD_DIM;             // bf16 elements per row
-  parameter int KV_CACHE_DATA_W   = HEAD_DIM * BF16_W;    // = 2048 bits per row (logical)
-  parameter int KV_CACHE_BURST    = TILE_KV * HEAD_DIM;   // Max read burst: 64 × 128 = 8192 bf16
+  // For L=512: 512 × 128 × 2B = 128 KB per head. K+V = 256 KB per group.
+  // 8 GQA groups × 256 KB = 2 MB, which fits the KV260 URAM budget with margin.
+  // For L>512, the controller must serialize GQA groups or stream tiles from DDR.
+  localparam int KV_CACHE_DEPTH    = MAX_SEQ_LEN;          // Rows per head (= L)
+  localparam int KV_CACHE_ELEMS    = HEAD_DIM;             // bf16 elements per row
+  localparam int KV_CACHE_DATA_W   = HEAD_DIM * BF16_W;    // = 2048 bits per row (logical)
+  localparam int KV_CACHE_BURST    = TILE_KV * HEAD_DIM;   // Max read burst: 64 × 128 = 8192 bf16
 
   // --- Q Tile Buffer (Ping-Pong, URAM/BRAM) ---
   // Two banks (A/B) for streaming: one receives from DDR while the other
   // feeds the MAC array. Only TILE_Q=32 rows needed → small buffer.
-  parameter int Q_BUF_BANKS       = 2;                    // Ping-pong: Bank A + Bank B
-  parameter int Q_BUF_DEPTH       = TILE_Q;               // Rows per bank
-  parameter int Q_BUF_ELEMS       = HEAD_DIM;             // bf16 elements per row
-  parameter int Q_BUF_DATA_W      = HEAD_DIM * BF16_W;    // = 2048 bits per row (logical)
+  localparam int Q_BUF_BANKS       = 2;                    // Ping-pong: Bank A + Bank B
+  localparam int Q_BUF_DEPTH       = TILE_Q;               // Rows per bank
+  localparam int Q_BUF_ELEMS       = HEAD_DIM;             // bf16 elements per row
+  localparam int Q_BUF_DATA_W      = HEAD_DIM * BF16_W;    // = 2048 bits per row (logical)
 
   // --- Output Accumulator (fp32, URAM/BRAM) ---
   // Accumulates O = Σ P × V across KV tiles, maintained in fp32 for precision.
-  parameter int O_ACCUM_DEPTH     = TILE_Q;               // Rows of Q tile
-  parameter int O_ACCUM_ELEMS     = HEAD_DIM;             // fp32 elements per row
-  parameter int O_ACCUM_DATA_W    = HEAD_DIM * FP32_W;    // = 4096 bits per row (logical)
+  localparam int O_ACCUM_DEPTH     = TILE_Q;               // Rows of Q tile
+  localparam int O_ACCUM_ELEMS     = HEAD_DIM;             // fp32 elements per row
+  localparam int O_ACCUM_DATA_W    = HEAD_DIM * FP32_W;    // = 4096 bits per row (logical)
 
   // --- EXP LUT (for Softmax Engine) ---
   // Input range: [-8.0, 0.0] (after subtracting row max). Values < -8 → exp ≈ 0.
   // LUT stores exp(x) in fp32 format. Depth chosen for < 0.1% error.
-  parameter int EXP_LUT_ADDR_W = 10;                       // 1024 entries
-  parameter int EXP_LUT_DEPTH  = (1 << EXP_LUT_ADDR_W);    // = 1024
-  parameter int EXP_LUT_DATA_W = FP32_W;                   // fp32 output
+  localparam int EXP_LUT_ADDR_W = 10;                       // 1024 entries
+  localparam int EXP_LUT_DEPTH  = (1 << EXP_LUT_ADDR_W);    // = 1024
+  localparam int EXP_LUT_DATA_W = FP32_W;                   // fp32 output
 
   // Online Softmax constants
   // sqrt(128) ≈ 11.313708, 1/sqrt(128) ≈ 0.088388
@@ -169,33 +173,33 @@ package attn_pkg;
   // ==================================================================
   // 14-bit address space (16 KB). Organized by function groups.
   // All addresses must be 4-byte aligned (AXI4-Lite requirement).
-  parameter int CSR_ADDR_W = 14;
+  localparam int CSR_ADDR_W = 14;
 
   // --- Control & Status (0x000–0x0FF) ---
-  parameter logic [13:0] CSR_CTRL            = 14'h000;  // [0] start, [1] soft_reset, [31:2] reserved
-  parameter logic [13:0] CSR_STATUS          = 14'h004;  // [0] busy, [1] done, [2] error, [31:3] reserved
-  parameter logic [13:0] CSR_SEQ_LEN         = 14'h008;  // Actual sequence length for this inference (≤ MAX_SEQ_LEN)
-  parameter logic [13:0] CSR_Q_TILE_IDX      = 14'h00C;  // Current Q tile index (read-only debug)
-  parameter logic [13:0] CSR_KV_TILE_IDX     = 14'h010;  // Current KV tile index (read-only debug)
-  parameter logic [13:0] CSR_HEAD_IDX        = 14'h014;  // Current Q head index (0..31), driver sets before start
+  localparam logic [13:0] CSR_CTRL            = 14'h000;  // [0] start, [1] soft_reset, [31:2] reserved
+  localparam logic [13:0] CSR_STATUS          = 14'h004;  // [0] busy, [1] done, [2] error, [31:3] reserved
+  localparam logic [13:0] CSR_SEQ_LEN         = 14'h008;  // Actual sequence length for this inference (≤ MAX_SEQ_LEN)
+  localparam logic [13:0] CSR_Q_TILE_IDX      = 14'h00C;  // Current Q tile index (read-only debug)
+  localparam logic [13:0] CSR_KV_TILE_IDX     = 14'h010;  // Current KV tile index (read-only debug)
+  localparam logic [13:0] CSR_HEAD_IDX        = 14'h014;  // Current Q head index (0..31), driver sets before start
 
   // --- Data Stream Control (0x020–0x04F) ---
-  parameter logic [13:0] CSR_STREAM_SRC      = 14'h020;  // DDR source address [31:0] for next stream
-  parameter logic [13:0] CSR_STREAM_SRC_HI   = 14'h024;  // DDR source address [63:32] (reserved for 64-bit)
-  parameter logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Stream length in bytes. Write triggers DMA start.
-  parameter logic [13:0] CSR_STREAM_DEST     = 14'h02C;  // Stream destination select: 0=K_CACHE, 1=V_CACHE, 2=Q_BUF
+  localparam logic [13:0] CSR_STREAM_SRC      = 14'h020;  // DDR source address [31:0] for next stream
+  localparam logic [13:0] CSR_STREAM_SRC_HI   = 14'h024;  // DDR source address [63:32] (reserved for 64-bit)
+  localparam logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Stream length in bytes. Write triggers DMA start.
+  localparam logic [13:0] CSR_STREAM_DEST     = 14'h02C;  // Stream destination select: 0=K_CACHE, 1=V_CACHE, 2=Q_BUF
 
   // --- Result Stream Control (0x050–0x07F) ---
-  parameter logic [13:0] CSR_RESULT_DST      = 14'h050;  // DDR destination address [31:0] for results
-  parameter logic [13:0] CSR_RESULT_DST_HI   = 14'h054;  // DDR destination address [63:32]
-  parameter logic [13:0] CSR_RESULT_LEN      = 14'h058;  // Result length in bytes
+  localparam logic [13:0] CSR_RESULT_DST      = 14'h050;  // DDR destination address [31:0] for results
+  localparam logic [13:0] CSR_RESULT_DST_HI   = 14'h054;  // DDR destination address [63:32]
+  localparam logic [13:0] CSR_RESULT_LEN      = 14'h058;  // Result length in bytes
 
   // --- Performance Counters (0x100–0x1FF) ---
-  parameter logic [13:0] CSR_PERF_CYCLES     = 14'h100;  // Total cycle count [31:0]
-  parameter logic [13:0] CSR_PERF_CYCLES_HI  = 14'h104;  // Total cycle count [63:32]
-  parameter logic [13:0] CSR_PERF_STALLS     = 14'h108;  // Stall cycles (waiting for DDR/URAM)
-  parameter logic [13:0] CSR_PERF_Q_TILES    = 14'h10C;  // Number of Q tiles processed
-  parameter logic [13:0] CSR_PERF_KV_TILES   = 14'h110;  // Number of KV tiles processed
+  localparam logic [13:0] CSR_PERF_CYCLES     = 14'h100;  // Total cycle count [31:0]
+  localparam logic [13:0] CSR_PERF_CYCLES_HI  = 14'h104;  // Total cycle count [63:32]
+  localparam logic [13:0] CSR_PERF_STALLS     = 14'h108;  // Stall cycles (waiting for DDR/URAM)
+  localparam logic [13:0] CSR_PERF_Q_TILES    = 14'h10C;  // Number of Q tiles processed
+  localparam logic [13:0] CSR_PERF_KV_TILES   = 14'h110;  // Number of KV tiles processed
 
   // ==================================================================
   // 8. FSM State Enum — Attention Controller State Machine
@@ -358,6 +362,54 @@ package attn_pkg;
         frac_p = mant_prod[45:23];
       end
       return {sign_p, exp_p, frac_p};
+    end
+  endfunction
+
+  function automatic logic [31:0] bf16_mul_to_fp32(
+    input logic [15:0] a_bf16,
+    input logic [15:0] b_bf16
+  );
+    logic        sign_a, sign_b, sign_prod;
+    logic [7:0]  exp_a,  exp_b, exp_norm;
+    logic [7:0]  mant_a, mant_b;
+    logic [15:0] mant_prod;
+    logic [8:0]  exp_prod;
+    logic        norm_shift;
+    logic [6:0]  mant_norm;
+    logic        a_zero, b_zero, a_inf, b_inf, a_nan, b_nan;
+    begin
+      sign_a = a_bf16[15];
+      sign_b = b_bf16[15];
+      exp_a  = a_bf16[14:7];
+      exp_b  = b_bf16[14:7];
+      mant_a = {1'b1, a_bf16[6:0]};
+      mant_b = {1'b1, b_bf16[6:0]};
+
+      mant_prod = ({8'd0, mant_a} * {8'd0, mant_b});
+      sign_prod = sign_a ^ sign_b;
+      exp_prod  = {1'b0, exp_a} + {1'b0, exp_b} - 9'd127;
+
+      norm_shift = mant_prod[15];
+      exp_norm   = norm_shift ? (exp_prod[7:0] + 8'd1) : exp_prod[7:0];
+      mant_norm  = norm_shift ? mant_prod[14:8] : mant_prod[13:7];
+
+      a_zero = (a_bf16[14:7] == 8'd0);
+      b_zero = (b_bf16[14:7] == 8'd0);
+      a_inf  = (a_bf16[14:7] == 8'hFF) && (a_bf16[6:0] == 7'd0);
+      b_inf  = (b_bf16[14:7] == 8'hFF) && (b_bf16[6:0] == 7'd0);
+      a_nan  = (a_bf16[14:7] == 8'hFF) && (a_bf16[6:0] != 7'd0);
+      b_nan  = (b_bf16[14:7] == 8'hFF) && (b_bf16[6:0] != 7'd0);
+
+      if (a_nan || b_nan)
+        return 32'h7FC0_0000;
+      else if ((a_inf && b_zero) || (a_zero && b_inf))
+        return 32'h7FC0_0000;
+      else if (a_inf || b_inf)
+        return {sign_prod, 8'hFF, 23'd0};
+      else if (a_zero || b_zero)
+        return {sign_prod, 8'd0, 23'd0};
+      else
+        return {sign_prod, exp_norm, mant_norm, 16'd0};
     end
   endfunction
 

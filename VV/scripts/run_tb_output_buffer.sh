@@ -18,6 +18,7 @@ chmod +x "${WRAPPER_DIR}/gcc"
 export PATH="${WRAPPER_DIR}:${PATH}"
 
 cd "${SIM_DIR}"
+ln -sf ../../../VV/data/recip_lut.hex recip_lut.hex
 vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k +define+SYNTHESIS \
     -l compile.log \
     +incdir+../../../hw/rtl/pkg \

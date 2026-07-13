@@ -48,6 +48,9 @@ module attn_axi_stream_sink
   logic        hold_hi_last;
   logic [1:0]  hold_dest;
   logic [31:0] byte_cnt;
+  (* keep = "true" *) logic unused_cfg_burst;
+
+  assign unused_cfg_burst = &{1'b0, |cfg_burst};
 
   // Accept a new AXIS beat only when the second half buffer is empty.
   assign s_axis_tready = !hold_hi_valid;

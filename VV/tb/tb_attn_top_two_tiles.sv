@@ -1,17 +1,15 @@
 `timescale 1ns / 1ps
 
-module tb_attn_top_partial;
+module tb_attn_top_two_tiles;
   import attn_pkg::*;
 
-  localparam logic [15:0] BF16_ONE = 16'h3F80;
-  localparam logic [15:0] BF16_TWO = 16'h4000;
-  localparam logic [31:0] FP32_NEG_INF = 32'hFF80_0000;
-  localparam int Q_MICROTILES = TILE_Q / TILE_ROWS;
-  localparam int TEST_SEQ = 20;
-  localparam int TEST_KV_SUBBLOCKS = (TEST_SEQ + TILE_COLS - 1) / TILE_COLS;
-  localparam int DIM_SUBBLOCKS = HEAD_DIM / TILE_COLS;
+  localparam logic [15:0] BF16_ONE   = 16'h3F80;
+  localparam logic [15:0] BF16_TWO   = 16'h4000;
+  localparam logic [15:0] BF16_THREE = 16'h4040;
+  localparam logic [15:0] BF16_FOUR  = 16'h4080;
+  localparam int TEST_SEQ = 64;
   localparam int TEST_RESULT_SAMPLES = TEST_SEQ * HEAD_DIM;
-  localparam int TEST_RESULT_BEATS = TEST_RESULT_SAMPLES / 2;
+  localparam int TEST_RESULT_BEATS   = TEST_RESULT_SAMPLES / 2;
 
   logic clk, rst_n;
   logic [13:0] s_axi_awaddr, s_axi_araddr;
@@ -26,6 +24,7 @@ module tb_attn_top_partial;
   logic s_axis_tready;
   logic [31:0] m_axis_tdata;
   logic m_axis_tvalid, m_axis_tready, m_axis_tlast;
+
   logic preload_buf_sel;
   logic preload_q_wr_en;
   logic [15:0] preload_q_wr_data;
@@ -36,15 +35,17 @@ module tb_attn_top_partial;
   logic tick_marker;
 
   int err;
-  int capture_count;
   int out_samples;
   int out_beats;
   int exp_logical_row;
   int exp_dim;
-  bit saw_micro0_reload;
-  bit saw_micro1_fresh;
+  bit saw_tile0_micro0;
+  bit saw_tile0_micro1;
+  bit saw_tile1_micro0;
+  bit saw_tile1_micro1;
+  bit saw_bufsel_tile0;
+  bit saw_bufsel_tile1;
   bit saw_tlast;
-  bit saw_writeback_overlap;
 
   attn_top dut (
     .clk, .rst_n,
@@ -83,9 +84,9 @@ module tb_attn_top_partial;
     end
   endtask
 
-  task automatic qbuf_write(input logic [15:0] val);
+  task automatic qbuf_write(input logic bank_sel, input logic [15:0] val);
     begin
-      preload_buf_sel = 1'b1;
+      preload_buf_sel = bank_sel;
       preload_q_wr_en = 1'b1;
       preload_q_wr_data = val;
       tick();
@@ -112,18 +113,21 @@ module tb_attn_top_partial;
     end
   endtask
 
-  task automatic preload_qbuf;
+  task automatic preload_qbuf_bank(
+    input logic bank_sel,
+    input logic [15:0] micro0_val,
+    input logic [15:0] micro1_val
+  );
     int row, dim;
     begin
       for (row = 0; row < TILE_Q; row++) begin
         for (dim = 0; dim < HEAD_DIM; dim++) begin
           if (row < TILE_ROWS)
-            qbuf_write(BF16_ONE);
+            qbuf_write(bank_sel, micro0_val);
           else
-            qbuf_write(BF16_TWO);
+            qbuf_write(bank_sel, micro1_val);
         end
       end
-      preload_buf_sel = 1'b0;
     end
   endtask
 
@@ -152,58 +156,44 @@ module tb_attn_top_partial;
   endtask
 
   always @(negedge clk) begin
-    int exp_micro, exp_kv, exp_dim_blk, rem;
     int logical_row;
 
     if (rst_n) begin
-      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 0) && !saw_micro0_reload &&
-          (dut.phasea_micro_idx == 0) && (dut.phasea_kv_blk_idx == 1)) begin
-        if ((dut.sm_state_l_in[0] == 32'd0) || (dut.sm_state_m_in[0] == FP32_NEG_INF)) begin
-          $display("FAIL partial micro0 reload context was not preserved");
-          err++;
-        end
-        saw_micro0_reload = 1'b1;
-      end
-
-      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 0) && !saw_micro1_fresh &&
-          (dut.phasea_micro_idx == 1) && (dut.phasea_kv_blk_idx == 0)) begin
-        for (int ri = 0; ri < TILE_ROWS; ri++) begin
-          if ((dut.sm_state_m_in[ri] !== FP32_NEG_INF) || (dut.sm_state_l_in[ri] !== 32'd0)) begin
-            $display("FAIL partial micro1 fresh context mismatch row=%0d m=%h l=%h",
-                     ri, dut.sm_state_m_in[ri], dut.sm_state_l_in[ri]);
-            err++;
+      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 7'd1) && (dut.phasea_kv_blk_idx == 0)) begin
+        if (dut.q_tile_start == 16'd0) begin
+          saw_bufsel_tile0 = 1'b1;
+          if ((dut.phasea_micro_idx == 0) && !saw_tile0_micro0) begin
+            if (dut.q_block_rd[0] !== BF16_ONE) begin
+              $display("FAIL tile0 micro0 q_block_rd[0]=%h exp=%h", dut.q_block_rd[0], BF16_ONE);
+              err++;
+            end
+            saw_tile0_micro0 = 1'b1;
+          end
+          if ((dut.phasea_micro_idx == 1) && !saw_tile0_micro1) begin
+            if (dut.q_block_rd[0] !== BF16_TWO) begin
+              $display("FAIL tile0 micro1 q_block_rd[0]=%h exp=%h", dut.q_block_rd[0], BF16_TWO);
+              err++;
+            end
+            saw_tile0_micro1 = 1'b1;
+          end
+        end else if (dut.q_tile_start == 16'd32) begin
+          saw_bufsel_tile1 = 1'b1;
+          if ((dut.phasea_micro_idx == 0) && !saw_tile1_micro0) begin
+            saw_tile1_micro0 = 1'b1;
+          end
+          if ((dut.phasea_micro_idx == 1) && !saw_tile1_micro1) begin
+            saw_tile1_micro1 = 1'b1;
           end
         end
-        saw_micro1_fresh = 1'b1;
-      end
-
-      if (dut.obuf_update && (dut.obuf_row == 0)) begin
-        exp_micro = capture_count / (TEST_KV_SUBBLOCKS * DIM_SUBBLOCKS);
-        rem = capture_count % (TEST_KV_SUBBLOCKS * DIM_SUBBLOCKS);
-        exp_kv = rem / DIM_SUBBLOCKS;
-        exp_dim_blk = rem % DIM_SUBBLOCKS;
-        if ((dut.phaseb_micro_idx != exp_micro[0:0]) ||
-            (dut.phaseb_kv_blk_idx != exp_kv[1:0]) ||
-            (dut.phaseb_dim_blk_idx != exp_dim_blk[2:0])) begin
-          $display("FAIL partial phaseB order idx=%0d got=(%0d,%0d,%0d) exp=(%0d,%0d,%0d)",
-                   capture_count, dut.phaseb_micro_idx, dut.phaseb_kv_blk_idx,
-                   dut.phaseb_dim_blk_idx, exp_micro, exp_kv, exp_dim_blk);
-          err++;
-        end
-        capture_count++;
       end
 
       if (dut.src_valid) begin
-        if (dut.mac_phase)
-          saw_writeback_overlap = 1'b1;
-        logical_row = (dut.phaseb_norm_micro_idx * TILE_ROWS) + int'(dut.obuf_o_row);
+        logical_row = int'(dut.q_tile_start) +
+                      (dut.phaseb_norm_micro_idx * TILE_ROWS) +
+                      int'(dut.obuf_o_row);
         if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
-          $display("FAIL partial output order got row=%0d dim=%0d exp row=%0d dim=%0d",
+          $display("FAIL two_tiles output order got row=%0d dim=%0d exp row=%0d dim=%0d",
                    logical_row, dut.obuf_o_dim, exp_logical_row, exp_dim);
-          err++;
-        end
-        if (logical_row >= TEST_SEQ) begin
-          $display("FAIL partial output leaked invalid row=%0d", logical_row);
           err++;
         end
         out_samples++;
@@ -219,11 +209,11 @@ module tb_attn_top_partial;
         out_beats++;
         if (m_axis_tlast) begin
           if (saw_tlast) begin
-            $display("FAIL partial multiple tlast pulses");
+            $display("FAIL two_tiles multiple tlast pulses");
             err++;
           end
           if (out_beats != TEST_RESULT_BEATS) begin
-            $display("FAIL partial tlast beat count got=%0d exp=%0d", out_beats, TEST_RESULT_BEATS);
+            $display("FAIL two_tiles tlast beat count got=%0d exp=%0d", out_beats, TEST_RESULT_BEATS);
             err++;
           end
           saw_tlast = 1'b1;
@@ -255,19 +245,21 @@ module tb_attn_top_partial;
     preload_v_wr_en = 1'b0;
     preload_k_wr_addr = '0;
     preload_v_wr_addr = '0;
-    tick_marker = 1'b0;
     preload_k_wr_data = '0;
     preload_v_wr_data = '0;
+    tick_marker = 1'b0;
     err = 0;
-    capture_count = 0;
     out_samples = 0;
     out_beats = 0;
     exp_logical_row = 0;
     exp_dim = 0;
-    saw_micro0_reload = 1'b0;
-    saw_micro1_fresh = 1'b0;
+    saw_tile0_micro0 = 1'b0;
+    saw_tile0_micro1 = 1'b0;
+    saw_tile1_micro0 = 1'b0;
+    saw_tile1_micro1 = 1'b0;
+    saw_bufsel_tile0 = 1'b0;
+    saw_bufsel_tile1 = 1'b0;
     saw_tlast = 1'b0;
-    saw_writeback_overlap = 1'b0;
 
     #20 rst_n = 1'b1;
     tick();
@@ -280,7 +272,8 @@ module tb_attn_top_partial;
     force dut.v_wr_addr = preload_v_wr_addr;
     force dut.axis_data = preload_axis_data;
 
-    preload_qbuf();
+    preload_qbuf_bank(1'b1, BF16_THREE, BF16_FOUR);
+    preload_qbuf_bank(1'b0, BF16_ONE, BF16_TWO);
     preload_kv();
 
     release dut.buf_sel;
@@ -306,35 +299,31 @@ module tb_attn_top_partial;
     release dut.u_fsm.head_cnt;
     release dut.u_fsm.group_cnt;
 
-    if (!saw_micro0_reload) begin
-      $display("FAIL partial did not observe micro0 reload");
+    if (!saw_bufsel_tile0 || !saw_bufsel_tile1) begin
+      $display("FAIL two_tiles did not observe both q tile bank selections");
       err++;
     end
-    if (!saw_micro1_fresh) begin
-      $display("FAIL partial did not observe micro1 fresh load");
+    if (!saw_tile0_micro0 || !saw_tile0_micro1 || !saw_tile1_micro0 || !saw_tile1_micro1) begin
+      $display("FAIL two_tiles missing one or more q microtile observations");
       err++;
     end
     if (out_samples != TEST_RESULT_SAMPLES) begin
-      $display("FAIL partial out_samples=%0d exp=%0d", out_samples, TEST_RESULT_SAMPLES);
+      $display("FAIL two_tiles out_samples=%0d exp=%0d", out_samples, TEST_RESULT_SAMPLES);
       err++;
     end
     if (out_beats != TEST_RESULT_BEATS) begin
-      $display("FAIL partial out_beats=%0d exp=%0d", out_beats, TEST_RESULT_BEATS);
+      $display("FAIL two_tiles out_beats=%0d exp=%0d", out_beats, TEST_RESULT_BEATS);
       err++;
     end
     if (!saw_tlast) begin
-      $display("FAIL partial missing final tlast");
-      err++;
-    end
-    if (Q_MICROTILES > 1 && !saw_writeback_overlap) begin
-      $display("FAIL partial did not observe writeback overlap during mac_phase");
+      $display("FAIL two_tiles missing final tlast");
       err++;
     end
 
     if (err == 0)
-      $display("ALL ATTN_TOP PARTIAL CHECKS PASSED");
+      $display("ALL ATTN_TOP TWO TILE CHECKS PASSED");
     else begin
-      $display("ATTN_TOP PARTIAL FAILED with %0d errors", err);
+      $display("ATTN_TOP TWO TILE FAILED with %0d errors", err);
       $fatal(1);
     end
 
@@ -342,8 +331,11 @@ module tb_attn_top_partial;
   end
 
   initial begin
-    #5_000_000 begin end
-    $display("FAIL timeout waiting for partial attn_top completion");
+    #8_000_000 begin end
+    $display("FAIL timeout waiting for two-tile attn_top completion");
+    $display("DBG state=%0d done=%0b busy=%0b q_tile_start=%0d active_q_rows=%0d q_head=%0d group=%0d buf_sel=%0b src_last=%0b src_done=%0b",
+             dut.u_fsm.state, dut.done, dut.busy, dut.q_tile_start, dut.active_q_rows,
+             dut.q_head, dut.gqa_group, dut.buf_sel, dut.src_last, dut.src_done);
     $fatal(1);
   end
 endmodule

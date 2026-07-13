@@ -23,6 +23,7 @@ fi
 
 cd "${SIM_DIR}"
 ln -sf ../../data data
+ln -sf ../../data/exp_lut.hex exp_lut.hex
 vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k +define+SYNTHESIS \
     -l compile.log \
     +incdir+../../../hw/rtl/pkg \
@@ -32,7 +33,7 @@ vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k +define+SYNTHESIS \
     -o simv
 
 cat > run.tcl << 'TCL'
-run 5000ns
+run 50000ns
 quit
 TCL
 ./simv -no_save -ucli -i run.tcl -l sim.log

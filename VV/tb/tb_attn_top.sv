@@ -32,6 +32,7 @@ module tb_attn_top;
   logic preload_k_wr_en, preload_v_wr_en;
   logic [15:0] preload_k_wr_addr, preload_v_wr_addr;
   logic [15:0] preload_k_wr_data, preload_v_wr_data;
+  logic tick_marker;
 
   int err;
   int capture_count;
@@ -42,6 +43,10 @@ module tb_attn_top;
   bit saw_micro0_reload;
   bit saw_micro1_fresh;
   bit saw_tlast;
+  bit saw_writeback_overlap;
+  bit backpressure_active;
+  bit saw_last_sample_stall;
+  int backpressure_cycles;
 
   attn_top dut (
     .clk, .rst_n,
@@ -56,12 +61,51 @@ module tb_attn_top;
 
   always #5 clk = ~clk;
 
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      m_axis_tready <= 1'b1;
+      backpressure_active <= 1'b0;
+      backpressure_cycles <= 0;
+    end else if (!backpressure_active &&
+                 dut.writeback_active &&
+                 (dut.phaseb_norm_micro_idx == 1'd0) &&
+                 dut.obuf_valid_raw &&
+                 (dut.obuf_o_row == 5'(TILE_ROWS - 1)) &&
+                 (dut.obuf_o_dim == 7'(HEAD_DIM - 3))) begin
+      // Fill the source packer's low half, then hold its completed AXIS word.
+      // The following final sample of microtile 0 must remain unaccepted.
+      m_axis_tready <= 1'b0;
+      backpressure_active <= 1'b1;
+      backpressure_cycles <= 0;
+    end else if (backpressure_active) begin
+      if (backpressure_cycles == 4) begin
+        m_axis_tready <= 1'b1;
+        backpressure_active <= 1'b0;
+      end else begin
+        backpressure_cycles <= backpressure_cycles + 1;
+      end
+    end
+  end
+
+  task automatic tick;
+    begin
+      @(posedge clk) tick_marker = ~tick_marker;
+    end
+  endtask
+
+  task automatic wait_done_flag;
+    begin
+      while (dut.done !== 1'b1)
+        tick();
+    end
+  endtask
+
   task automatic qbuf_write(input logic [15:0] val);
     begin
       preload_buf_sel = 1'b1;
       preload_q_wr_en = 1'b1;
       preload_q_wr_data = val;
-      @(posedge clk);
+      tick();
       preload_q_wr_en = 1'b0;
     end
   endtask
@@ -77,7 +121,7 @@ module tb_attn_top;
         preload_k_wr_addr = 16'(token_idx * HEAD_DIM + dim_idx);
         preload_k_wr_data = val;
       end
-      @(posedge clk);
+      tick();
       if (is_v) begin
         preload_v_wr_en = 1'b0;
       end else begin
@@ -130,7 +174,7 @@ module tb_attn_top;
     int logical_row;
 
     if (rst_n) begin
-      if (dut.sm_state_load && !saw_micro0_reload &&
+      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 0) && !saw_micro0_reload &&
           (dut.phasea_micro_idx == 0) && (dut.phasea_kv_blk_idx == 1)) begin
         if ((dut.sm_state_l_in[0] == 32'd0) || (dut.sm_state_m_in[0] == FP32_NEG_INF)) begin
           $display("FAIL micro0 reload context was not preserved");
@@ -139,7 +183,7 @@ module tb_attn_top;
         saw_micro0_reload = 1'b1;
       end
 
-      if (dut.sm_state_load && !saw_micro1_fresh &&
+      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 0) && !saw_micro1_fresh &&
           (dut.phasea_micro_idx == 1) && (dut.phasea_kv_blk_idx == 0)) begin
         for (int ri = 0; ri < TILE_ROWS; ri++) begin
           if ((dut.sm_state_m_in[ri] !== FP32_NEG_INF) || (dut.sm_state_l_in[ri] !== 32'd0)) begin
@@ -152,9 +196,10 @@ module tb_attn_top;
       end
 
       if (dut.obuf_update && (dut.obuf_row == 0)) begin
-        exp_micro = capture_count / TEST_KV_SUBBLOCKS;
-        exp_kv = capture_count % TEST_KV_SUBBLOCKS;
-        exp_dim_blk = 0;
+        exp_micro = capture_count / (TEST_KV_SUBBLOCKS * DIM_SUBBLOCKS);
+        rem = capture_count % (TEST_KV_SUBBLOCKS * DIM_SUBBLOCKS);
+        exp_kv = rem / DIM_SUBBLOCKS;
+        exp_dim_blk = rem % DIM_SUBBLOCKS;
         if ((dut.phaseb_micro_idx != exp_micro[0:0]) ||
             (dut.phaseb_kv_blk_idx != exp_kv[1:0]) ||
             (dut.phaseb_dim_blk_idx != exp_dim_blk[2:0])) begin
@@ -166,9 +211,26 @@ module tb_attn_top;
         capture_count++;
       end
 
-      if (dut.src_valid) begin
-        logical_row = dut.phaseb_norm_micro_idx * TILE_ROWS + dut.obuf_o_row;
-        if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != exp_dim)) begin
+      if (backpressure_active &&
+          !m_axis_tready &&
+          dut.obuf_valid_raw &&
+          (dut.obuf_o_row == 5'(TILE_ROWS - 1)) &&
+          (dut.obuf_o_dim == 7'(HEAD_DIM - 1)) &&
+          !dut.src_ready) begin
+        saw_last_sample_stall = 1'b1;
+        if ((dut.phaseb_norm_micro_idx != 1'd0) ||
+            !dut.writeback_active || dut.o_write_done) begin
+          $display("FAIL microtile writeback advanced while final sample was stalled idx=%0d active=%0b done=%0b",
+                   dut.phaseb_norm_micro_idx, dut.writeback_active, dut.o_write_done);
+          err++;
+        end
+      end
+
+      if (dut.src_valid && dut.src_ready) begin
+        if (dut.mac_phase)
+          saw_writeback_overlap = 1'b1;
+        logical_row = (dut.phaseb_norm_micro_idx * TILE_ROWS) + int'(dut.obuf_o_row);
+        if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
           $display("FAIL output order got row=%0d dim=%0d exp row=%0d dim=%0d",
                    logical_row, dut.obuf_o_dim, exp_logical_row, exp_dim);
           err++;
@@ -214,7 +276,6 @@ module tb_attn_top;
     s_axis_tdata = '0;
     s_axis_tvalid = 1'b0;
     s_axis_tlast = 1'b0;
-    m_axis_tready = 1'b1;
     preload_buf_sel = 1'b0;
     preload_q_wr_en = 1'b0;
     preload_q_wr_data = '0;
@@ -222,6 +283,7 @@ module tb_attn_top;
     preload_v_wr_en = 1'b0;
     preload_k_wr_addr = '0;
     preload_v_wr_addr = '0;
+    tick_marker = 1'b0;
     preload_k_wr_data = '0;
     preload_v_wr_data = '0;
     err = 0;
@@ -233,9 +295,11 @@ module tb_attn_top;
     saw_micro0_reload = 1'b0;
     saw_micro1_fresh = 1'b0;
     saw_tlast = 1'b0;
+    saw_writeback_overlap = 1'b0;
+    saw_last_sample_stall = 1'b0;
 
     #20 rst_n = 1'b1;
-    @(posedge clk);
+    tick();
 
     force dut.buf_sel = preload_buf_sel;
     force dut.u_qbuf.wr_en = preload_q_wr_en;
@@ -267,11 +331,11 @@ module tb_attn_top;
     force dut.u_fsm.head_cnt = 2'd3;
     force dut.u_fsm.group_cnt = 3'd7;
     force dut.start = 1'b1;
-    @(posedge clk);
+    tick();
     release dut.start;
 
-    wait (dut.done === 1'b1);
-    repeat (20) @(posedge clk);
+    wait_done_flag();
+    repeat (20) tick();
     release dut.u_fsm.head_cnt;
     release dut.u_fsm.group_cnt;
 
@@ -295,6 +359,14 @@ module tb_attn_top;
       $display("FAIL missing final tlast");
       err++;
     end
+    if (Q_MICROTILES > 1 && !saw_writeback_overlap) begin
+      $display("FAIL did not observe writeback overlap during mac_phase");
+      err++;
+    end
+    if (!saw_last_sample_stall) begin
+      $display("FAIL did not exercise final-sample AXIS backpressure");
+      err++;
+    end
 
     if (err == 0)
       $display("ALL ATTN_TOP CHECKS PASSED");
@@ -307,7 +379,7 @@ module tb_attn_top;
   end
 
   initial begin
-    #5_000_000;
+    #5_000_000 begin end
     $display("FAIL timeout waiting for attn_top completion");
     $display("DBG state=%0d busy=%0b done=%0b q_tile=%0d kv_tile=%0d phasea=%0d phaseb=%0d pcap=%0d p_valid=%0b src_valid=%0b src_done=%0b",
              dut.u_fsm.state, dut.busy, dut.done, dut.u_fsm.q_tile_idx, dut.u_fsm.kv_tile_idx,

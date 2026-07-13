@@ -65,9 +65,17 @@ class AttentionAccelerator:
         """
         if HAS_PYNQ:
             self.overlay = Overlay(bitstream_path)
-            self.dma_send = self.overlay.axi_dma_0.sendchannel
-            self.dma_recv = self.overlay.axi_dma_0.recvchannel
-            self.mmio = self.overlay.attn_accel_0.mmio  # AXI4-Lite
+            # The BD uses the instance names /axi_dma and /accel. Keep the
+            # legacy aliases as a fallback for older overlays.
+            dma = getattr(self.overlay, "axi_dma", None)
+            if dma is None:
+                dma = self.overlay.axi_dma_0
+            accel = getattr(self.overlay, "accel", None)
+            if accel is None:
+                accel = self.overlay.attn_accel_0
+            self.dma_send = dma.sendchannel
+            self.dma_recv = dma.recvchannel
+            self.mmio = accel.mmio  # AXI4-Lite
             self._hw_ready = True
         else:
             self.dma_send = None
@@ -112,11 +120,15 @@ class AttentionAccelerator:
         """Pulse start bit."""
         if self.mmio:
             self.mmio.write(CSR_CTRL, 0x1)  # start=1
+            # attn_core samples start as a level while idle; clear it after
+            # the AXI write so a completed run cannot be retriggered.
+            self.mmio.write(CSR_CTRL, 0x0)
 
     def is_done(self) -> bool:
         """Poll done flag."""
         if self.mmio:
-            return bool(self.mmio.read(CSR_STATUS) & 0x2)
+            # Current RTL exposes sticky done on status bit 0.
+            return bool(self.mmio.read(CSR_STATUS) & 0x1)
         return True
 
     def wait_done(self, timeout_ms: int = 5000):

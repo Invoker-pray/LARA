@@ -1,5 +1,29 @@
 # LARA 项目提交记录
 
+## 2026-07-07
+
+### v1.0 — 框架构建、比赛思路与技术文档完成
+
+- 完成 FPT'26 Track B 赛题目标、Llama3-8B attention 加速方案和 KV260 部署边界定义。
+- 完成 `master` / `develop` 分支架构设计：部署源码与开发验证环境分离。
+- 完成 Python Golden Model -> Verilator/VCS -> Vivado/KV260 三层验证流程设计。
+- 完成架构图、数据流图、代码组织说明、MAC 阵列分析和 Track B roadmap 等技术文档。
+- 建立 `hw/rtl`、`VV`、`python_godel`、`sw` 等项目目录结构。
+
+## 2026-07-13
+
+### v2.1 — 资源收敛与 60 MHz 时序收敛
+
+- 通过 MAC `split=2` 共享物理 MAC/adder，完成 LUT 资源收敛。
+- 将 `P_store` 改为 distributed RAM，降低 BRAM 使用量。
+- 将 softmax 综合路径拆分为多级 FSM，消除原先约 32.9 ns 的长路径。
+- 为 MAC 乘积和控制信号增加寄存级，切断乘法到累加器的关键路径。
+- 最终资源：96477 LUT、59096 FF、50 BRAM、48 URAM、195 DSP。
+- KV260 60 MHz post-route：WNS `+0.335 ns`、TNS `0`、WHS `+0.010 ns`、THS `0`。
+- route status：156085/156085 nets fully routed，0 routing errors，0 DRC errors。
+- Python 7/7、VCS 17/17、Verilator lint 通过。
+- 生成 bitstream、HWH 和 XSA 部署文件（产物由 `.gitignore` 排除）。
+
 ## 2026-07-09
 
 ### v2.0 — attn_core FSM 升级 + 设计对齐

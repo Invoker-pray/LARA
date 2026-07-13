@@ -1,12 +1,15 @@
 `timescale 1ns / 1ps
 
-module tb_attn_top_loop_control;
+module tb_attn_top_loop_control_delayed;
   import attn_pkg::*;
 
   localparam int TEST_SEQ = 64;
   localparam int EXPECT_GROUPS = N_KV_HEADS;
   localparam int EXPECT_HEADS = N_Q_HEADS;
   localparam int EXPECT_Q_LOADS = EXPECT_HEADS * ((TEST_SEQ + TILE_Q - 1) / TILE_Q);
+  localparam int KV_DONE_DELAY = 3;
+  localparam int Q_DONE_DELAY  = 2;
+  localparam int O_DONE_DELAY  = 4;
 
   logic clk, rst_n;
   logic [13:0] s_axi_awaddr, s_axi_araddr;
@@ -41,6 +44,12 @@ module tb_attn_top_loop_control;
   logic kv_done_drv, o_done_drv;
   logic axis_done_drv;
   logic [1:0] axis_dest_drv;
+  int kv_delay_ctr;
+  int q_delay_ctr;
+  int o_delay_ctr;
+  logic kv_pending;
+  logic q_pending;
+  logic o_pending;
 
   attn_top dut (
     .clk, .rst_n,
@@ -70,18 +79,55 @@ module tb_attn_top_loop_control;
       kv_load_start_d <= 1'b0;
       q_load_start_d <= 1'b0;
       group_advance_d <= 1'b0;
+      kv_delay_ctr <= 0;
+      q_delay_ctr <= 0;
+      o_delay_ctr <= 0;
+      kv_pending <= 1'b0;
+      q_pending <= 1'b0;
+      o_pending <= 1'b0;
     end else begin
-      if (((dut.u_fsm.state == ST_LOAD_KV) && kv_done_drv && !dut.kv_load_start) ||
-          (dut.group_advance && kv_done_drv))
-        kv_done_drv <= 1'b0;
-      else if (dut.kv_load_start && !kv_load_start_d)
-        kv_done_drv <= 1'b1;
-      o_done_drv  <= dut.o_write_start;
       axis_done_drv <= 1'b0;
-      if (dut.q_load_start && !q_load_start_d) begin
-        axis_done_drv <= 1'b1;
-        axis_dest_drv <= STREAM_TO_Q_BUF;
+
+      if (dut.kv_load_start && !kv_load_start_d) begin
+        kv_done_drv <= 1'b0;
+        kv_pending <= 1'b1;
+        kv_delay_ctr <= KV_DONE_DELAY;
+      end else if (kv_pending) begin
+        if (kv_delay_ctr == 0) begin
+          kv_done_drv <= 1'b1;
+          kv_pending <= 1'b0;
+        end else begin
+          kv_delay_ctr <= kv_delay_ctr - 1;
+        end
       end
+
+      if (dut.q_load_start && !q_load_start_d) begin
+        q_pending <= 1'b1;
+        q_delay_ctr <= Q_DONE_DELAY;
+        axis_dest_drv <= STREAM_TO_Q_BUF;
+      end else if (q_pending) begin
+        if (q_delay_ctr == 0) begin
+          axis_done_drv <= 1'b1;
+          axis_dest_drv <= STREAM_TO_Q_BUF;
+          q_pending <= 1'b0;
+        end else begin
+          q_delay_ctr <= q_delay_ctr - 1;
+        end
+      end
+
+      if (dut.o_write_start && !o_pending && !dut.o_write_done) begin
+        o_done_drv <= 1'b0;
+        o_pending <= 1'b1;
+        o_delay_ctr <= O_DONE_DELAY;
+      end else if (o_pending) begin
+        if (o_delay_ctr == 0) begin
+          o_done_drv <= 1'b1;
+          o_pending <= 1'b0;
+        end else begin
+          o_delay_ctr <= o_delay_ctr - 1;
+        end
+      end
+
       kv_load_start_d <= dut.kv_load_start;
       q_load_start_d <= dut.q_load_start;
       group_advance_d <= dut.group_advance;
@@ -103,7 +149,7 @@ module tb_attn_top_loop_control;
         if (dut.phasea_window)
           saw_phasea_prefetch_window = 1'b1;
         else begin
-          $display("FAIL phasea_window dropped during ST_QK_DOT q prefetch");
+          $display("FAIL delayed phasea_window dropped during ST_QK_DOT q prefetch");
           err++;
         end
       end
@@ -113,7 +159,7 @@ module tb_attn_top_loop_control;
         if (dut.phaseb_window)
           saw_phaseb_prefetch_window = 1'b1;
         else begin
-          $display("FAIL phaseb_window dropped during ST_AV_DOT q prefetch");
+          $display("FAIL delayed phaseb_window dropped during ST_AV_DOT q prefetch");
           err++;
         end
       end
@@ -121,35 +167,15 @@ module tb_attn_top_loop_control;
           (dut.u_fsm.state == ST_SOFTMAX))
         saw_overlap_prefetch_softmax = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
-          (dut.u_fsm.state == ST_AV_DOT) &&
+          ((dut.u_fsm.state == ST_AV_DOT) || (dut.u_fsm.state == ST_SOFTMAX) || (dut.u_fsm.state == ST_WRITE_O)) &&
           (dut.u_fsm.head_cnt < 2'd3) &&
           (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx))
         saw_head_switch_prefetch = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
-          (dut.u_fsm.state == ST_SOFTMAX) &&
-          (dut.u_fsm.head_cnt < 2'd3) &&
-          (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx))
-        saw_head_switch_prefetch = 1'b1;
-      if ((dut.q_load_start && !q_load_start_d) &&
-          (dut.u_fsm.state == ST_AV_DOT) &&
+          ((dut.u_fsm.state == ST_AV_DOT) || (dut.u_fsm.state == ST_SOFTMAX) || (dut.u_fsm.state == ST_WRITE_O)) &&
           (dut.u_fsm.head_cnt == 2'd3) &&
           (dut.u_fsm.group_cnt < 3'd7) &&
           (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx))
-        saw_group_switch_prefetch = 1'b1;
-      if ((dut.q_load_start && !q_load_start_d) &&
-          (dut.u_fsm.state == ST_SOFTMAX) &&
-          (dut.u_fsm.head_cnt == 2'd3) &&
-          (dut.u_fsm.group_cnt < 3'd7) &&
-          (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx))
-        saw_group_switch_prefetch = 1'b1;
-      if ((dut.q_load_start && !q_load_start_d) &&
-          (dut.u_fsm.state == ST_WRITE_O) &&
-          (dut.u_fsm.head_cnt < 2'd3))
-        saw_head_switch_prefetch = 1'b1;
-      if ((dut.q_load_start && !q_load_start_d) &&
-          (dut.u_fsm.state == ST_WRITE_O) &&
-          (dut.u_fsm.head_cnt == 2'd3) &&
-          (dut.u_fsm.group_cnt < 3'd7))
         saw_group_switch_prefetch = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
           (dut.u_fsm.state == ST_NORMALIZE) &&
@@ -212,7 +238,7 @@ module tb_attn_top_loop_control;
     force dut.start = 1'b0;
 
     wait (dut.done === 1'b1) tick_marker = ~tick_marker;
-    repeat (4) tick();
+    repeat (8) tick();
 
     release dut.start;
     release dut.kv_load_done;
@@ -223,42 +249,42 @@ module tb_attn_top_loop_control;
     release dut.axis_dest;
 
     if (kv_load_pulses != EXPECT_GROUPS) begin
-      $display("FAIL kv_load_pulses=%0d exp=%0d", kv_load_pulses, EXPECT_GROUPS);
+      $display("FAIL delayed kv_load_pulses=%0d exp=%0d", kv_load_pulses, EXPECT_GROUPS);
       err++;
     end
     if (q_load_pulses != EXPECT_Q_LOADS) begin
-      $display("FAIL q_load_pulses=%0d exp=%0d", q_load_pulses, EXPECT_Q_LOADS);
+      $display("FAIL delayed q_load_pulses=%0d exp=%0d", q_load_pulses, EXPECT_Q_LOADS);
       err++;
     end
     if (group_advance_pulses != (EXPECT_GROUPS - 1)) begin
-      $display("FAIL group_advance_pulses=%0d exp=%0d", group_advance_pulses, EXPECT_GROUPS - 1);
+      $display("FAIL delayed group_advance_pulses=%0d exp=%0d", group_advance_pulses, EXPECT_GROUPS - 1);
       err++;
     end
     if (!(saw_overlap_prefetch || saw_overlap_prefetch_softmax)) begin
-      $display("FAIL did not observe overlap prefetch in ST_QK_DOT/ST_SOFTMAX/ST_AV_DOT");
+      $display("FAIL delayed no overlap prefetch observed");
       err++;
     end
     if (!saw_phasea_prefetch_window && !saw_phaseb_prefetch_window && !saw_overlap_prefetch_softmax) begin
-      $display("FAIL did not keep phasea/phaseb window active during q prefetch overlap");
+      $display("FAIL delayed no active phase window during q prefetch");
       err++;
     end
     if (!(saw_head_switch_prefetch || saw_head_switch_prefetch_norm)) begin
-      $display("FAIL did not observe head-switch prefetch in ST_NORMALIZE/ST_WRITE_O");
+      $display("FAIL delayed no head-switch prefetch observed");
       err++;
     end
     if (!(saw_group_switch_prefetch || saw_group_switch_prefetch_norm)) begin
-      $display("FAIL did not observe group-switch prefetch in ST_NORMALIZE/ST_WRITE_O");
+      $display("FAIL delayed no group-switch prefetch observed");
       err++;
     end
     if (!seen_all_groups) begin
-      $display("FAIL did not observe terminal group/head traversal");
+      $display("FAIL delayed did not observe terminal group/head traversal");
       err++;
     end
 
     if (err == 0)
-      $display("ALL ATTN_TOP LOOP CONTROL CHECKS PASSED");
+      $display("ALL ATTN_TOP LOOP CONTROL DELAYED CHECKS PASSED");
     else begin
-      $display("ATTN_TOP LOOP CONTROL FAILED with %0d errors", err);
+      $display("ATTN_TOP LOOP CONTROL DELAYED FAILED with %0d errors", err);
       $fatal(1);
     end
 
@@ -266,8 +292,17 @@ module tb_attn_top_loop_control;
   end
 
   initial begin
-    #1_000_000 tick_marker = ~tick_marker;
-    $display("FAIL timeout waiting for attn_top loop control completion");
+    #2_000_000 tick_marker = ~tick_marker;
+    $display("FAIL timeout waiting for delayed attn_top loop control completion");
+    $display("DBG state=%0d q_tile=%0d kv_tile=%0d head=%0d group=%0d busy=%0b done=%0b kv_done=%0b q_done=%0b o_done=%0b q_pending=%0b kv_pending=%0b o_pending=%0b q_load_start=%0b q_inflight=%0b",
+             dut.u_fsm.state, dut.u_fsm.q_tile_idx, dut.u_fsm.kv_tile_idx,
+             dut.u_fsm.head_cnt, dut.u_fsm.group_cnt, dut.busy, dut.done,
+             dut.kv_load_done, dut.q_load_done, dut.o_write_done,
+             q_pending, kv_pending, o_pending, dut.q_load_start, dut.u_fsm.q_load_inflight);
+    $display("DBG q_bank_ready=%b q_load_bank_sel=%0b q_load_bank_sel_latched=%0b q_ready_bank_sel=%0b buf_sel=%0b q_compute_bank_sel=%0b q_outstanding=%0b same_bank_pending=%0b",
+             dut.q_bank_ready, dut.q_load_bank_sel, dut.q_load_bank_sel_latched,
+             dut.q_ready_bank_sel, dut.buf_sel, dut.q_compute_bank_sel,
+             dut.q_load_outstanding, dut.q_same_bank_reload_pending);
     $fatal(1);
   end
 endmodule

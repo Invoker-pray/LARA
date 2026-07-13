@@ -3,7 +3,7 @@ unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 set -e
 export SNPSLMD_LICENSE_FILE="${SNPSLMD_LICENSE_FILE:-27000@archlinux}"
 export LM_LICENSE_FILE="${LM_LICENSE_FILE:-$SNPSLMD_LICENSE_FILE}"
-TB_NAME="tb_attn_top_partial"
+TB_NAME="tb_attn_top_two_tiles"
 SIM_DIR="VV/sim/${TB_NAME}"
 mkdir -p "${SIM_DIR}"
 

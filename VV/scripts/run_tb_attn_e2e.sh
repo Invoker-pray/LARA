@@ -20,7 +20,9 @@ vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k -l compile.log \
     /home/jiao/git/LARA/hw/rtl/pkg/attn_pkg.sv \
     /home/jiao/git/LARA/hw/rtl/core/attn_tile.sv \
     /home/jiao/git/LARA/hw/rtl/core/softmax_engine.sv \
+    /home/jiao/git/LARA/hw/rtl/core/softmax_engine_basic.sv \
     /home/jiao/git/LARA/hw/rtl/core/psum_accum.sv \
+    /home/jiao/git/LARA/hw/rtl/core/psum_accum_basic.sv \
     /home/jiao/git/LARA/hw/rtl/mem/output_buffer.sv \
     /home/jiao/git/LARA/VV/tb/${TB_NAME}.sv \
     -o simv

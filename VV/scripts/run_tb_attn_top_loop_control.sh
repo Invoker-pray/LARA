@@ -23,12 +23,12 @@ vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k \
     -l compile.log \
     +incdir+../../../hw/rtl/pkg \
     ../../../hw/rtl/pkg/attn_pkg.sv \
-    ../../../hw/rtl/core/bf16_mac.sv \
     ../../../hw/rtl/core/attn_tile.sv \
     ../../../hw/rtl/core/softmax_engine.sv \
+    ../../../hw/rtl/core/softmax_engine_basic.sv \
     ../../../hw/rtl/core/psum_accum.sv \
+    ../../../hw/rtl/core/psum_accum_basic.sv \
     ../../../hw/rtl/core/attn_core.sv \
-    ../../../hw/rtl/core/rope_engine.sv \
     ../../../hw/rtl/mem/kv_cache_ram.sv \
     ../../../hw/rtl/mem/tile_buffer.sv \
     ../../../hw/rtl/mem/output_buffer.sv \

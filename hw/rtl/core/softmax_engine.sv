@@ -66,6 +66,9 @@ module softmax_engine
     output logic                           done
 );
 
+  (* keep = "true" *) logic unused_kv_tile_last;
+  assign unused_kv_tile_last = &{1'b0, kv_tile_last};
+
   // ==================================================================
   // EXP LUT ROM (1024 × fp32)
   // ==================================================================
@@ -76,23 +79,42 @@ module softmax_engine
   // For simulation: loaded from $readmemh or generated inline.
 
   localparam int LUT_DEPTH = 1024;
-  logic [FP32_W-1:0] exp_lut [0:LUT_DEPTH-1];
+  localparam logic [31:0] FP32_NEG_INF_BITS = 32'hFF80_0000;
+  localparam logic [31:0] FP32_ZERO_BITS    = 32'h0000_0000;
+  localparam logic [15:0] BF16_INV_SQRT_D_BITS = INV_SQRT_D_FP32[31:16];
+  localparam shortreal NEG_INF_SR    = -1.0e30;
+  localparam shortreal NEG_EIGHT_SR  = -8.0;
+  localparam shortreal ZERO_SR       = 0.0;
+  localparam shortreal ONE_SR        = 1.0;
+  localparam shortreal EIGHT_SR      = 8.0;
+  (* rom_style = "block" *) logic [FP32_W-1:0] exp_lut [0:LUT_DEPTH-1];
 
-  // LUT initialization via $readmemh (load from hex file at sim start)
+`ifndef SYNTHESIS
+  // LUT initialization for simulation. Try the local TB path first, then the
+  // repo-relative path used by direct module compiles.
   initial begin
     integer fd;
+    integer lut_scan_rc;
+    lut_scan_rc = 0;
     fd = $fopen("data/exp_lut.hex", "r");
+    if (fd == 0)
+      fd = $fopen("VV/data/exp_lut.hex", "r");
     if (fd != 0) begin
       for (int li = 0; li < LUT_DEPTH; li++)
-        $fscanf(fd, "%h", exp_lut[li]);
+        lut_scan_rc = $fscanf(fd, "%h", exp_lut[li]);
       $fclose(fd);
     end else begin
-      // Fallback: load from golden model inline (generated once)
-      // Using hardcoded LUT from Python build_exp_lut() for standalone sim
-      $display("WARNING: data/exp_lut.hex not found. Run python_godel export first.");
+      $display("WARNING: exp_lut.hex not found. Expected data/exp_lut.hex or VV/data/exp_lut.hex");
       $display("  python python_godel/attention_golden.py --export-tb-data --module softmax");
     end
   end
+`else
+  // Vivado can infer ROM contents from a direct readmemh on a project-added
+  // memory-init file. Avoid fopen/fscanf, which synthesis ignores.
+  initial begin
+    $readmemh("exp_lut.hex", exp_lut);
+  end
+`endif
 
   // ==================================================================
   // EXP LUT Lookup Function
@@ -101,18 +123,19 @@ module softmax_engine
   // Output: exp(x) in fp32
   // Latency: 1 cycle (combinational lookup + interpolation)
   function automatic shortreal exp_lookup(input shortreal x);
+    /* verilator lint_off WIDTHEXPAND */
     shortreal x_clamped;
     shortreal idx_float, frac;
     integer idx_lo, idx_hi;
     shortreal v_lo, v_hi;
 
     // Clamp to [-8, 0]
-    if (x < -8.0)      x_clamped = -8.0;
-    else if (x > 0.0)  x_clamped = 0.0;
+    if (x < NEG_EIGHT_SR)      x_clamped = NEG_EIGHT_SR;
+    else if (x > ZERO_SR)      x_clamped = ZERO_SR;
     else               x_clamped = x;
 
     // Map [-8, 0] → [0, 1023]
-    idx_float = (x_clamped + 8.0) * shortreal'(LUT_DEPTH - 1) / 8.0;
+    idx_float = (x_clamped + EIGHT_SR) * shortreal'(LUT_DEPTH - 1) / EIGHT_SR;
     idx_lo = integer'(idx_float);
     idx_hi = idx_lo + 1;
     if (idx_hi >= LUT_DEPTH) idx_hi = LUT_DEPTH - 1;
@@ -124,6 +147,7 @@ module softmax_engine
 
     // Linear interpolation
     exp_lookup = v_lo + frac * (v_hi - v_lo);
+    /* verilator lint_on WIDTHEXPAND */
   endfunction
 
   // ==================================================================
@@ -133,7 +157,7 @@ module softmax_engine
 
   logic                           s_valid_r;
   logic [FP32_W-1:0]              s_data_r [TILE_ROWS][TILE_COLS];
-  logic                           kv_tile_first_r, kv_tile_last_r;
+  logic                           kv_tile_first_r;
   logic                           causal_mask_en_r;
   logic [15:0]                    q_tile_start_r, kv_tile_start_r;
   logic [4:0]                     active_rows_r, active_cols_r;
@@ -157,23 +181,29 @@ module softmax_engine
   // sqrt(128) ≈ 11.3137, 1/sqrt(128) ≈ 0.088388 (from pkg: INV_SQRT_D_FP32)
 
 `ifndef SYNTHESIS
+  /* verilator lint_off SHORTREAL */
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
   always_comb begin
     integer ri, ci;
+    integer active_rows_i, active_cols_i;
     logic row_valid, col_valid;
+    active_rows_i = integer'(active_rows);
+    active_cols_i = integer'(active_cols);
     for (ri = 0; ri < TILE_ROWS; ri++) begin
-      row_valid = (ri < active_rows);
-      row_max_s1[ri] = -1.0e30; // -inf approximation
+      row_valid = (ri < active_rows_i);
+      row_max_s1[ri] = $bitstoshortreal(FP32_NEG_INF_BITS);
       for (ci = 0; ci < TILE_COLS; ci++) begin
-        col_valid = (ci < active_cols);
+        col_valid = (ci < active_cols_i);
         if (row_valid && col_valid) begin
           S_scaled[ri][ci] = $bitstoshortreal(s_data[ri][ci])
                            * $bitstoshortreal(INV_SQRT_D_FP32);
         end else begin
-          S_scaled[ri][ci] = -1.0e30;
+          S_scaled[ri][ci] = $bitstoshortreal(FP32_NEG_INF_BITS);
         end
         if (row_valid && col_valid && causal_mask_en) begin
           if ((q_tile_start + 16'(ri)) < (kv_tile_start + 16'(ci)))
-            S_scaled[ri][ci] = -1.0e30;
+            S_scaled[ri][ci] = $bitstoshortreal(FP32_NEG_INF_BITS);
         end
         if (S_scaled[ri][ci] > row_max_s1[ri])
           row_max_s1[ri] = S_scaled[ri][ci];
@@ -189,21 +219,19 @@ module softmax_engine
     if (!rst_n) begin
       s_valid_r <= 1'b0;
       kv_tile_first_r <= 1'b0;
-      kv_tile_last_r  <= 1'b0;
       causal_mask_en_r <= 1'b0;
       q_tile_start_r   <= 16'd0;
       kv_tile_start_r  <= 16'd0;
       active_rows_r    <= 5'd0;
       active_cols_r    <= 5'd0;
       for (ri = 0; ri < TILE_ROWS; ri++) begin
-        m_old_s1[ri] <= 0.0;
+        m_old_s1[ri] <= $bitstoshortreal(FP32_ZERO_BITS);
         for (ci = 0; ci < TILE_COLS; ci++)
           s_data_r[ri][ci] <= 32'd0;
       end
     end else begin
       s_valid_r <= s_valid;
       kv_tile_first_r <= kv_tile_first;
-      kv_tile_last_r  <= kv_tile_last;
       causal_mask_en_r <= causal_mask_en;
       q_tile_start_r   <= q_tile_start;
       kv_tile_start_r  <= kv_tile_start;
@@ -224,30 +252,42 @@ module softmax_engine
 
   always_comb begin
     integer ri, ci;
+    integer active_rows_i, active_cols_i;
     logic row_valid, col_valid;
+    logic masked;
     shortreal m_old_val, row_max_val, m_new_val;
     shortreal correction_val, l_old_val;
-    shortreal row_exp_sum;
+    shortreal row_exp_sum, S_shifted, P_val;
+    active_rows_i = integer'(active_rows_r);
+    active_cols_i = integer'(active_cols_r);
+    masked = 1'b1;
+    S_shifted = ZERO_SR;
+    P_val = ZERO_SR;
 
     for (ri = 0; ri < TILE_ROWS; ri++) begin
-      row_valid = (ri < active_rows_r);
+      row_valid = (ri < active_rows_i);
       m_old_val = m_old_s1[ri];
       row_max_val = row_max_s1[ri];
+      m_new_val = m_old_val;
+      correction_val = ONE_SR;
+      row_exp_sum = ZERO_SR;
 
       // Init on first KV tile: m starts at -inf, l at 0
       if (s_valid_r && kv_tile_first_r) begin
-        m_old_val = -1.0e30;
-        l_old_val = 0.0;  // use local variable, not output port
+        m_old_val = NEG_INF_SR;
+        l_old_val = ZERO_SR;  // use local variable, not output port
       end else begin
         l_old_val = $bitstoshortreal(l_state[ri]);
       end
 
+      correction_s[ri] = ONE_SR;
+      m_new[ri] = m_old_val;
+      l_new[ri] = l_old_val;
+      for (ci = 0; ci < TILE_COLS; ci++)
+        P_shortreal[ri][ci] = ZERO_SR;
+
       if (!row_valid) begin
-        correction_s[ri] = 1.0;
-        m_new[ri] = m_old_val;
-        l_new[ri] = l_old_val;
-        for (ci = 0; ci < TILE_COLS; ci++)
-          P_shortreal[ri][ci] = 0.0;
+        col_valid = 1'b0;
       end else begin
         // Update running max
         if (m_old_val > row_max_val)
@@ -256,18 +296,21 @@ module softmax_engine
           m_new_val = row_max_val;
 
         // Correction factor: exp(m_old - m_new)
-        correction_val = exp_lookup(m_old_val - m_new_val);
+        if (s_valid_r && kv_tile_first_r)
+          correction_val = ZERO_SR;
+        else
+          correction_val = exp_lookup(m_old_val - m_new_val);
         correction_s[ri] = correction_val;
 
         // Running max output
         m_new[ri] = m_new_val;
 
         // Compute P and row sum
-        row_exp_sum = 0.0;
         for (ci = 0; ci < TILE_COLS; ci++) begin
-          shortreal S_shifted, P_val;
-          logic masked;
-          col_valid = (ci < active_cols_r);
+          S_shifted = ZERO_SR;
+          P_val = ZERO_SR;
+          masked = 1'b1;
+          col_valid = (ci < active_cols_i);
           masked = !col_valid;
           S_shifted = $bitstoshortreal(s_data_r[ri][ci]) * $bitstoshortreal(INV_SQRT_D_FP32)
                       - m_new_val;
@@ -279,7 +322,7 @@ module softmax_engine
           end
 
           if (masked)
-            P_val = 0.0;
+            P_val = ZERO_SR;
           else
             P_val = exp_lookup(S_shifted);
           P_shortreal[ri][ci] = P_val;
@@ -287,7 +330,10 @@ module softmax_engine
         end
 
         // Update running sum: l_new = l_old * correction + row_exp_sum
-        l_new[ri] = l_old_val * correction_val + row_exp_sum;
+        if (s_valid_r && kv_tile_first_r)
+          l_new[ri] = row_exp_sum;
+        else
+          l_new[ri] = l_old_val * correction_val + row_exp_sum;
       end
     end
   end
@@ -332,12 +378,45 @@ module softmax_engine
   end
 
 
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+  /* verilator lint_on SHORTREAL */
 `else
+  typedef enum logic [3:0] {
+    SM_IDLE        = 4'd0,
+    SM_SCALE_MAX   = 4'd1,
+    SM_MAX_UPDATE  = 4'd2,
+    SM_CORR_SHIFT  = 4'd3,
+    SM_CORR_LOOKUP = 4'd4,
+    SM_P_SHIFT     = 4'd5,
+    SM_P_LOOKUP    = 4'd6,
+    SM_P_ACCUM     = 4'd7,
+    SM_L_MUL       = 4'd8,
+    SM_L_ADD       = 4'd9,
+    SM_WRITE       = 4'd10
+  } sm_state_t;
+
+  sm_state_t sm_state;
+  logic [4:0] sm_row_idx;
+  logic [4:0] sm_col_idx;
+  logic [31:0] sm_row_sum_acc;
+  logic [31:0] sm_row_sum [TILE_ROWS];
+  logic [31:0] sm_shifted_pipe;
+  logic [31:0] sm_p_pipe;
+  logic [31:0] sm_corr_shift_pipe;
+  logic [31:0] sm_l_corr_product;
+  logic        sm_masked_pipe;
+  localparam logic [4:0] SM_TILE_ROWS_LAST = 5'(TILE_ROWS - 1);
+  localparam logic [4:0] SM_TILE_COLS_LAST = 5'(TILE_COLS - 1);
+  logic [31:0] sm_m_old [TILE_ROWS];
+  logic [31:0] sm_l_old [TILE_ROWS];
   logic [31:0] sm_row_max [TILE_ROWS];
   logic [31:0] sm_m_new [TILE_ROWS];
   logic [31:0] sm_l_new [TILE_ROWS];
   logic [31:0] sm_corr [TILE_ROWS];
   logic [31:0] sm_p [TILE_ROWS][TILE_COLS];
+  logic [31:0] sm_scaled [TILE_ROWS][TILE_COLS];
+  logic        sm_masked [TILE_ROWS][TILE_COLS];
 
   function automatic logic [31:0] exp_lookup_bits(input logic [31:0] x);
     logic signed [23:0] x_q;
@@ -349,7 +428,8 @@ module softmax_engine
       else if (x_q > 24'sd0)  x_q = 24'sd0;
 
       idx_num = integer'(x_q) + 262144;
-      idx = (idx_num * (LUT_DEPTH - 1)) >>> 18;
+      // floor(idx_num * 1023 / 262144), without a constant multiplier.
+      idx = (idx_num == 0) ? 0 : ((idx_num - 1) >>> 8);
       if (idx < 0) idx = 0;
       else if (idx >= LUT_DEPTH) idx = LUT_DEPTH - 1;
       exp_lookup_bits = exp_lut[idx];
@@ -357,131 +437,248 @@ module softmax_engine
   endfunction
 
   always_ff @(posedge clk or negedge rst_n) begin
+    integer ri, ci;
+    logic        row_valid;
+    logic        col_valid;
+    logic        masked;
+    integer      q_pos;
+    integer      kv_pos;
+    logic [31:0] scaled_val;
+    logic [31:0] row_max_next;
+    logic [31:0] row_sum_next;
     if (!rst_n) begin
+      sm_state         <= SM_IDLE;
+      sm_row_idx       <= 5'd0;
+      sm_col_idx       <= 5'd0;
+      sm_row_sum_acc   <= 32'd0;
+      sm_shifted_pipe  <= FP32_ZERO_BITS;
+      sm_p_pipe        <= FP32_ZERO_BITS;
+      sm_corr_shift_pipe <= FP32_ZERO_BITS;
+      sm_l_corr_product <= FP32_ZERO_BITS;
+      sm_masked_pipe   <= 1'b1;
       s_valid_r        <= 1'b0;
       kv_tile_first_r  <= 1'b0;
-      kv_tile_last_r   <= 1'b0;
       causal_mask_en_r <= 1'b0;
       q_tile_start_r   <= 16'd0;
       kv_tile_start_r  <= 16'd0;
       active_rows_r    <= 5'd0;
       active_cols_r    <= 5'd0;
-      for (int ri = 0; ri < TILE_ROWS; ri++) begin
-        for (int ci = 0; ci < TILE_COLS; ci++)
+      p_valid          <= 1'b0;
+      done             <= 1'b0;
+      for (ri = 0; ri < TILE_ROWS; ri++) begin
+        sm_m_old[ri]    <= FP32_NEG_INF_BITS;
+        sm_l_old[ri]    <= FP32_ZERO_BITS;
+        sm_row_max[ri]  <= FP32_NEG_INF_BITS;
+        sm_m_new[ri]    <= FP32_NEG_INF_BITS;
+        sm_l_new[ri]    <= FP32_ZERO_BITS;
+        sm_corr[ri]     <= FP32_ZERO_BITS;
+        sm_row_sum[ri]  <= FP32_ZERO_BITS;
+        m_state[ri]     <= 32'hFF80_0000;
+        l_state[ri]     <= 32'd0;
+        correction[ri]  <= 32'd0;
+        for (ci = 0; ci < TILE_COLS; ci++) begin
           s_data_r[ri][ci] <= 32'd0;
+          sm_scaled[ri][ci] <= 32'd0;
+          sm_masked[ri][ci] <= 1'b1;
+          sm_p[ri][ci]      <= 32'd0;
+          p_data[ri][ci]    <= 32'd0;
+        end
       end
     end else begin
-      s_valid_r        <= s_valid;
-      kv_tile_first_r  <= kv_tile_first;
-      kv_tile_last_r   <= kv_tile_last;
-      causal_mask_en_r <= causal_mask_en;
-      q_tile_start_r   <= q_tile_start;
-      kv_tile_start_r  <= kv_tile_start;
-      active_rows_r    <= active_rows;
-      active_cols_r    <= active_cols;
-      for (int ri = 0; ri < TILE_ROWS; ri++) begin
-        for (int ci = 0; ci < TILE_COLS; ci++)
-          s_data_r[ri][ci] <= s_data[ri][ci];
-      end
-    end
-  end
-
-  always_comb begin
-    for (int ri = 0; ri < TILE_ROWS; ri++) begin
-      logic [31:0] row_max_val;
-      logic [31:0] m_old_val;
-      logic [31:0] l_old_val;
-      logic [31:0] row_sum_val;
-
-      sm_row_max[ri] = 32'hFF80_0000;
-      sm_m_new[ri]   = 32'hFF80_0000;
-      sm_l_new[ri]   = 32'd0;
-      sm_corr[ri]    = 32'd0;
-      row_max_val = 32'hFF80_0000;
-      for (int ci = 0; ci < TILE_COLS; ci++) begin
-        logic [31:0] scaled_val;
-        integer q_pos;
-        integer kv_pos;
-        scaled_val = fp32_mul(s_data_r[ri][ci], INV_SQRT_D_FP32);
-        if (causal_mask_en_r) begin
-          q_pos = integer'(q_tile_start_r) + ri;
-          kv_pos = integer'(kv_tile_start_r) + ci;
-          if (q_pos < kv_pos)
-            scaled_val = 32'hFF80_0000;
-        end
-        row_max_val = fp32_max(row_max_val, scaled_val);
-      end
-
-      m_old_val = kv_tile_first_r ? 32'hFF80_0000 : m_state[ri];
-      l_old_val = kv_tile_first_r ? 32'd0 : l_state[ri];
-
-      sm_row_max[ri] = row_max_val;
-      sm_m_new[ri]   = fp32_max(m_old_val, row_max_val);
-      sm_corr[ri]    = exp_lookup_bits(fp32_sub(m_old_val, sm_m_new[ri]));
-
-      row_sum_val = 32'd0;
-      for (int ci = 0; ci < TILE_COLS; ci++) begin
-        logic [31:0] scaled_val;
-        logic [31:0] shifted_val;
-        logic        masked;
-        integer q_pos;
-        integer kv_pos;
-
-        q_pos = 0;
-        kv_pos = 0;
-        masked = 1'b0;
-        scaled_val = fp32_mul(s_data_r[ri][ci], INV_SQRT_D_FP32);
-        shifted_val = fp32_sub(scaled_val, sm_m_new[ri]);
-        sm_p[ri][ci] = 32'd0;
-
-        if (causal_mask_en_r) begin
-          q_pos = integer'(q_tile_start_r) + ri;
-          kv_pos = integer'(kv_tile_start_r) + ci;
-          if (q_pos < kv_pos)
-            masked = 1'b1;
-        end
-
-        if (masked)
-          sm_p[ri][ci] = 32'd0;
-        else
-          sm_p[ri][ci] = exp_lookup_bits(shifted_val);
-        row_sum_val = fp32_add(row_sum_val, sm_p[ri][ci]);
-      end
-
-      sm_l_new[ri] = fp32_add(fp32_mul(l_old_val, sm_corr[ri]), row_sum_val);
-    end
-  end
-
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
       p_valid <= 1'b0;
       done    <= 1'b0;
-      for (int ri = 0; ri < TILE_ROWS; ri++) begin
-        m_state[ri]    <= 32'hFF80_0000;
-        l_state[ri]    <= 32'd0;
-        correction[ri] <= 32'd0;
-        for (int ci = 0; ci < TILE_COLS; ci++)
-          p_data[ri][ci] <= 32'd0;
-      end
-    end else begin
-      p_valid <= s_valid_r;
-      done    <= s_valid_r;
+
       if (state_load) begin
-        p_valid <= 1'b0;
-        done    <= 1'b0;
-        for (int ri = 0; ri < TILE_ROWS; ri++) begin
+        sm_state   <= SM_IDLE;
+        s_valid_r <= 1'b0;
+        for (ri = 0; ri < TILE_ROWS; ri++) begin
           m_state[ri]    <= state_m_in[ri];
           l_state[ri]    <= state_l_in[ri];
           correction[ri] <= 32'd0;
         end
-      end else if (s_valid_r) begin
-        for (int ri = 0; ri < TILE_ROWS; ri++) begin
-          m_state[ri]    <= sm_m_new[ri];
-          l_state[ri]    <= sm_l_new[ri];
-          correction[ri] <= sm_corr[ri];
-          for (int ci = 0; ci < TILE_COLS; ci++)
-            p_data[ri][ci] <= sm_p[ri][ci];
-        end
+      end else begin
+        unique case (sm_state)
+          SM_IDLE: begin
+            if (s_valid) begin
+              s_valid_r        <= 1'b1;
+              kv_tile_first_r  <= kv_tile_first;
+              causal_mask_en_r <= causal_mask_en;
+              q_tile_start_r   <= q_tile_start;
+              kv_tile_start_r  <= kv_tile_start;
+              active_rows_r    <= active_rows;
+              active_cols_r    <= active_cols;
+              sm_row_idx       <= 5'd0;
+              sm_col_idx       <= 5'd0;
+              sm_row_sum_acc   <= 32'd0;
+              sm_state         <= SM_SCALE_MAX;
+              for (ri = 0; ri < TILE_ROWS; ri++) begin
+                sm_m_old[ri]   <= kv_tile_first ? FP32_NEG_INF_BITS : m_state[ri];
+                sm_l_old[ri]   <= kv_tile_first ? FP32_ZERO_BITS    : l_state[ri];
+                sm_row_max[ri] <= FP32_NEG_INF_BITS;
+                sm_m_new[ri]   <= kv_tile_first ? FP32_NEG_INF_BITS : m_state[ri];
+                sm_l_new[ri]   <= kv_tile_first ? FP32_ZERO_BITS    : l_state[ri];
+                sm_corr[ri]    <= FP32_ZERO_BITS;
+                sm_row_sum[ri] <= FP32_ZERO_BITS;
+                for (ci = 0; ci < TILE_COLS; ci++) begin
+                  s_data_r[ri][ci] <= s_data[ri][ci];
+                end
+              end
+            end else begin
+              s_valid_r <= 1'b0;
+            end
+          end
+
+          SM_SCALE_MAX: begin
+            row_valid = (sm_row_idx < active_rows_r);
+            col_valid = (sm_col_idx < active_cols_r);
+            masked    = !row_valid || !col_valid;
+            scaled_val = FP32_NEG_INF_BITS;
+            if (row_valid && col_valid)
+              scaled_val = bf16_mul_to_fp32(fp32_to_bf16(s_data_r[sm_row_idx][sm_col_idx]), BF16_INV_SQRT_D_BITS);
+            if (row_valid && col_valid && causal_mask_en_r) begin
+              q_pos = integer'(q_tile_start_r) + integer'(sm_row_idx);
+              kv_pos = integer'(kv_tile_start_r) + integer'(sm_col_idx);
+              if (q_pos < kv_pos) begin
+                masked = 1'b1;
+                scaled_val = FP32_NEG_INF_BITS;
+              end
+            end
+
+            sm_scaled[sm_row_idx][sm_col_idx] <= scaled_val;
+            sm_masked[sm_row_idx][sm_col_idx] <= masked;
+            row_max_next = fp32_max(sm_row_max[sm_row_idx], scaled_val);
+            sm_row_max[sm_row_idx] <= row_max_next;
+
+            if (sm_col_idx == SM_TILE_COLS_LAST) begin
+              if (sm_row_idx == SM_TILE_ROWS_LAST) begin
+                sm_row_idx <= 5'd0;
+                sm_col_idx <= 5'd0;
+                sm_state <= SM_MAX_UPDATE;
+              end else begin
+                sm_row_idx <= sm_row_idx + 5'd1;
+                sm_col_idx <= 5'd0;
+              end
+            end else begin
+              sm_col_idx <= sm_col_idx + 5'd1;
+            end
+          end
+
+          SM_MAX_UPDATE: begin
+            if (sm_row_idx < active_rows_r)
+              sm_m_new[sm_row_idx] <= fp32_max(sm_m_old[sm_row_idx], sm_row_max[sm_row_idx]);
+            else
+              sm_m_new[sm_row_idx] <= sm_m_old[sm_row_idx];
+            sm_state <= SM_CORR_SHIFT;
+          end
+
+          SM_CORR_SHIFT: begin
+            if (kv_tile_first_r || (sm_row_idx >= active_rows_r))
+              sm_corr_shift_pipe <= FP32_ZERO_BITS;
+            else
+              sm_corr_shift_pipe <= fp32_sub(sm_m_old[sm_row_idx], sm_m_new[sm_row_idx]);
+            sm_state <= SM_CORR_LOOKUP;
+          end
+
+          SM_CORR_LOOKUP: begin
+            if (kv_tile_first_r || (sm_row_idx >= active_rows_r))
+              sm_corr[sm_row_idx] <= FP32_ZERO_BITS;
+            else
+              sm_corr[sm_row_idx] <= exp_lookup_bits(sm_corr_shift_pipe);
+
+            if (sm_row_idx == SM_TILE_ROWS_LAST) begin
+              sm_row_idx <= 5'd0;
+              sm_col_idx <= 5'd0;
+              sm_row_sum_acc <= FP32_ZERO_BITS;
+              sm_state <= SM_P_SHIFT;
+            end else begin
+              sm_row_idx <= sm_row_idx + 5'd1;
+              sm_state <= SM_MAX_UPDATE;
+            end
+          end
+
+          SM_P_SHIFT: begin
+            sm_masked_pipe <= sm_masked[sm_row_idx][sm_col_idx];
+            if (sm_masked[sm_row_idx][sm_col_idx])
+              sm_shifted_pipe <= FP32_ZERO_BITS;
+            else
+              sm_shifted_pipe <= fp32_sub(sm_scaled[sm_row_idx][sm_col_idx], sm_m_new[sm_row_idx]);
+            sm_state <= SM_P_LOOKUP;
+          end
+
+          SM_P_LOOKUP: begin
+            if (sm_masked_pipe)
+              sm_p_pipe <= FP32_ZERO_BITS;
+            else
+              sm_p_pipe <= exp_lookup_bits(sm_shifted_pipe);
+            sm_state <= SM_P_ACCUM;
+          end
+
+          SM_P_ACCUM: begin
+            sm_p[sm_row_idx][sm_col_idx] <= sm_p_pipe;
+            row_sum_next = fp32_add(sm_row_sum_acc, sm_p_pipe);
+
+            if (sm_col_idx == SM_TILE_COLS_LAST) begin
+              sm_row_sum[sm_row_idx] <= row_sum_next;
+
+              if (sm_row_idx == SM_TILE_ROWS_LAST) begin
+                sm_row_idx <= 5'd0;
+                sm_col_idx <= 5'd0;
+                sm_state <= SM_L_MUL;
+              end else begin
+                sm_row_idx <= sm_row_idx + 5'd1;
+                sm_col_idx <= 5'd0;
+                sm_row_sum_acc <= FP32_ZERO_BITS;
+                sm_state <= SM_P_SHIFT;
+              end
+            end else begin
+              sm_col_idx <= sm_col_idx + 5'd1;
+              sm_row_sum_acc <= row_sum_next;
+              sm_state <= SM_P_SHIFT;
+            end
+          end
+
+          SM_L_MUL: begin
+            if (kv_tile_first_r || (sm_row_idx >= active_rows_r))
+              sm_l_corr_product <= FP32_ZERO_BITS;
+            else
+              sm_l_corr_product <= fp32_mul(sm_l_old[sm_row_idx], sm_corr[sm_row_idx]);
+            sm_state <= SM_L_ADD;
+          end
+
+          SM_L_ADD: begin
+            if (sm_row_idx >= active_rows_r)
+              sm_l_new[sm_row_idx] <= sm_l_old[sm_row_idx];
+            else if (kv_tile_first_r)
+              sm_l_new[sm_row_idx] <= sm_row_sum[sm_row_idx];
+            else
+              sm_l_new[sm_row_idx] <= fp32_add(sm_l_corr_product, sm_row_sum[sm_row_idx]);
+
+            if (sm_row_idx == SM_TILE_ROWS_LAST) begin
+              sm_state <= SM_WRITE;
+            end else begin
+              sm_row_idx <= sm_row_idx + 5'd1;
+              sm_state <= SM_L_MUL;
+            end
+          end
+
+          SM_WRITE: begin
+            p_valid <= 1'b1;
+            done    <= 1'b1;
+            s_valid_r <= 1'b0;
+            for (ri = 0; ri < TILE_ROWS; ri++) begin
+              m_state[ri]    <= sm_m_new[ri];
+              l_state[ri]    <= sm_l_new[ri];
+              correction[ri] <= sm_corr[ri];
+              for (ci = 0; ci < TILE_COLS; ci++)
+                p_data[ri][ci] <= sm_p[ri][ci];
+            end
+            sm_state <= SM_IDLE;
+          end
+
+          default: begin
+            sm_state <= SM_IDLE;
+          end
+        endcase
       end
     end
   end

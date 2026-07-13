@@ -13,6 +13,8 @@ module tb_attn_tile;
   logic [15:0] col_data [TILE_COLS];
   logic [31:0] block_out [TILE_ROWS][TILE_COLS];
   logic [31:0] col_out [TILE_COLS];
+  logic tick_marker;
+  logic settle_marker;
 
   shortreal ref_state [TILE_ROWS][TILE_COLS];
   integer err, r, c;
@@ -22,6 +24,18 @@ module tb_attn_tile;
 
   always #5 clk = ~clk;
 
+  task automatic tick;
+    begin
+      @(posedge clk) tick_marker = ~tick_marker;
+    end
+  endtask
+
+  task automatic settle;
+    begin
+      #1 settle_marker = ~settle_marker;
+    end
+  endtask
+
   function automatic shortreal bf16_to_shortreal(input logic [15:0] bits);
     bf16_to_shortreal = $bitstoshortreal({bits, 16'b0});
   endfunction
@@ -30,9 +44,9 @@ module tb_attn_tile;
     integer ri, ci;
     begin
       for (ri = 0; ri < TILE_ROWS; ri = ri + 1)
-        row_data[ri] = $shortrealtobits(row_val) >> 16;
+        row_data[ri] = 16'(($shortrealtobits(row_val) >> 16));
       for (ci = 0; ci < TILE_COLS; ci = ci + 1)
-        col_data[ci] = $shortrealtobits(col_val) >> 16;
+        col_data[ci] = 16'(($shortrealtobits(col_val) >> 16));
     end
   endtask
 
@@ -40,9 +54,9 @@ module tb_attn_tile;
     integer ri, ci;
     begin
       for (ri = 0; ri < TILE_ROWS; ri = ri + 1)
-        row_data[ri] = $shortrealtobits(shortreal'(ri + 1)) >> 16;
+        row_data[ri] = 16'(($shortrealtobits(shortreal'(ri + 1)) >> 16));
       for (ci = 0; ci < TILE_COLS; ci = ci + 1)
-        col_data[ci] = $shortrealtobits(shortreal'(ci + 1)) >> 16;
+        col_data[ci] = 16'(($shortrealtobits(shortreal'(ci + 1)) >> 16));
     end
   endtask
 
@@ -100,8 +114,8 @@ module tb_attn_tile;
         end
       end
 
-      @(posedge clk);
-      #1;
+      tick();
+      settle();
 
       for (ci = 0; ci < TILE_COLS; ci = ci + 1) begin
         got_val = $bitstoshortreal(col_out[ci]);
@@ -114,10 +128,17 @@ module tb_attn_tile;
       for (ri = 0; ri < TILE_ROWS; ri = ri + 1) begin
         for (ci = 0; ci < TILE_COLS; ci = ci + 1) begin
           got_val = $bitstoshortreal(block_out[ri][ci]);
+`ifdef SYNTHESIS
+          if (got_val != next_state[ri][ci]) begin
+            $display("FAIL %s BLK r[%0d] c[%0d]=%e exp=%e", tag, ri, ci, got_val, next_state[ri][ci]);
+            err = err + 1;
+          end
+`else
           if (got_val != visible_state[ri][ci]) begin
             $display("FAIL %s BLK r[%0d] c[%0d]=%e exp=%e", tag, ri, ci, got_val, visible_state[ri][ci]);
             err = err + 1;
           end
+`endif
           ref_state[ri][ci] = next_state[ri][ci];
         end
       end
@@ -131,8 +152,8 @@ module tb_attn_tile;
     begin
       accum_en = 1'b0;
       clear_accum = 1'b0;
-      @(posedge clk);
-      #1;
+      tick();
+      settle();
 
       for (ci = 0; ci < TILE_COLS; ci = ci + 1) begin
         got_val = $bitstoshortreal(col_out[ci]);
@@ -161,6 +182,8 @@ module tb_attn_tile;
     clear_accum = 1'b0;
     accum_en = 1'b0;
     split_phase = 2'd0;
+    tick_marker = 1'b0;
+    settle_marker = 1'b0;
     err = 0;
     for (r = 0; r < TILE_ROWS; r = r + 1)
       row_data[r] = 16'd0;
@@ -169,11 +192,11 @@ module tb_attn_tile;
     reset_ref_state();
 
     $display("TB: attn_tile (MAC_PIPE_STAGES=%0d)", MAC_PIPE_STAGES);
-    #20;
+    #20 settle_marker = ~settle_marker;
     rst_n = 1'b1;
-    @(posedge clk);
-    @(posedge clk);
-    #1;
+    tick();
+    tick();
+    settle();
 
     // Constant pattern, lower half active.
     set_const_inputs(shortreal'(1.0), shortreal'(2.0));
