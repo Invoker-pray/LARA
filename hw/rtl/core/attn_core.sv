@@ -36,6 +36,8 @@ module attn_core
     output logic        o_write_start,
     input  logic        o_write_done,
     output logic        buf_sel,          // Q ping-pong bank select (toggles per Q tile)
+    output logic        q_load_bank_sel,  // Which Q bank q_load_start should fill
+    output logic        q_ready_bank_sel, // Which Q bank readiness q_load_done refers to
     output logic        o_bank_sel,       // O_acc bank select (toggles per Q tile)
     output logic        group_advance,    // pulse: advance to next GQA group, KV must be reloaded
 
@@ -53,6 +55,9 @@ module attn_core
     output logic [15:0] kv_tile_start,   // absolute K col start this tile
     output logic [5:0]  active_q_rows,   // valid Q rows in this tile (1..TILE_Q)
     output logic [6:0]  active_kv_cols,  // valid K/V cols in this tile (1..TILE_KV)
+    output logic        causal_en,       // latched causal configuration
+    output logic [2:0]  current_group,   // current GQA group index
+    output logic [1:0]  current_head,    // current Q head within group
 
     // --- Error flag ---
     output logic        error,           // sticky: illegal config detected
@@ -70,6 +75,18 @@ module attn_core
   logic [1:0]  head_cnt;
   logic [2:0]  group_cnt;
   logic [7:0]  n_q_tiles, n_kv_tiles;
+  logic [7:0]  q_tile_last_idx, kv_tile_last_idx;
+  logic        kv_prefetch_issued;
+  logic        q_load_inflight;
+  logic        q_prefetch_next_tile;
+  logic        q_prefetch_next_head_or_group;
+  logic        q_prefetch_head_or_group_early;
+  logic        kv_prefetch_next_group;
+
+  localparam logic [15:0] MAX_SEQ_LEN_U16 = 16'(MAX_SEQ_LEN);
+  localparam logic [16:0] MAX_SEQ_LEN_U17 = 17'(MAX_SEQ_LEN);
+  localparam logic [1:0]  LAST_Q_HEAD     = 2'd3;
+  localparam logic [2:0]  LAST_GQA_GROUP  = 3'd7;
 
   // Locked config (captured at accepted start)
   logic [15:0] seq_len_r;
@@ -82,17 +99,29 @@ module attn_core
   logic [6:0]  active_kv;
 
   always_comb begin
-    n_q_tiles  = 8'((seq_len_r + TILE_Q  - 1) / TILE_Q);
-    n_kv_tiles = 8'((seq_len_r + TILE_KV - 1) / TILE_KV);
-    q_pos_start  = 16'(q_pos_base_r + q_tile_idx * TILE_Q);
-    kv_pos_start = 16'(kv_pos_base_r + kv_tile_idx * TILE_KV);
+    logic [15:0] q_tile_base_u;
+    logic [15:0] kv_tile_base_u;
+    logic [4:0]  q_remainder;
+    logic [5:0]  kv_remainder;
+
+    q_tile_base_u = {3'd0, q_tile_idx, 5'd0};
+    kv_tile_base_u = {2'd0, kv_tile_idx, 6'd0};
+    q_remainder = seq_len_r[4:0];
+    kv_remainder = seq_len_r[5:0];
+
+    n_q_tiles  = 8'(seq_len_r[15:5]) + ((q_remainder != 5'd0) ? 8'd1 : 8'd0);
+    n_kv_tiles = 8'(seq_len_r[15:6]) + ((kv_remainder != 6'd0) ? 8'd1 : 8'd0);
+    q_tile_last_idx  = n_q_tiles  - 8'd1;
+    kv_tile_last_idx = n_kv_tiles - 8'd1;
+    q_pos_start  = q_pos_base_r + q_tile_base_u;
+    kv_pos_start = kv_pos_base_r + kv_tile_base_u;
     // Active rows in current Q tile
-    active_q = (q_tile_idx == n_q_tiles - 1 && (seq_len_r % TILE_Q) != 0)
-               ? 6'(seq_len_r - q_tile_idx * TILE_Q)
+    active_q = ((q_tile_idx == q_tile_last_idx) && (q_remainder != 5'd0))
+               ? {1'b0, q_remainder}
                : 6'(TILE_Q);
     // Active cols in current KV tile
-    active_kv = (kv_tile_idx == n_kv_tiles - 1 && (seq_len_r % TILE_KV) != 0)
-                ? 7'(seq_len_r - kv_tile_idx * TILE_KV)
+    active_kv = ((kv_tile_idx == kv_tile_last_idx) && (kv_remainder != 6'd0))
+                ? {1'b0, kv_remainder}
                 : 7'(TILE_KV);
   end
 
@@ -101,9 +130,27 @@ module attn_core
   assign kv_tile_start  = kv_pos_start;
   assign active_q_rows  = active_q;
   assign active_kv_cols = active_kv;
+  assign causal_en      = causal_r;
+  assign current_group  = group_cnt;
+  assign current_head   = head_cnt;
 
   // start_ready: accept only in IDLE
   assign start_ready = (state == ST_IDLE);
+  assign q_prefetch_next_tile = kv_tile_last && (q_tile_idx < q_tile_last_idx);
+  assign q_prefetch_next_head_or_group =
+      (q_tile_idx == q_tile_last_idx) &&
+      ((head_cnt < LAST_Q_HEAD) || (group_cnt < LAST_GQA_GROUP));
+  assign q_prefetch_head_or_group_early =
+      q_prefetch_next_head_or_group && kv_tile_last;
+  assign kv_prefetch_next_group =
+      (q_tile_idx == q_tile_last_idx) &&
+      (head_cnt == LAST_Q_HEAD) &&
+      (group_cnt < LAST_GQA_GROUP);
+  assign q_load_bank_sel = (((state == ST_QK_DOT) || (state == ST_SOFTMAX) || (state == ST_AV_DOT) ||
+                             ((state == ST_NORMALIZE) && (q_tile_idx < q_tile_last_idx)) ||
+                             ((state == ST_WRITE_O) && (q_tile_idx < q_tile_last_idx))) &&
+                            (q_tile_idx < q_tile_last_idx)) ? ~buf_sel : buf_sel;
+  assign q_ready_bank_sel = ((state == ST_WRITE_O) && (q_tile_idx < q_tile_last_idx)) ? ~buf_sel : buf_sel;
 
   // ==================================================================
   // Config Validation
@@ -112,9 +159,9 @@ module attn_core
   always_comb begin
     cfg_valid = 1'b1;
     if (seq_len == 16'd0)                           cfg_valid = 1'b0;
-    if (seq_len > 16'(MAX_SEQ_LEN))                cfg_valid = 1'b0;
-    if (cfg_q_pos_base + seq_len > 16'(MAX_SEQ_LEN))  cfg_valid = 1'b0;
-    if (cfg_kv_pos_base + seq_len > 16'(MAX_SEQ_LEN)) cfg_valid = 1'b0;
+    if (seq_len > MAX_SEQ_LEN_U16)                 cfg_valid = 1'b0;
+    if ({1'b0, cfg_q_pos_base} + {1'b0, seq_len} > MAX_SEQ_LEN_U17)  cfg_valid = 1'b0;
+    if ({1'b0, cfg_kv_pos_base} + {1'b0, seq_len} > MAX_SEQ_LEN_U17) cfg_valid = 1'b0;
   end
 
   // ==================================================================
@@ -162,9 +209,11 @@ module attn_core
       seq_len_r    <= 16'd0;
       q_pos_base_r <= 16'd0;
       kv_pos_base_r<= 16'd0;
-      causal_r     <= 1'b0;
+      causal_r     <= 1'b1;
       buf_sel      <= 1'b0;
       o_bank_sel   <= 1'b0;
+      kv_prefetch_issued <= 1'b0;
+      q_load_inflight <= 1'b0;
       done         <= 1'b0;
       error        <= 1'b0;
     end else begin
@@ -180,9 +229,28 @@ module attn_core
         kv_tile_idx   <= 8'd0;
         head_cnt      <= 2'd0;
         group_cnt     <= 3'd0;
+        kv_prefetch_issued <= 1'b0;
+        q_load_inflight <= 1'b0;
         done          <= 1'b0;  // clear sticky done
         error         <= 1'b0;  // clear sticky error
       end
+
+      if (q_load_done)
+        q_load_inflight <= 1'b0;
+      else if (q_load_start)
+        q_load_inflight <= 1'b1;
+
+      if (((state == ST_LOAD_KV) && kv_load_done) ||
+          ((state == ST_WRITE_O) && o_write_done &&
+           (q_tile_idx == q_tile_last_idx) &&
+           (head_cnt == LAST_Q_HEAD) &&
+           (group_cnt < LAST_GQA_GROUP) &&
+           kv_load_done))
+        kv_prefetch_issued <= 1'b0;
+      else if (((state == ST_AV_DOT) && mac_done && kv_prefetch_next_group) ||
+               ((state == ST_NORMALIZE) && kv_prefetch_next_group) ||
+               ((state == ST_LOAD_KV) && !kv_prefetch_issued))
+        kv_prefetch_issued <= 1'b1;
 
       case (state)
         ST_LOAD_KV: begin
@@ -195,27 +263,27 @@ module attn_core
           if (q_load_done) kv_tile_idx <= 8'd0;
         end
         ST_AV_DOT: begin
-          if (mac_done && kv_tile_last && q_tile_idx < n_q_tiles - 1) begin
+          if (mac_done && kv_tile_last && q_tile_idx < q_tile_last_idx) begin
             // Prefetch next Q tile: q_load_start fires during NORMALIZE+WRITE_O
           end
           if (mac_done) begin
-            if (kv_tile_idx < n_kv_tiles - 1)
+            if (kv_tile_idx < kv_tile_last_idx)
               kv_tile_idx <= kv_tile_idx + 8'd1;
           end
         end
         ST_WRITE_O: begin
           if (o_write_done) begin
-            if (q_tile_idx < n_q_tiles - 1) begin
+            if (q_tile_idx < q_tile_last_idx) begin
               q_tile_idx <= q_tile_idx + 8'd1;
               buf_sel    <= ~buf_sel;   // toggle Q ping-pong bank
               o_bank_sel <= ~o_bank_sel; // toggle O_acc bank
             end else begin
               q_tile_idx <= 8'd0;
-              if (head_cnt < 2'd3) begin
+              if (head_cnt < LAST_Q_HEAD) begin
                 head_cnt <= head_cnt + 2'd1;
               end else begin
                 head_cnt <= 2'd0;
-                if (group_cnt < 3'd7)
+                if (group_cnt < LAST_GQA_GROUP)
                   group_cnt <= group_cnt + 3'd1;
               end
             end
@@ -227,7 +295,7 @@ module attn_core
         ST_ERROR: begin
           error <= 1'b1; // sticky error
         end
-        default: ;
+        default: begin end
       endcase
     end
   end
@@ -244,20 +312,35 @@ module attn_core
           else              next_state = ST_LOAD_KV;
         end
       end
-      ST_LOAD_KV:  if (kv_load_done)    next_state = ST_Q_INIT;
+      ST_LOAD_KV:  if (kv_load_done) begin
+        if (q_load_done) next_state = ST_KV_READ;
+        else             next_state = ST_Q_INIT;
+      end
       ST_Q_INIT:   if (q_load_done)     next_state = ST_KV_READ;
       ST_KV_READ:                       next_state = ST_QK_DOT;
       ST_QK_DOT:   if (mac_done)        next_state = ST_SOFTMAX;
       ST_SOFTMAX:  if (softmax_done)    next_state = ST_AV_DOT;
       ST_AV_DOT:   if (mac_done) begin
-        if (kv_tile_idx < n_kv_tiles - 1) next_state = ST_KV_READ;
+        if (kv_tile_idx < kv_tile_last_idx) next_state = ST_KV_READ;
         else                              next_state = ST_NORMALIZE;
       end
       ST_NORMALIZE:                     next_state = ST_WRITE_O;
       ST_WRITE_O:  if (o_write_done) begin
-        if (q_tile_idx < n_q_tiles - 1)      next_state = ST_Q_INIT;
-        else if (head_cnt < 2'd3)             next_state = ST_Q_INIT;
-        else if (group_cnt < 3'd7)            next_state = ST_LOAD_KV;
+        if (q_tile_idx < q_tile_last_idx) begin
+          if (q_load_done) next_state = ST_KV_READ;
+          else             next_state = ST_Q_INIT;
+        end
+        else if (head_cnt < LAST_Q_HEAD) begin
+          if (q_load_done) next_state = ST_KV_READ;
+          else             next_state = ST_Q_INIT;
+        end
+        else if (group_cnt < LAST_GQA_GROUP) begin
+          if (kv_load_done) begin
+            if (q_load_done) next_state = ST_KV_READ;
+            else             next_state = ST_Q_INIT;
+          end else
+            next_state = ST_LOAD_KV;
+        end
         else                                  next_state = ST_DONE;
       end
       ST_DONE:                           next_state = ST_IDLE;
@@ -282,40 +365,61 @@ module attn_core
     busy           = (state != ST_IDLE && state != ST_DONE && state != ST_ERROR);
 
     case (state)
-      ST_LOAD_KV:  if (!kv_load_done) kv_load_start = 1'b1;
-      ST_Q_INIT:   if (!q_load_done)  q_load_start  = 1'b1;
+      ST_LOAD_KV: begin
+        if (!kv_load_done && !kv_prefetch_issued)
+          kv_load_start = 1'b1;
+        if (!q_load_done)
+          q_load_start = !q_load_inflight;
+      end
+      ST_Q_INIT:   if (!q_load_done)  q_load_start  = !q_load_inflight;
       ST_KV_READ: begin
         mac_start     = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == n_kv_tiles - 1);
+        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
       end
       ST_QK_DOT: begin
         mac_phase     = 1'b0;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == n_kv_tiles - 1);
+        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        if (q_prefetch_next_tile)
+          q_load_start = !q_load_inflight;
       end
       ST_SOFTMAX: begin
         softmax_start = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == n_kv_tiles - 1);
+        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        if (q_prefetch_next_tile)
+          q_load_start = !q_load_inflight;
+        if (q_prefetch_head_or_group_early)
+          q_load_start = !q_load_inflight;
       end
       ST_AV_DOT: begin
         mac_phase     = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == n_kv_tiles - 1);
-        if (kv_tile_last && q_tile_idx < n_q_tiles - 1)
-          q_load_start = 1'b1;
+        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        if (q_prefetch_next_tile)
+          q_load_start = !q_load_inflight;
+        if (q_prefetch_head_or_group_early)
+          q_load_start = !q_load_inflight;
+        if (mac_done && kv_prefetch_next_group && !kv_prefetch_issued)
+          kv_load_start = 1'b1;
+      end
+      ST_NORMALIZE: begin
+        o_write_start = 1'b1;
+        if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
+          q_load_start = !q_load_inflight;
+        if (kv_prefetch_next_group && !kv_prefetch_issued)
+          kv_load_start = 1'b1;
       end
       ST_WRITE_O: begin
         if (!o_write_done)
           o_write_start = 1'b1;
-        if (o_write_done &&
-            (q_tile_idx == n_q_tiles - 1) &&
-            (head_cnt == 2'd3) &&
-            (group_cnt < 3'd7))
+        if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
+          q_load_start = !q_load_inflight;
+        if (o_write_done && kv_prefetch_next_group)
           group_advance = 1'b1;
       end
-      default: ;
+      default: begin end
     endcase
   end
 

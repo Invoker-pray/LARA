@@ -1,5 +1,5 @@
 # ============================================================================
-# .gitignore — LARA Attention Accelerator (develop branch)
+# .gitignore — LARA Attention Accelerator
 # ============================================================================
 
 # Python
@@ -18,16 +18,28 @@ wheels/
 .claude/
 memory.txt
 
+# AI assistant configuration (never commit local agent state)
+.codex/
+.agent/
+.agents/
+
 # ============================================================================
 # Simulation artifacts (VCS / Verilator)
 # ============================================================================
 VV/sim/
+VV/obj_dir/
+VV/data/data
 simv
 simv*
 *.daidir
 csrc/
 DVEfiles/
 ucli.key
+*.vpd
+*.wdb
+*.wlf
+*.fst
+*.ucdb
 *.log
 *.vcd
 *.fsdb
@@ -42,6 +54,8 @@ ucli.key
 *.hwh
 *.xclbin
 *.xsa
+*.ltx
+*.mmi
 vivado_*.log
 vivado_*.jou
 vivado_*.debug

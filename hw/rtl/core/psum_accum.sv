@@ -1,5 +1,6 @@
 module psum_accum
   import attn_pkg::*;
+  #(parameter bit ENABLE_LEGACY_PATHS = 1'b1)
 (
     input  logic                 clk, rst_n, clear,
     input  logic                 en,
@@ -15,7 +16,18 @@ module psum_accum
     output logic [FP32_W-1:0]    psum [TILE_COLS]
 );
   integer ii;
+  logic unused_quad_inputs;
+
+  assign unused_quad_inputs = &(1'b0 + {
+      en_q0, en_q1, en_q2, en_q3,
+      ^col_q0[0], ^col_q1[0], ^col_q2[0], ^col_q3[0]
+    });
+generate
+if (ENABLE_LEGACY_PATHS) begin : g_full
 `ifndef SYNTHESIS
+  /* verilator lint_off SHORTREAL */
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       for (ii = 0; ii < TILE_COLS; ii++) psum[ii] <= 32'd0;
@@ -36,6 +48,9 @@ module psum_accum
         psum[ii] <= $shortrealtobits($bitstoshortreal(psum[ii]) + $bitstoshortreal(tile_col[ii]));
     end
   end
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+  /* verilator lint_on SHORTREAL */
 
 `else
   // Synthesis: fp32 accumulator using shared bit-level helpers.
@@ -70,5 +85,42 @@ module psum_accum
     end
   end
 `endif
+end else begin : g_basic
+  logic unused_legacy_inputs;
+  assign unused_legacy_inputs = &(1'b0 + {
+      en_lo, en_hi, en_q0, en_q1, en_q2, en_q3,
+      ^col_lo[0], ^col_hi[0], ^col_q0[0], ^col_q1[0], ^col_q2[0], ^col_q3[0]
+    });
+`ifndef SYNTHESIS
+  /* verilator lint_off SHORTREAL */
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      for (ii = 0; ii < TILE_COLS; ii++) psum[ii] <= 32'd0;
+    end else if (clear) begin
+      for (ii = 0; ii < TILE_COLS; ii++) psum[ii] <= 32'd0;
+    end else if (en) begin
+      for (ii = 0; ii < TILE_COLS; ii++)
+        psum[ii] <= $shortrealtobits($bitstoshortreal(psum[ii]) + $bitstoshortreal(tile_col[ii]));
+    end
+  end
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+  /* verilator lint_on SHORTREAL */
+`else
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      for (ii = 0; ii < TILE_COLS; ii++) psum[ii] <= 32'd0;
+    end else if (clear) begin
+      for (ii = 0; ii < TILE_COLS; ii++) psum[ii] <= 32'd0;
+    end else if (en) begin
+      for (ii = 0; ii < TILE_COLS; ii++)
+        psum[ii] <= fp32_add(psum[ii], tile_col[ii]);
+    end
+  end
+`endif
+end
+endgenerate
 
 endmodule

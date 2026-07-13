@@ -23,15 +23,24 @@ module attn_tile
 );
 
   localparam int ACTIVE_COLS_PER_SPLIT = TILE_COLS / TILE_SPLIT_FACTOR;
+  localparam int PHASE_COLS = (TILE_SPLIT_FACTOR <= 1) ? TILE_COLS :
+                              (TILE_COLS / TILE_SPLIT_FACTOR);
+  localparam int COL_IDX_W = clog2_safe(TILE_COLS);
+  (* keep = "true" *) logic unused_phase_sel;
+
+  assign unused_phase_sel = &{1'b0, phase_sel};
 
   // ==================================================================
   // Stage 1: Multiply (combinational)
   // ==================================================================
+`ifndef SYNTHESIS
+  /* verilator lint_off SHORTREAL */
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
   shortreal prod [TILE_ROWS][TILE_COLS];
   shortreal block_acc [TILE_ROWS][TILE_COLS];
   shortreal block_next [TILE_ROWS][TILE_COLS];
 
-`ifndef SYNTHESIS
   always_comb begin
     int ri, ci;
     for (ri = 0; ri < TILE_ROWS; ri++) begin
@@ -132,24 +141,118 @@ module attn_tile
     end
   end
 
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+  /* verilator lint_on SHORTREAL */
 
 `else
-  // Synthesis: 256 bf16_mac + binary adder tree (4-level, log2=4)
+  // Synthesis: implement TILE_SPLIT_FACTOR as a physical column shrink.
+  // For SPLIT_FACTOR=2 the tile only instantiates 8 columns of multipliers
+  // and updates either cols [0:7] or cols [8:15] per cycle.
   genvar sr, sc;
-  logic [31:0] pe_prod [TILE_ROWS][TILE_COLS];
+  logic [31:0] pe_prod [TILE_ROWS][PHASE_COLS];
+  logic [31:0] pe_prod_r [TILE_ROWS][PHASE_COLS];
   logic [31:0] block_acc_bits [TILE_ROWS][TILE_COLS];
-  logic [31:0] block_next_bits [TILE_ROWS][TILE_COLS];
-  logic        pe_active [TILE_ROWS][TILE_COLS];
+  logic [31:0] active_sum_bits [TILE_ROWS][PHASE_COLS];
+  logic [31:0] col_reduce [PHASE_COLS];
+  logic [1:0]  split_phase_r;
+  logic        clear_accum_r;
+  logic        accum_en_r;
+
   generate
     for (sr = 0; sr < TILE_ROWS; sr++) begin : SYN_ROW
-      for (sc = 0; sc < TILE_COLS; sc++) begin : SYN_PE
-        assign pe_active[sr][sc] = (split_phase == 2'd0) ? (sc < ACTIVE_COLS_PER_SPLIT) :
-                                   (split_phase == 2'd1) ? (sc >= ACTIVE_COLS_PER_SPLIT) :
-                                                           1'b1;
-        bf16_mac u_pe(.clk, .rst_n, .a_bf16(row_data[sr]), .b_bf16(pe_active[sr][sc] ? col_data[sc] : 16'd0), .c_fp32(32'd0), .out_fp32(pe_prod[sr][sc]));
+      for (sc = 0; sc < PHASE_COLS; sc++) begin : SYN_PE
+        if (TILE_SPLIT_FACTOR <= 1) begin : GEN_MONO
+          assign pe_prod[sr][sc] = bf16_mul_to_fp32(row_data[sr], col_data[sc]);
+        end else begin : GEN_SPLIT
+          wire [COL_IDX_W-1:0] col_idx = (split_phase == 2'd1)
+                                           ? COL_IDX_W'(sc + PHASE_COLS)
+                                           : COL_IDX_W'(sc);
+          assign pe_prod[sr][sc] = bf16_mul_to_fp32(row_data[sr], col_data[col_idx]);
+        end
       end
     end
   endgenerate
+
+  always_comb begin
+    int rr, cc, pc;
+    int phase_offset;
+    logic [31:0] acc_base;
+    logic [31:0] acc_sum;
+
+    phase_offset = 0;
+    phase_offset = 0;
+    if ((TILE_SPLIT_FACTOR > 1) && (split_phase_r == 2'd1))
+      phase_offset = PHASE_COLS;
+
+    // One physical adder per active PE. The split phase selects which half of
+    // the 16-column accumulator state is read and written.
+    for (rr = 0; rr < TILE_ROWS; rr++) begin
+      for (pc = 0; pc < PHASE_COLS; pc++) begin
+        acc_base = clear_accum_r ? 32'd0 : block_acc_bits[rr][pc + phase_offset];
+        active_sum_bits[rr][pc] = accum_en_r
+                                ? fp32_add(acc_base, pe_prod_r[rr][pc])
+                                : acc_base;
+      end
+    end
+
+    for (cc = 0; cc < PHASE_COLS; cc++) begin
+      acc_sum = accum_en_r ? pe_prod_r[0][cc] : 32'd0;
+      for (rr = 1; rr < TILE_ROWS; rr++) begin
+        acc_sum = fp32_add(acc_sum, accum_en_r ? pe_prod_r[rr][cc] : 32'd0);
+      end
+      col_reduce[cc] = acc_sum;
+    end
+
+    for (cc = 0; cc < TILE_COLS; cc++) begin
+      col_out[cc] = 32'd0;
+      if (TILE_SPLIT_FACTOR <= 1) begin
+        if (cc < PHASE_COLS)
+          col_out[cc] = col_reduce[cc];
+      end else if ((split_phase_r == 2'd0) && (cc < PHASE_COLS)) begin
+        col_out[cc] = col_reduce[cc];
+      end else if ((split_phase_r == 2'd1) && (cc >= PHASE_COLS) && (cc < (2 * PHASE_COLS))) begin
+        col_out[cc] = col_reduce[cc - PHASE_COLS];
+      end
+    end
+
+    for (rr = 0; rr < TILE_ROWS; rr++) begin
+      for (cc = 0; cc < TILE_COLS; cc++) begin
+        // Expose the current transaction without adding an externally visible
+        // cycle: pe_prod_r/control_r are the registered input stage, while
+        // block_acc_bits holds the completed previous transaction.
+        if (cc < PHASE_COLS && TILE_SPLIT_FACTOR <= 1)
+          block_out[rr][cc] = active_sum_bits[rr][cc];
+        else if ((split_phase_r == 2'd0) && (cc < PHASE_COLS))
+          block_out[rr][cc] = active_sum_bits[rr][cc];
+        else if ((split_phase_r == 2'd1) && (cc >= PHASE_COLS) && (cc < 2 * PHASE_COLS))
+          block_out[rr][cc] = active_sum_bits[rr][cc - PHASE_COLS];
+        else if (clear_accum_r)
+          block_out[rr][cc] = 32'd0;
+        else
+          block_out[rr][cc] = block_acc_bits[rr][cc];
+      end
+    end
+  end
+
+  integer pr, pc;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      split_phase_r <= 2'd0;
+      clear_accum_r <= 1'b0;
+      accum_en_r    <= 1'b0;
+      for (pr = 0; pr < TILE_ROWS; pr = pr + 1)
+        for (pc = 0; pc < PHASE_COLS; pc = pc + 1)
+          pe_prod_r[pr][pc] <= 32'd0;
+    end else begin
+      split_phase_r <= split_phase;
+      clear_accum_r <= clear_accum;
+      accum_en_r    <= accum_en;
+      for (pr = 0; pr < TILE_ROWS; pr = pr + 1)
+        for (pc = 0; pc < PHASE_COLS; pc = pc + 1)
+          pe_prod_r[pr][pc] <= pe_prod[pr][pc];
+    end
+  end
 
   integer ar, ac;
   always_ff @(posedge clk or negedge rst_n) begin
@@ -158,45 +261,24 @@ module attn_tile
         for (ac = 0; ac < TILE_COLS; ac++)
           block_acc_bits[ar][ac] <= 32'd0;
     end else begin
-      for (ar = 0; ar < TILE_ROWS; ar++)
-        for (ac = 0; ac < TILE_COLS; ac++)
-          block_acc_bits[ar][ac] <= block_next_bits[ar][ac];
-    end
-  end
+      if (clear_accum_r) begin
+        for (ar = 0; ar < TILE_ROWS; ar++)
+          for (ac = 0; ac < TILE_COLS; ac++)
+            block_acc_bits[ar][ac] <= 32'd0;
+      end
 
-  generate
-    for (sr = 0; sr < TILE_ROWS; sr++) begin : SYN_BLOCK_OUT
-      for (sc = 0; sc < TILE_COLS; sc++) begin : SYN_BLOCK_OUT_COL
-        assign block_next_bits[sr][sc] = accum_en
-                                       ? fp32_add(clear_accum ? 32'd0 : block_acc_bits[sr][sc], pe_prod[sr][sc])
-                                       : (clear_accum ? 32'd0 : block_acc_bits[sr][sc]);
-        assign block_out[sr][sc] = block_acc_bits[sr][sc];
+      if (accum_en_r) begin
+        for (ar = 0; ar < TILE_ROWS; ar++) begin
+          for (ac = 0; ac < PHASE_COLS; ac++) begin
+            if ((TILE_SPLIT_FACTOR <= 1) || (split_phase_r == 2'd0))
+              block_acc_bits[ar][ac] <= active_sum_bits[ar][ac];
+            else if (split_phase_r == 2'd1)
+              block_acc_bits[ar][ac + PHASE_COLS] <= active_sum_bits[ar][ac];
+          end
+        end
       end
     end
-    // Binary adder tree per column: log2(16)=4 levels
-    for (sc = 0; sc < TILE_COLS; sc++) begin : SYN_REDUCE
-      wire [31:0] l0_0 = accum_en ? pe_prod[0][sc] : 32'd0;  wire [31:0] l0_1 = accum_en ? pe_prod[1][sc] : 32'd0;
-      wire [31:0] l0_2 = accum_en ? pe_prod[2][sc] : 32'd0;  wire [31:0] l0_3 = accum_en ? pe_prod[3][sc] : 32'd0;
-      wire [31:0] l0_4 = accum_en ? pe_prod[4][sc] : 32'd0;  wire [31:0] l0_5 = accum_en ? pe_prod[5][sc] : 32'd0;
-      wire [31:0] l0_6 = accum_en ? pe_prod[6][sc] : 32'd0;  wire [31:0] l0_7 = accum_en ? pe_prod[7][sc] : 32'd0;
-      wire [31:0] l0_8 = accum_en ? pe_prod[8][sc] : 32'd0;  wire [31:0] l0_9 = accum_en ? pe_prod[9][sc] : 32'd0;
-      wire [31:0] l0_10= accum_en ? pe_prod[10][sc] : 32'd0; wire [31:0] l0_11= accum_en ? pe_prod[11][sc] : 32'd0;
-      wire [31:0] l0_12= accum_en ? pe_prod[12][sc] : 32'd0; wire [31:0] l0_13= accum_en ? pe_prod[13][sc] : 32'd0;
-      wire [31:0] l0_14= accum_en ? pe_prod[14][sc] : 32'd0; wire [31:0] l0_15= accum_en ? pe_prod[15][sc] : 32'd0;
-      // Level 1: 16→8
-      wire [31:0] l1_0 = fp32_add(l0_0, l0_1);   wire [31:0] l1_1 = fp32_add(l0_2, l0_3);
-      wire [31:0] l1_2 = fp32_add(l0_4, l0_5);   wire [31:0] l1_3 = fp32_add(l0_6, l0_7);
-      wire [31:0] l1_4 = fp32_add(l0_8, l0_9);   wire [31:0] l1_5 = fp32_add(l0_10, l0_11);
-      wire [31:0] l1_6 = fp32_add(l0_12, l0_13); wire [31:0] l1_7 = fp32_add(l0_14, l0_15);
-      // Level 2: 8→4
-      wire [31:0] l2_0 = fp32_add(l1_0, l1_1); wire [31:0] l2_1 = fp32_add(l1_2, l1_3);
-      wire [31:0] l2_2 = fp32_add(l1_4, l1_5); wire [31:0] l2_3 = fp32_add(l1_6, l1_7);
-      // Level 3: 4→2
-      wire [31:0] l3_0 = fp32_add(l2_0, l2_1); wire [31:0] l3_1 = fp32_add(l2_2, l2_3);
-      // Level 4: 2→1
-      assign col_out[sc] = fp32_add(l3_0, l3_1);
-    end
-  endgenerate
+  end
 `endif // SYNTHESIS
 
 endmodule

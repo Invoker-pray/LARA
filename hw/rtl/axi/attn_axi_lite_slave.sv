@@ -42,8 +42,9 @@ module attn_axi_lite_slave
     // CSR Register Interface (to attn_core)
     output logic                   start,
     output logic [15:0]            seq_len,
-    output logic [2:0]             gqa_group,
-    output logic [1:0]             q_head,
+    output logic                   cfg_causal,
+    input  logic [2:0]             gqa_group,
+    input  logic [1:0]             q_head,
     output logic [1:0]             stream_dest,
     output logic [31:0]            stream_len,
     output logic [31:0]            result_len,
@@ -54,6 +55,12 @@ module attn_axi_lite_slave
 
   // Register file
   logic [31:0] reg_file [0:15];
+  (* keep = "true" *) logic unused_addr_bits;
+
+  assign unused_addr_bits = &{1'b0,
+                              |s_axi_awaddr[CSR_ADDR_W-1:6], |s_axi_awaddr[1:0],
+                              |s_axi_araddr[CSR_ADDR_W-1:6], |s_axi_araddr[1:0],
+                              |s_axi_wstrb};
 
   // AXI write logic
   logic aw_acked, w_acked;
@@ -82,6 +89,7 @@ module attn_axi_lite_slave
       s_axi_bresp  <= 2'b00;
       for (int i = 0; i < 16; i++)
         reg_file[i] <= 32'd0;
+      reg_file[CSR_CTRL[5:2]][2] <= 1'b1;
     end else begin
       if (aw_acked && w_acked && !s_axi_bvalid) begin
         s_axi_bvalid <= 1'b1;
@@ -97,6 +105,8 @@ module attn_axi_lite_slave
       if (start)
         reg_file[CSR_STATUS[5:2]][0] <= 1'b0;
       reg_file[CSR_STATUS[5:2]][3:1] <= 3'd0;
+      reg_file[CSR_HEAD_IDX[5:2]][4:2] <= gqa_group;
+      reg_file[CSR_HEAD_IDX[5:2]][1:0] <= q_head;
       reg_file[CSR_PERF_CYCLES[5:2]] <= cycle_cnt;
       reg_file[CSR_PERF_STALLS[5:2]] <= mac_cycles;
     end
@@ -128,8 +138,7 @@ module attn_axi_lite_slave
   // Map registers to control signals
   assign start     = reg_file[CSR_CTRL[5:2]][0];
   assign seq_len   = reg_file[CSR_SEQ_LEN[5:2]][15:0];
-  assign gqa_group = reg_file[CSR_HEAD_IDX[5:2]][4:2];
-  assign q_head    = reg_file[CSR_HEAD_IDX[5:2]][1:0];
+  assign cfg_causal = reg_file[CSR_CTRL[5:2]][2];
   assign stream_dest = reg_file[CSR_STREAM_DEST[5:2]][1:0];
   assign stream_len  = reg_file[CSR_STREAM_LEN[5:2]];
   assign result_len  = reg_file[CSR_RESULT_LEN[5:2]];

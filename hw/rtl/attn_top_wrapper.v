@@ -18,7 +18,12 @@ module attn_top_wrapper (
     m_axis_tdata, m_axis_tvalid, m_axis_tready, m_axis_tlast
 );
   // Clock + Reset
-  input  wire        clk, rst_n;
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis:m_axis, ASSOCIATED_RESET rst_n" *)
+  (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)
+  input  wire        clk;
+  (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
+  (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rst_n RST" *)
+  input  wire        rst_n;
   // AXI4-Lite Slave: host→slave (inputs), slave→host (outputs)
   input  wire [13:0] s_axi_awaddr;
   input  wire        s_axi_awvalid;

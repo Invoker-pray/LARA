@@ -20,6 +20,9 @@ module bf16_mac
   // ==================================================================
   // Simulation path (shortreal)
   // ==================================================================
+  /* verilator lint_off SHORTREAL */
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
   logic _u;
   assign _u = |{clk, rst_n};
 
@@ -48,6 +51,9 @@ module bf16_mac
   assign prod_staged = $bitstoshortreal(prod_r);
   assign c_staged    = $bitstoshortreal(c_r);
   assign out_fp32 = $shortrealtobits(prod_staged + c_staged);
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+  /* verilator lint_on SHORTREAL */
 
 `else
   // ==================================================================
@@ -71,7 +77,7 @@ module bf16_mac
 
   // Mantissa multiply: 8-bit × 8-bit → 16-bit (DSP48E2 inference)
   (* use_dsp = "yes" *) logic [15:0] mant_prod;
-  assign mant_prod = mant_a * mant_b;
+  assign mant_prod = ({8'd0, mant_a} * {8'd0, mant_b});
 
   // Sign: XOR
   logic sign_prod;

@@ -25,6 +25,8 @@ module rope_engine
     output logic [BF16_W-1:0]  data_out
 );
 
+  localparam shortreal ZERO_SR = 0.0;
+
   localparam int N_PAIRS = HEAD_DIM / 2;   // 64
   localparam int N_LUT   = 1024;           // sin/cos LUT depth
   localparam shortreal TWO_PI = 6.283185307179586;
@@ -32,22 +34,41 @@ module rope_engine
   // ==================================================================
   // ROMs (loaded from hex files at sim start)
   // ==================================================================
-  logic [FP32_W-1:0] theta_rom [0:N_PAIRS-1];
-  logic [FP32_W-1:0] sincos_lut [0:N_LUT-1][1:0]; // [idx][0]=sin, [1]=cos
+  (* rom_style = "block" *) logic [FP32_W-1:0] theta_rom [0:N_PAIRS-1];
+  (* rom_style = "block" *) logic [FP32_W-1:0] sincos_sin_rom [0:N_LUT-1];
+  (* rom_style = "block" *) logic [FP32_W-1:0] sincos_cos_rom [0:N_LUT-1];
 
+`ifndef SYNTHESIS
   initial begin : ROM_LOAD
     integer fd;
+    integer rom_scan_rc;
+    rom_scan_rc = 0;
     fd = $fopen("data/rope_theta.hex", "r");
-    if (fd) begin
-      for (int i = 0; i < N_PAIRS; i++) $fscanf(fd, "%h", theta_rom[i]);
+    if (fd == 0)
+      fd = $fopen("VV/data/rope_theta.hex", "r");
+    if (fd != 0) begin
+      for (int i = 0; i < N_PAIRS; i++) begin
+        rom_scan_rc = $fscanf(fd, "%h", theta_rom[i]);
+      end
       $fclose(fd);
     end
     fd = $fopen("data/rope_sincos.hex", "r");
-    if (fd) begin
-      for (int i = 0; i < N_LUT; i++) $fscanf(fd, "%h %h", sincos_lut[i][0], sincos_lut[i][1]);
+    if (fd == 0)
+      fd = $fopen("VV/data/rope_sincos.hex", "r");
+    if (fd != 0) begin
+      for (int i = 0; i < N_LUT; i++) begin
+        rom_scan_rc = $fscanf(fd, "%h %h", sincos_sin_rom[i], sincos_cos_rom[i]);
+      end
       $fclose(fd);
     end
   end
+`else
+  initial begin
+    $readmemh("rope_theta.hex", theta_rom);
+    $readmemh("rope_sincos_sin.hex", sincos_sin_rom);
+    $readmemh("rope_sincos_cos.hex", sincos_cos_rom);
+  end
+`endif
 
   // ==================================================================
   // Pipeline registers
@@ -64,11 +85,12 @@ module rope_engine
     input shortreal phase,
     output shortreal s, output shortreal c
   );
+    /* verilator lint_off WIDTHEXPAND */
     shortreal idx_f, frac;
     integer  idx_lo, idx_hi;
     shortreal s_lo, s_hi, c_lo, c_hi;
     // Normalize phase to [0, 2π)
-    while (phase < 0.0)     phase = phase + TWO_PI;
+    while (phase < ZERO_SR) phase = phase + TWO_PI;
     while (phase >= TWO_PI)  phase = phase - TWO_PI;
     idx_f  = phase / TWO_PI * shortreal'(N_LUT);
     idx_lo = integer'(idx_f);
@@ -76,19 +98,23 @@ module rope_engine
     if (idx_hi >= N_LUT) idx_hi = 0;
     frac = idx_f - shortreal'(idx_lo);
 
-    s_lo = $bitstoshortreal(sincos_lut[idx_lo][0]);
-    s_hi = $bitstoshortreal(sincos_lut[idx_hi][0]);
-    c_lo = $bitstoshortreal(sincos_lut[idx_lo][1]);
-    c_hi = $bitstoshortreal(sincos_lut[idx_hi][1]);
+    s_lo = $bitstoshortreal(sincos_sin_rom[idx_lo]);
+    s_hi = $bitstoshortreal(sincos_sin_rom[idx_hi]);
+    c_lo = $bitstoshortreal(sincos_cos_rom[idx_lo]);
+    c_hi = $bitstoshortreal(sincos_cos_rom[idx_hi]);
 
     s = s_lo + frac * (s_hi - s_lo);
     c = c_lo + frac * (c_hi - c_lo);
+    /* verilator lint_on WIDTHEXPAND */
   endfunction
 
   // ==================================================================
   // Main pipeline
   // ==================================================================
 `ifndef SYNTHESIS
+  /* verilator lint_off SHORTREAL */
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
   always_ff @(posedge clk or negedge rst_n) begin : MAIN_PIPE
     shortreal a_val, b_val, phase_val, s_val, c_val;
     shortreal a_rot, b_rot;
@@ -105,7 +131,7 @@ module rope_engine
         data_out_valid <= 1'b0;
 
       if (data_valid) begin
-        p_idx = dim[6:1];  // dim / 2 → pair index 0..63
+        p_idx = int'(dim[6:1]);  // dim / 2 → pair index 0..63
 
         if (!dim[0]) begin  // --- Even dimension: buffer ---
           a_buf <= $bitstoshortreal({data_in, 16'b0});
@@ -114,7 +140,7 @@ module rope_engine
           theta_val = $bitstoshortreal(theta_rom[p_idx]);
           phase_val = shortreal'(pos) * theta_val;
           // Normalize
-          while (phase_val < 0.0)    phase_val = phase_val + TWO_PI;
+          while (phase_val < ZERO_SR) phase_val = phase_val + TWO_PI;
           while (phase_val >= TWO_PI) phase_val = phase_val - TWO_PI;
 
           lut_sincos(phase_val, s_val, c_val);
@@ -128,12 +154,12 @@ module rope_engine
           b_rot = a_buf * s_reg + b_val * c_reg;
 
           // Output even (rotated) immediately
-          data_out       <= ($shortrealtobits(a_rot) >> 16);
+          data_out       <= 16'(($shortrealtobits(a_rot) >> 16));
           data_out_valid <= 1'b1;
 
           // Schedule odd for next cycle
           pipe_valid <= 1'b1;
-          pipe_data  <= ($shortrealtobits(b_rot) >> 16);
+          pipe_data  <= 16'(($shortrealtobits(b_rot) >> 16));
         end
       end
 
@@ -146,6 +172,9 @@ module rope_engine
     end
   end
 
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+  /* verilator lint_on SHORTREAL */
 
 `else
   // Synthesis: LUT-based sin/cos rotation
