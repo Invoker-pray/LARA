@@ -58,6 +58,11 @@ module attn_core
     output logic        causal_en,       // latched causal configuration
     output logic [2:0]  current_group,   // current GQA group index
     output logic [1:0]  current_head,    // current Q head within group
+    output logic [7:0]  current_q_tile,
+    output logic [7:0]  current_kv_tile,
+    output logic [2:0]  q_req_group,
+    output logic [1:0]  q_req_head,
+    output logic [7:0]  q_req_tile,
 
     // --- Error flag ---
     output logic        error,           // sticky: illegal config detected
@@ -81,7 +86,6 @@ module attn_core
   logic        q_prefetch_next_tile;
   logic        q_prefetch_next_head_or_group;
   logic        q_prefetch_head_or_group_early;
-  logic        kv_prefetch_next_group;
 
   localparam logic [15:0] MAX_SEQ_LEN_U16 = 16'(MAX_SEQ_LEN);
   localparam logic [16:0] MAX_SEQ_LEN_U17 = 17'(MAX_SEQ_LEN);
@@ -133,6 +137,31 @@ module attn_core
   assign causal_en      = causal_r;
   assign current_group  = group_cnt;
   assign current_head   = head_cnt;
+  assign current_q_tile = q_tile_idx;
+  assign current_kv_tile = kv_tile_idx;
+
+  // Describe the Q tile requested by q_load_start. A request may be an
+  // overlap prefetch for the next tile/head, so the current loop counters are
+  // not always the destination descriptor the host must send.
+  always_comb begin
+    q_req_group = group_cnt;
+    q_req_head  = head_cnt;
+    q_req_tile  = q_tile_idx;
+    if ((state == ST_QK_DOT || state == ST_SOFTMAX || state == ST_AV_DOT ||
+         state == ST_NORMALIZE || state == ST_WRITE_O) && q_prefetch_next_tile) begin
+      q_req_tile = q_tile_idx + 8'd1;
+    end else if ((state == ST_QK_DOT || state == ST_SOFTMAX || state == ST_AV_DOT ||
+                  state == ST_NORMALIZE || state == ST_WRITE_O) &&
+                 q_prefetch_next_head_or_group) begin
+      q_req_tile = 8'd0;
+      if (head_cnt < LAST_Q_HEAD)
+        q_req_head = head_cnt + 2'd1;
+      else begin
+        q_req_head  = 2'd0;
+        q_req_group = group_cnt + 3'd1;
+      end
+    end
+  end
 
   // start_ready: accept only in IDLE
   assign start_ready = (state == ST_IDLE);
@@ -142,10 +171,6 @@ module attn_core
       ((head_cnt < LAST_Q_HEAD) || (group_cnt < LAST_GQA_GROUP));
   assign q_prefetch_head_or_group_early =
       q_prefetch_next_head_or_group && kv_tile_last;
-  assign kv_prefetch_next_group =
-      (q_tile_idx == q_tile_last_idx) &&
-      (head_cnt == LAST_Q_HEAD) &&
-      (group_cnt < LAST_GQA_GROUP);
   assign q_load_bank_sel = (((state == ST_QK_DOT) || (state == ST_SOFTMAX) || (state == ST_AV_DOT) ||
                              ((state == ST_NORMALIZE) && (q_tile_idx < q_tile_last_idx)) ||
                              ((state == ST_WRITE_O) && (q_tile_idx < q_tile_last_idx))) &&
@@ -240,16 +265,9 @@ module attn_core
       else if (q_load_start)
         q_load_inflight <= 1'b1;
 
-      if (((state == ST_LOAD_KV) && kv_load_done) ||
-          ((state == ST_WRITE_O) && o_write_done &&
-           (q_tile_idx == q_tile_last_idx) &&
-           (head_cnt == LAST_Q_HEAD) &&
-           (group_cnt < LAST_GQA_GROUP) &&
-           kv_load_done))
+      if ((state == ST_LOAD_KV) && kv_load_done)
         kv_prefetch_issued <= 1'b0;
-      else if (((state == ST_AV_DOT) && mac_done && kv_prefetch_next_group) ||
-               ((state == ST_NORMALIZE) && kv_prefetch_next_group) ||
-               ((state == ST_LOAD_KV) && !kv_prefetch_issued))
+      else if ((state == ST_LOAD_KV) && !kv_prefetch_issued)
         kv_prefetch_issued <= 1'b1;
 
       case (state)
@@ -334,13 +352,8 @@ module attn_core
           if (q_load_done) next_state = ST_KV_READ;
           else             next_state = ST_Q_INIT;
         end
-        else if (group_cnt < LAST_GQA_GROUP) begin
-          if (kv_load_done) begin
-            if (q_load_done) next_state = ST_KV_READ;
-            else             next_state = ST_Q_INIT;
-          end else
-            next_state = ST_LOAD_KV;
-        end
+        else if (group_cnt < LAST_GQA_GROUP)
+          next_state = ST_LOAD_KV;
         else                                  next_state = ST_DONE;
       end
       ST_DONE:                           next_state = ST_IDLE;
@@ -401,22 +414,19 @@ module attn_core
           q_load_start = !q_load_inflight;
         if (q_prefetch_head_or_group_early)
           q_load_start = !q_load_inflight;
-        if (mac_done && kv_prefetch_next_group && !kv_prefetch_issued)
-          kv_load_start = 1'b1;
       end
       ST_NORMALIZE: begin
         o_write_start = 1'b1;
         if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
           q_load_start = !q_load_inflight;
-        if (kv_prefetch_next_group && !kv_prefetch_issued)
-          kv_load_start = 1'b1;
       end
       ST_WRITE_O: begin
         if (!o_write_done)
           o_write_start = 1'b1;
         if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
           q_load_start = !q_load_inflight;
-        if (o_write_done && kv_prefetch_next_group)
+        if (o_write_done && (q_tile_idx == q_tile_last_idx) &&
+            (head_cnt == LAST_Q_HEAD) && (group_cnt < LAST_GQA_GROUP))
           group_advance = 1'b1;
       end
       default: begin end
