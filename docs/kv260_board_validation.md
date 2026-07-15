@@ -1,6 +1,6 @@
 # KV260 上板与板上验证指南
 
-本指南对应当前 `develop` 的 v2.2/v2.3 控制链：宿主机负责 RMSNorm、QKV projection 和可选 RoPE，KV260 PL 负责 bf16 FlashAttention。当前硬件使用 16×16 MAC、8 个 KV cache bank、32 行 Q tile 双缓冲，单次事务的最大序列长度为 512。
+本指南对应当前 `develop` 的 v2.3 控制链：宿主机负责 RMSNorm、QKV projection 和可选 RoPE，KV260 PL 负责 bf16 FlashAttention。当前硬件使用 16×16 MAC、8 个 KV cache bank、32 行 Q tile 双缓冲，单次事务的最大序列长度为 512。
 
 ## 1. 交付物
 
@@ -10,9 +10,13 @@ Vivado 成功后，部署目录包含：
 vivado_proj/deploy/lara_attention.bit
 vivado_proj/deploy/lara_attention.hwh
 vivado_proj/deploy/lara_attention.xsa
+vivado_proj/reports/post_route_timing_summary.rpt
+vivado_proj/reports/post_route_status.rpt
+vivado_proj/reports/post_route_utilization.rpt
+vivado_proj/reports/post_route_drc.rpt
 ```
 
-运行 `hw/scripts/package_kv260.sh` 后，还会生成 `vivado_proj/board_bundle/`，其中包含三个硬件文件、`sw/` 下的 driver/host helper、本文档和 `SHA256SUMS`。`.bit` 与 `.hwh` 必须来自同一轮构建并保持同名，否则 PYNQ Overlay 可能加载错误的硬件元数据。
+运行 `hw/scripts/package_kv260.sh` 后，还会生成 `vivado_proj/board_bundle/`，其中包含三个硬件文件、四份 post-route 签核报告、`sw/` 下的 driver/host helper、本文档和 `SHA256SUMS`。`.bit` 与 `.hwh` 必须来自同一轮构建并保持同名，否则 PYNQ Overlay 可能加载错误的硬件元数据。
 
 ## 2. 构建与打包
 
@@ -24,6 +28,12 @@ bash hw/scripts/vivado_build.sh
 
 构建脚本使用 Vivado 2025.2、KV260 `xck26-sfvc784-2LV-c` 和 83.333 MHz PL 时钟。只有 setup/hold 通过时才会生成 bitstream；脚本随后自动生成 board bundle。
 
+如果已有 routed implementation，只需重新生成签核报告，可执行：
+
+```bash
+vivado -mode batch -source hw/scripts/vivado_report_signoff.tcl
+```
+
 单独重新打包已有部署文件：
 
 ```bash
@@ -31,7 +41,7 @@ bash hw/scripts/package_kv260.sh
 sha256sum vivado_proj/board_bundle/lara_attention.{bit,hwh,xsa}
 ```
 
-当前 v2.2 已知签核基线为 post-route WNS `+0.040 ns`、WHS `+0.010 ns`、TNS/THS `0`、DRC errors `0`。重新构建后应以本轮报告为准，不要把旧 checkpoint 的 slack 当成新 bitstream 的签核证据。
+当前 v2.3 签核结果为 post-route WNS `+0.021 ns`、WHS `+0.011 ns`、TNS/THS `0`、DRC errors `0`；对应报告和哈希已放入 `vivado_proj/board_bundle/`。后续重构建仍应以新一轮报告为准，不要把旧 checkpoint 的 slack 当成新 bitstream 的签核证据。
 
 ## 3. 拷贝到板卡
 

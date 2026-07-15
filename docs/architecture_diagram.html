@@ -42,7 +42,7 @@
 <h1>Attention Accelerator Architecture — Track B</h1>
 <p>Target: Llama3-8B Attention Layer · bf16 Precision · Kria KV260 Platform (without AI Cores)</p>
 <div class="notes"><h3>当前实现状态（2026-07-15）</h3>
-  <p>当前可签收基线是 v2.2：PL 时钟 83.333 MHz，post-route WNS +0.040 ns、WHS +0.010 ns，资源为 163 DSP、87235 LUT、57306 FF、50 BRAM、48 URAM。设计是单序列 prefill，MAX_SEQ_LEN=512。宿主机完成 RMSNorm/QKV/RoPE，driver 在一次 start 后按 CSR_LOAD_REQ 服务 K/V/Q DMA；片上 K/V cache 每次保存一个 GQA group 的当前 KV head，不能描述为 8 个 KV head 同时全量驻留。</p>
+  <p>当前可签收基线是 v2.3：PL 时钟 83.333 MHz，post-route WNS +0.021 ns、WHS +0.011 ns，资源为 163 DSP、87372 LUT、57219 FF、50 BRAM、48 URAM。设计是单序列 prefill，MAX_SEQ_LEN=512。宿主机完成 RMSNorm/QKV/RoPE，driver 在一次 start 后按 CSR_LOAD_REQ 服务 K/V/Q DMA；片上 K/V cache 每次保存一个 GQA group 的当前 KV head，不能描述为 8 个 KV head 同时全量驻留。</p>
 </div>
 
 <!-- ================================================================ -->
@@ -360,14 +360,14 @@ graph LR
 </tr>
 <tr>
   <td><b>LUT / FF</b></td><td>117K / 234K</td>
-  <td><span class="highlight">87235 / 57306</span></td><td>74.5% / 24.5%</td>
+  <td><span class="highlight">87372 / 57219</span></td><td>74.6% / 24.4%</td>
   <td>FSM、Softmax 归约树、bf16 编解码、AXI 协议逻辑</td>
 </tr>
 </table>
 <p>
   <b>URAM 是瓶颈</b> — 当前 post-route 使用 48 个 URAM tile；片上只缓存当前 group 的 K/V，L>512 需要后续分页或 chunked prefill 设计。<br/>
   <b>DSP 用量克制</b> — 163/1248 符合赛题 "as fewer as possible" 方向。<br/>
-  <b>LUT 是当前主要资源压力</b> — 87235/117120；BRAM/URAM 仍有后续控制和缓冲余量。
+  <b>LUT 是当前主要资源压力</b> — 87372/117120；BRAM/URAM 仍有后续控制和缓冲余量。
 </p>
 </div>
 

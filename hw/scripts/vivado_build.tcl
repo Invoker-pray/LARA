@@ -226,15 +226,24 @@ file mkdir ${OUT_DIR}/${PROJ_NAME}.runs/impl_1
 launch_runs impl_1 -to_step route_design -jobs ${N_JOBS}; wait_on_run impl_1
 # Do not publish a bitstream from an implementation that missed setup or hold.
 open_run impl_1
+file mkdir ${OUT_DIR}/reports
+# Internal PS/PL interfaces are not package pins. Keep the established UCIO-1
+# waiver in effect so the saved DRC report reflects the bitstream gate.
+set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
+report_timing_summary -max_paths 20 -report_unconstrained \
+    -file ${OUT_DIR}/reports/post_route_timing_summary.rpt
+report_route_status -file ${OUT_DIR}/reports/post_route_status.rpt
+report_utilization -hierarchical -file ${OUT_DIR}/reports/post_route_utilization.rpt
+report_drc -file ${OUT_DIR}/reports/post_route_drc.rpt
 set routed_wns [get_property SLACK [get_timing_paths -delay_type max -max_paths 1]]
 set routed_whs [get_property SLACK [get_timing_paths -delay_type min -max_paths 1]]
-puts "INFO: Routed timing gate: WNS=${routed_wns} ns, WHS=${routed_whs} ns"
-if {($routed_wns < 0.0) || ($routed_whs < 0.0)} {
-    puts "ERROR: Routed timing is not closed; bitstream generation is blocked."
+set drc_errors [llength [get_drc_violations -quiet -filter {SEVERITY == Error}]]
+puts "INFO: Routed signoff gate: WNS=${routed_wns} ns, WHS=${routed_whs} ns, DRC errors=${drc_errors}"
+if {($routed_wns < 0.0) || ($routed_whs < 0.0) || ($drc_errors != 0)} {
+    puts "ERROR: Routed signoff failed; bitstream generation is blocked."
     exit 2
 }
 # Bitstream: route_design passes, then skip UCIO-1 DRC for internal PS-PL paths
-set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
 launch_runs impl_1 -to_step write_bitstream -jobs ${N_JOBS}
 wait_on_run impl_1
 

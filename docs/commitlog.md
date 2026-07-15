@@ -46,7 +46,9 @@
 
 > 当前工作区后续控制链已将 v2.0 的“全量 K/V 预加载”替换为 `CSR_LOAD_REQ` 请求驱动：片上只驻留当前 GQA group 的一个 K/V head，host driver 在一次 `start` 后显式服务 K/V/Q DMA。v2.0 条目中的预加载描述仅保留为历史记录，不代表当前 RTL。
 
-## 工作区后续版本 — v2.3 控制链整合（待 Vivado 重构建签收）
+## 2026-07-15
+
+### v2.3 — 宿主 QKV 投影与 FPGA Attention 控制链整合
 
 - 选择性吸收 `fsm-driver-work` 的软硬件协同思路，不合并其与当前 KV cache 容量不匹配的旧 RTL 树。
 - `attn_core`/`attn_top` 采用一次 `start` 覆盖完整 group/head/tile 遍历；通过 `CSR_LOAD_REQ` 请求当前 KV head 和 Q tile，由 host driver 显式启动 AXI DMA。
@@ -54,7 +56,12 @@
 - 修复 AXI-Lite 独立 AW/W 锁存、W1P start、sticky request/status/error，以及 AXI-Stream transfer 边界、连续事务和 pending beat 覆盖问题。
 - 新增 KV260 board bundle、零输入 smoke test、NPZ 预计算 Q/K/V 检查和上板验证指南。
 - 已验证：Python Golden 7/7、Python unittest 3/3、host helper、CSR/sink smoke、AXI Stream 8/8、Verilator lint；完整 VCS 回归需在可用的 Synopsys license server 上重新执行。
-- 本版本尚未产生新的 Vivado post-route 数据；在重新构建前不得把 v2.2 的 timing/resource 数字当作 v2.3 签收结果。
+- 默认 route 结果为 WNS `-0.233 ns`，随后从 `physopt.dcp` 使用 `route_design -directive Explore` 完成物理收敛。
+- v2.3 post-route（83.333 MHz / 12.000 ns）：WNS `+0.021 ns`、TNS `0`、WHS `+0.011 ns`、THS `0`；146331/146331 routable nets fully routed，0 routing errors，0 DRC errors。
+- 最终资源：87372 LUT、57219 FF、50 BRAM、48 URAM、163 DSP；关键资源由 `vivado_proj/reports/post_route_utilization.rpt` 固定记录。
+- 生成并校验 `vivado_proj/deploy/{lara_attention.bit,lara_attention.hwh,lara_attention.xsa}`，同步归档到 `checkpoint/v2.3`；board bundle 另含 post-route timing/route/utilization/DRC 报告。
+- v2.3 部署产物 SHA-256：bit `b720f04cb928b6b3d60805fb39f8c3a3f9727e704d4796017da42ff0dad67547`，hwh `e54091fbbd342cf8769f2def1b3146c6380896d37e2d8c692f57d60ad450330a`，xsa `7444bc69a0f69c8c7c6f9c42e96a1449a07883d4813c43789552a7cf9cf926ed`。
+- 上述部署产物与 Vivado 工程仍由 `.gitignore` 排除；`develop` 追踪控制软件、仿真和板测工具，`master` 追踪可独立构建的 RTL、约束、脚本及版本记录。
 
 ## 2026-07-09
 

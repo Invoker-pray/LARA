@@ -21,7 +21,7 @@
 | 细粒度并行 | 16×16 逻辑阵列、8-bank KV、tile/subtile 调度 | `attn_tile.sv`、`kv_cache_ram.sv`、`attn_core.sv` | 已实现 |
 | 硬件感知优化 | C4/DSP pipeline、P_STORE distributed RAM、Explore route、GQA K/V reuse | v2.2 reports、`web_research_findings.md` | 已实现 |
 | 无 AI Core 配置 | KV260 PL-only，不依赖 AI Engine | `hw/scripts/vivado_build.tcl` | 已对齐 |
-| 性能证据 | 83.333 MHz post-route；driver 记录 DMA/compute/stall counter | `vivado_proj/reports`、board guide | 时序已完成，板上待测 |
+| 性能证据 | 83.333 MHz post-route，WNS `+0.021 ns`、WHS `+0.011 ns`；driver 记录 DMA/compute/stall counter | `vivado_proj/reports`、board guide | 时序已完成，板上待测 |
 | scalability | 当前单序列 prefill，MAX_SEQ_LEN=512 | `attn_pkg.sv`、board guide | 明确边界，长上下文待后续 |
 
 ## 3. Host/FPGA 分工是否偏离赛题
@@ -38,7 +38,7 @@ FPGA: QK^T -> online softmax -> P×V -> output normalization
 ## 4. 不应再作为当前结论的旧内容
 
 - `200 MHz`、`≥200 MHz`：早期模块/架构目标；当前可发布结论是 83.333 MHz post-route。
-- `256 DSP`：16×16 逻辑 PE 数，不是 v2.2 物理 DSP 用量；当前 post-route 为 163 DSP。
+- `256 DSP`：16×16 逻辑 PE 数，不是 v2.3 物理 DSP 用量；当前 post-route 为 163 DSP。
 - `MAX_SEQ_LEN=2048`：早期参数草案；当前实现和构建合同为 512。
 - “8 个 KV heads 全量同时驻留 URAM”：当前片上 cache 只承载当前 KV head/group，GQA group 切换时由 host driver 重载。
 - “写 `CSR_STREAM_LEN` 触发 DMA”：当前 DMA 必须由 PYNQ send/recv channel 显式启动。

@@ -311,7 +311,7 @@
 按优先级排序：
 
 1. **`kv_cache_ram.sv` 的真正多 bank URAM 实现：已关闭**
-   - 当前使用 8-bank XPM/URAM 组织，v2.2 post-route 使用 48 URAM tiles。
+   - 当前使用 8-bank XPM/URAM 组织，v2.3 post-route 使用 48 URAM tiles。
    - 容量合同是当前 KV head、`MAX_SEQ_LEN=512`，不是 8 个 KV heads 同时驻留。
 
 2. **`softmax_engine.sv` 的完整 synthesis path：已关闭**
@@ -393,7 +393,7 @@
 | bf16 | 符合 | bf16 MAC、host bf16 packing、AXIS 两个 bf16/beat |
 | Attention 在 FPGA | 符合 | QK、online softmax、AV、O accumulation 在 PL |
 | QKV projection 是否必须上板 | 不要求 | 架构文档将其定义为 host-side boundary；本轮补齐自动化 host→DMA→FPGA 流程 |
-| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.2 post-route 163 DSP、87235 LUT、57306 FF |
+| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.3 post-route 163 DSP、87372 LUT、57219 FF |
 | performance/scalability | 部分完成 | 83.333 MHz 已收敛；当前单序列 prefill、`MAX_SEQ_LEN=512`，decode/batching 尚未承诺 |
 
 早期 HTML 文档中的“≥200 MHz”“256 DSP”等是架构估算或历史目标，不是当前签收结果。论文和演示应使用 Vivado post-route 报告中的 83.333 MHz、资源和实测板上数据。

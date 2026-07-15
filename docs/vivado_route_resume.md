@@ -1,6 +1,6 @@
 # Vivado 增量布线恢复说明
 
-> 当前状态（2026-07-15）：`checkpoint/v2.2` 和现有 `physopt.dcp` 对应 v2.2 RTL。`develop` 已开始整合新的 CSR/DMA request-service 控制链，因此这些旧 checkpoint 只能复现 v2.2，不能验证当前工作区修改。完成本轮 RTL 后必须先运行一次完整 `vivado_build.sh`，生成新的 physopt checkpoint，才能再次使用本文恢复流程。
+> 当前状态（2026-07-15）：`checkpoint/v2.3` 和 `vivado_proj/lara_attention.runs/impl_1/attn_soc_wrapper_routed.dcp` 对应 v2.3 RTL，Explore 恢复后已签收 WNS +0.021 ns / WHS +0.011 ns。`checkpoint/v2.2` 仅作为旧版本复现参考；任何后续 RTL 修改都必须重新生成 physopt checkpoint 后才能使用恢复脚本。
 
 ## 1. 背景
 

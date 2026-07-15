@@ -73,7 +73,8 @@ echo " Deploy files: vivado_proj/deploy/"
 echo "   lara_attention.bit  — FPGA bitstream"
 echo "   lara_attention.hwh  — hardware handoff (for PYNQ)"
 echo "   lara_attention.xsa  — XSA export"
-if bash "${PROJECT_ROOT}/hw/scripts/package_kv260.sh"; then
+PACKAGE_SCRIPT="${PROJECT_ROOT}/hw/scripts/package_kv260.sh"
+if [ -f "${PACKAGE_SCRIPT}" ] && bash "${PACKAGE_SCRIPT}"; then
   echo "   board_bundle/       — bit/hwh/xsa + driver + smoke-test guide"
 fi
 echo ""
