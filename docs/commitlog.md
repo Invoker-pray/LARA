@@ -24,6 +24,26 @@
 - Python 7/7、VCS 17/17、Verilator lint 通过。
 - 生成 bitstream、HWH 和 XSA 部署文件（产物由 `.gitignore` 排除）。
 
+## 2026-07-15
+
+### v2.2 — 83.333 MHz 时序收敛
+
+- K26 PL0 无法精确生成 80 MHz，采用下一档可实现时钟 `83.333 MHz / 12.000 ns`，以证明设计满足不低于 80 MHz 的目标。
+- 将 output buffer 的 `old * correction + delta` 从单周期 FMA 拆分为乘法、加法两级流水，消除 accumulator forwarding 长组合路径。
+- 为 output buffer 增加 `acc_ready` 和同地址 RAW hazard 控制；顶层 `PB_UPDATE` 在未握手时保持行地址和数据。
+- 增加 `PB_CAPTURE` 状态，让最终 MAC split 先提交到寄存器，再进入 output buffer 更新阶段。
+- 归一化首读等待目标 bank 的累加流水排空，之后仍允许另一 ping-pong bank 并行累加，保留计算/写回重叠。
+- 使用 `route_design -directive Explore` 完成最终物理收敛；默认布线结果仅差 `-0.007 ns`，Explore 最终达到 WNS `+0.040 ns`、TNS `0`、WHS `+0.010 ns`、THS `0`。
+- route status：146248/146248 routable nets fully routed，0 routing errors；post-route DRC 0 errors。
+- 最终资源：87235 LUT、57306 FF、50 BRAM、48 URAM、163 DSP。
+- Python Golden 7/7、VCS 17/17、Verilator lint、XPM output buffer 和 full traversal 测试通过。
+- 新增 `vivado_resume_route.tcl` 和恢复流程文档；成功 `.bit/.hwh/.xsa` 已归档到 `checkpoint/v2.2`。
+- v2.2 部署产物 SHA-256：
+  - `lara_attention.bit`: `1a786f7354dc543016ad6a4e616437ffbb39b6bc2a901d993772e1c935a51166`
+  - `lara_attention.hwh`: `84635314da0d3d58370dbc042c7ec77a393fa9673db4bd7993526d8bb98bc448`
+  - `lara_attention.xsa`: `5f525b1badfcd73315f105cfa2cea5901a146bd2348121452ef6680aed305151`
+- 上述部署产物按仓库策略由 `.gitignore` 排除，不提交至 Git；`develop` 追踪 RTL、仿真测试、Vivado 脚本和开发文档，`master` 仅同步部署所需 RTL、构建配置及版本记录。
+
 ## 2026-07-09
 
 ### v2.0 — attn_core FSM 升级 + 设计对齐

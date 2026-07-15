@@ -49,11 +49,12 @@ module attn_top
     PA_FLUSH    = 3'd3,
     PA_WAIT_P   = 3'd4
   } phasea_state_t;
-  typedef enum logic [1:0] {
-    PB_IDLE      = 2'd0,
-    PB_RUN       = 2'd1,
-    PB_UPDATE    = 2'd2,
-    PB_DONE      = 2'd3
+  typedef enum logic [2:0] {
+    PB_IDLE      = 3'd0,
+    PB_RUN       = 3'd1,
+    PB_CAPTURE   = 3'd2,
+    PB_UPDATE    = 3'd3,
+    PB_DONE      = 3'd4
   } phaseb_state_t;
   logic [6:0] depth_cnt; logic phasea_depth_last;
   logic [1:0] phasea_split_idx, phaseb_split_idx;
@@ -109,7 +110,7 @@ module attn_top
   logic [31:0] p_block [TILE_ROWS][TILE_COLS];
   logic [31:0] m_state [TILE_ROWS], l_state [TILE_ROWS], correction [TILE_ROWS];
   logic psum_en, psum_clear; logic [31:0] psum_in [TILE_COLS], psum_out [TILE_COLS];
-  logic obuf_update, obuf_norm; logic [3:0] obuf_row; logic [2:0] obuf_dim_blk; logic [31:0] obuf_data [TILE_COLS];
+  logic obuf_update, obuf_acc_ready, obuf_norm; logic [3:0] obuf_row; logic [2:0] obuf_dim_blk; logic [31:0] obuf_data [TILE_COLS];
   logic obuf_valid_raw; logic [4:0] obuf_o_row; logic [6:0] obuf_o_dim;
   logic [15:0] obuf_data_raw;
   logic obuf_clear_bank, obuf_clear_bank_sel;
@@ -383,7 +384,7 @@ module attn_top
               phaseb_split_idx <= 2'd0;
               if (phaseb_k_idx == TILE_COLS_LAST_U4) begin
                 phaseb_row_update_idx <= 5'd0;
-                phaseb_state <= PB_UPDATE;
+                phaseb_state <= PB_CAPTURE;
               end else begin
                 phaseb_k_idx <= phaseb_k_idx + 4'd1;
               end
@@ -391,42 +392,50 @@ module attn_top
               phaseb_split_idx <= phaseb_split_idx + 2'd1;
             end
           end
+          PB_CAPTURE: begin
+            // Let the registered final split commit into block_acc_bits before
+            // PB_UPDATE reads rows. This removes the active_sum combinational
+            // bypass from the MAC controls into the output-buffer pipeline.
+            phaseb_state <= PB_UPDATE;
+          end
           PB_UPDATE: begin
-            if (phaseb_row_update_last) begin
-              phaseb_row_update_idx <= 5'd0;
-              if (phaseb_dim_blk_idx == DIM_SUBBLOCKS_LAST_U3) begin
-                phaseb_dim_blk_idx <= 3'd0;
-                if (phaseb_kv_blk_idx == kv_subblock_last_idx) begin
-                  phaseb_microtile_ready[phaseb_micro_idx] <= 1'b1;
-                  if (!writeback_active &&
-                      !o_write_done &&
-                      (phaseb_norm_micro_idx == phaseb_micro_idx)) begin
-                    writeback_active <= 1'b1;
-                    writeback_launch <= 1'b1;
-                  end
-                  phaseb_kv_blk_idx <= 2'd0;
-                  if (phaseb_micro_idx == q_microtile_last_idx) begin
-                    phaseb_state <= PB_DONE;
+            if (obuf_acc_ready) begin
+              if (phaseb_row_update_last) begin
+                phaseb_row_update_idx <= 5'd0;
+                if (phaseb_dim_blk_idx == DIM_SUBBLOCKS_LAST_U3) begin
+                  phaseb_dim_blk_idx <= 3'd0;
+                  if (phaseb_kv_blk_idx == kv_subblock_last_idx) begin
+                    phaseb_microtile_ready[phaseb_micro_idx] <= 1'b1;
+                    if (!writeback_active &&
+                        !o_write_done &&
+                        (phaseb_norm_micro_idx == phaseb_micro_idx)) begin
+                      writeback_active <= 1'b1;
+                      writeback_launch <= 1'b1;
+                    end
+                    phaseb_kv_blk_idx <= 2'd0;
+                    if (phaseb_micro_idx == q_microtile_last_idx) begin
+                      phaseb_state <= PB_DONE;
+                    end else begin
+                      phaseb_micro_idx <= phaseb_micro_idx + 1'd1;
+                      phaseb_k_idx <= 4'd0;
+                      phaseb_split_idx <= 2'd0;
+                      phaseb_state <= PB_RUN;
+                    end
                   end else begin
-                    phaseb_micro_idx <= phaseb_micro_idx + 1'd1;
+                    phaseb_kv_blk_idx <= phaseb_kv_blk_idx + 2'd1;
                     phaseb_k_idx <= 4'd0;
                     phaseb_split_idx <= 2'd0;
                     phaseb_state <= PB_RUN;
                   end
                 end else begin
-                  phaseb_kv_blk_idx <= phaseb_kv_blk_idx + 2'd1;
+                  phaseb_dim_blk_idx <= phaseb_dim_blk_idx + 3'd1;
                   phaseb_k_idx <= 4'd0;
                   phaseb_split_idx <= 2'd0;
                   phaseb_state <= PB_RUN;
                 end
               end else begin
-                phaseb_dim_blk_idx <= phaseb_dim_blk_idx + 3'd1;
-                phaseb_k_idx <= 4'd0;
-                phaseb_split_idx <= 2'd0;
-                phaseb_state <= PB_RUN;
+                phaseb_row_update_idx <= phaseb_row_update_idx + 5'd1;
               end
-            end else begin
-              phaseb_row_update_idx <= phaseb_row_update_idx + 5'd1;
             end
           end
           PB_DONE: begin
@@ -503,7 +512,7 @@ module attn_top
       phaseb_prime_micro_idx = 1'd0;
       phaseb_prime_kv_blk_idx = 2'd0;
       phaseb_prime_dim_blk_idx = 3'd0;
-    end else if ((phaseb_state == PB_UPDATE) && phaseb_row_update_last) begin
+    end else if ((phaseb_state == PB_UPDATE) && phaseb_row_update_last && obuf_acc_ready) begin
       if (phaseb_dim_blk_idx == DIM_SUBBLOCKS_LAST_U3) begin
         phaseb_prime_dim_blk_idx = 3'd0;
         if (phaseb_kv_blk_idx == kv_subblock_last_idx) begin
@@ -724,5 +733,5 @@ module attn_top
     .col_q3('{default:32'd0}),
     .psum(psum_out)
   );
-  output_buffer u_obuf(.clk,.rst_n,.clear_bank(obuf_clear_bank),.clear_bank_sel(obuf_clear_bank_sel),.acc_update(obuf_update),.acc_row(obuf_row),.acc_dim_blk(obuf_dim_blk),.acc_data(obuf_data),.acc_correction(obuf_corr_sel),.bank_sel(obuf_bank_sel_runtime),.normalize(obuf_norm),.active_rows(writeback_active_rows),.l_state(obuf_l_sel),.o_ready(src_ready),.o_valid(obuf_valid_raw),.o_row(obuf_o_row),.o_dim(obuf_o_dim),.o_data(obuf_data_raw));
+  output_buffer u_obuf(.clk,.rst_n,.clear_bank(obuf_clear_bank),.clear_bank_sel(obuf_clear_bank_sel),.acc_update(obuf_update),.acc_ready(obuf_acc_ready),.acc_row(obuf_row),.acc_dim_blk(obuf_dim_blk),.acc_data(obuf_data),.acc_correction(obuf_corr_sel),.bank_sel(obuf_bank_sel_runtime),.normalize(obuf_norm),.active_rows(writeback_active_rows),.l_state(obuf_l_sel),.o_ready(src_ready),.o_valid(obuf_valid_raw),.o_row(obuf_o_row),.o_dim(obuf_o_dim),.o_data(obuf_data_raw));
 endmodule
