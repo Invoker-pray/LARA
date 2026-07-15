@@ -18,6 +18,7 @@ module output_buffer
     // Accumulator update port (from psum_accum)
     // FlashAttention: O_acc_new[i][d] = O_acc_old[i][d] × correction[i] + ΔO[i][d]
     input  logic                       acc_update,
+    output logic                       acc_ready,
     input  logic [clog2_safe(TILE_ROWS)-1:0] acc_row, // row index (0..TILE_ROWS-1)
     input  logic [2:0]                 acc_dim_blk,   // which 16-dim chunk inside HEAD_DIM
     input  logic [FP32_W-1:0]          acc_data [TILE_COLS],  // ΔO row contribution chunk
@@ -131,6 +132,44 @@ module output_buffer
     /* verilator lint_on WIDTHEXPAND */
   endfunction
 
+  /* verilator lint_off WIDTHEXPAND */
+  /* verilator lint_off WIDTHTRUNC */
+  function automatic logic [CHUNK_W-1:0] multiply_chunk_word(
+    input logic [CHUNK_W-1:0] old_word,
+    input logic [FP32_W-1:0]  corr_bits
+  );
+    shortreal corr_sr;
+    shortreal old_sr;
+    logic [CHUNK_W-1:0] product_word;
+    begin
+      corr_sr = $bitstoshortreal(corr_bits);
+      for (int lane = 0; lane < TILE_COLS; lane++) begin
+        old_sr = $bitstoshortreal(old_word[lane * FP32_W +: FP32_W]);
+        product_word[lane * FP32_W +: FP32_W] = $shortrealtobits(old_sr * corr_sr);
+      end
+      multiply_chunk_word = product_word;
+    end
+  endfunction
+
+  function automatic logic [CHUNK_W-1:0] add_chunk_word(
+    input logic [CHUNK_W-1:0] product_word,
+    input logic [FP32_W-1:0]  delta_word [TILE_COLS]
+  );
+    shortreal product_sr;
+    shortreal delta_sr;
+    logic [CHUNK_W-1:0] sum_word;
+    begin
+      for (int lane = 0; lane < TILE_COLS; lane++) begin
+        product_sr = $bitstoshortreal(product_word[lane * FP32_W +: FP32_W]);
+        delta_sr = $bitstoshortreal(delta_word[lane]);
+        sum_word[lane * FP32_W +: FP32_W] = $shortrealtobits(product_sr + delta_sr);
+      end
+      add_chunk_word = sum_word;
+    end
+  endfunction
+  /* verilator lint_on WIDTHTRUNC */
+  /* verilator lint_on WIDTHEXPAND */
+
   function automatic logic [FP32_W-1:0] normalize_fp32_bits(
     input logic [FP32_W-1:0] src_bits,
     input logic [FP32_W-1:0] l_bits
@@ -201,6 +240,34 @@ module output_buffer
     end
   endfunction
 
+  function automatic logic [CHUNK_W-1:0] multiply_chunk_word(
+    input logic [CHUNK_W-1:0] old_word,
+    input logic [FP32_W-1:0]  corr_bits
+  );
+    logic [CHUNK_W-1:0] product_word;
+    begin
+      for (int lane = 0; lane < TILE_COLS; lane++) begin
+        product_word[lane * FP32_W +: FP32_W] =
+          fp32_mul(old_word[lane * FP32_W +: FP32_W], corr_bits);
+      end
+      multiply_chunk_word = product_word;
+    end
+  endfunction
+
+  function automatic logic [CHUNK_W-1:0] add_chunk_word(
+    input logic [CHUNK_W-1:0] product_word,
+    input logic [FP32_W-1:0]  delta_word [TILE_COLS]
+  );
+    logic [CHUNK_W-1:0] sum_word;
+    begin
+      for (int lane = 0; lane < TILE_COLS; lane++) begin
+        sum_word[lane * FP32_W +: FP32_W] =
+          fp32_add(product_word[lane * FP32_W +: FP32_W], delta_word[lane]);
+      end
+      add_chunk_word = sum_word;
+    end
+  endfunction
+
   function automatic logic [FP32_W-1:0] normalize_fp32_bits(
     input logic [FP32_W-1:0] src_bits,
     input logic [FP32_W-1:0] l_bits
@@ -262,29 +329,22 @@ module output_buffer
   logic [CHUNK_W-1:0]          o_acc0_wr_data;
   logic [CHUNK_W-1:0]          o_acc1_wr_data;
 
-  logic                        acc_mem_pending_valid;
-  logic                        acc_mem_pending_bank_sel;
-  logic [O_CHUNK_ADDR_W-1:0]   acc_mem_pending_addr;
-  logic [FP32_W-1:0]           acc_mem_pending_corr;
-  logic [CHUNK_W-1:0]          acc_mem_pending_word;
-  logic [FP32_W-1:0]           acc_mem_pending_data [TILE_COLS];
+  logic                        acc_read_valid;
+  logic                        acc_read_bank_sel;
+  logic [O_CHUNK_ADDR_W-1:0]   acc_read_addr;
+  logic [FP32_W-1:0]           acc_read_corr;
+  logic [FP32_W-1:0]           acc_read_data [TILE_COLS];
 
-  logic                        acc_mem_issue_valid;
-  logic                        acc_mem_issue_bank_sel;
-  logic [O_CHUNK_ADDR_W-1:0]   acc_mem_issue_addr;
-  logic [FP32_W-1:0]           acc_mem_issue_corr;
-  logic                        acc_mem_issue_use_bypass;
-  logic                        acc_mem_issue_bypass_from_pending;
-  logic                        acc_mem_issue_bypass_from_return;
-  logic [CHUNK_W-1:0]          acc_mem_issue_bypass_word;
-  logic [FP32_W-1:0]           acc_mem_issue_data [TILE_COLS];
+  logic                        acc_mul_valid;
+  logic                        acc_mul_bank_sel;
+  logic [O_CHUNK_ADDR_W-1:0]   acc_mul_addr;
+  logic [CHUNK_W-1:0]          acc_mul_product_word;
+  logic [FP32_W-1:0]           acc_mul_data [TILE_COLS];
 
-  logic                        acc_mem_return_valid;
-  logic                        acc_mem_return_bank_sel;
-  logic [O_CHUNK_ADDR_W-1:0]   acc_mem_return_addr;
-  logic [FP32_W-1:0]           acc_mem_return_corr;
-  logic [FP32_W-1:0]           acc_mem_return_data [TILE_COLS];
-  logic [CHUNK_W-1:0]          acc_mem_return_word;
+  logic                        acc_add_valid;
+  logic                        acc_add_bank_sel;
+  logic [O_CHUNK_ADDR_W-1:0]   acc_add_addr;
+  logic [CHUNK_W-1:0]          acc_add_write_word;
 
   logic                        norm_issue_fire;
   logic                        norm_active_now;
@@ -318,8 +378,6 @@ module output_buffer
   logic [6:0]                  norm_mem_issue_dim;
   logic [3:0]                  norm_mem_issue_lane;
   logic [FP32_W-1:0]           norm_mem_issue_l_bits;
-  logic                        norm_mem_issue_use_bypass;
-  logic [CHUNK_W-1:0]          norm_mem_issue_bypass_word;
 
   logic                        norm_mem_return_valid;
   logic                        norm_mem_return_bank_sel;
@@ -336,22 +394,16 @@ module output_buffer
   logic [6:0]                  norm_resp_dim;
   logic                        norm_resp_advance;
 
-  logic                        acc_issue_bypass_hit;
-  logic                        acc_issue_pending_hit;
-  logic                        acc_issue_return_hit;
-  logic [CHUNK_W-1:0]          acc_pending_write_word_now;
-  logic [CHUNK_W-1:0]          acc_issue_base_word;
-  logic [CHUNK_W-1:0]          acc_issue_write_word;
-  logic [CHUNK_W-1:0]          acc_mem_pending_write_word;
-  logic [CHUNK_W-1:0]          acc_mem_return_write_word;
-  logic                        norm_issue_pending_hit;
-  logic                        norm_issue_return_hit;
-  logic                        norm_resp_pending_hit;
-  logic                        norm_resp_return_hit;
-  logic [CHUNK_W-1:0]          norm_resp_word_now;
-  logic [CHUNK_W-1:0] acc_read_word_now;
-  logic [CHUNK_W-1:0] norm_return_word;
-  logic [CHUNK_W-1:0] acc_issue_resolved_base_word;
+  logic                        acc_fire;
+  logic                        acc_read_hazard;
+  logic                        acc_mul_hazard;
+  logic                        acc_add_hazard;
+  logic                        norm_wait_acc_bank;
+  logic                        norm_acc_bank_busy;
+  logic [CHUNK_W-1:0]          acc_base_word;
+  logic [CHUNK_W-1:0]          acc_product_word_now;
+  logic [CHUNK_W-1:0]          acc_sum_word_now;
+  logic [CHUNK_W-1:0]          norm_return_word;
 
   assign norm_active_now = normalize ? (active_rows != 5'd0) : norm_active;
   assign norm_row_now = normalize ? 5'd0 : norm_row;
@@ -368,45 +420,31 @@ module output_buffer
   assign norm_issue_lane = norm_dim_lane_idx_now;
   assign norm_issue_l_bits = l_state[norm_row_idx_now];
   assign norm_resp_advance = norm_resp_valid && (!norm_pipe_valid || o_ready);
-  assign acc_pending_write_word_now = accumulate_chunk_word(acc_mem_pending_word, acc_mem_pending_corr, acc_mem_pending_data);
-  assign acc_issue_resolved_base_word = acc_mem_issue_bypass_from_pending ? acc_pending_write_word_now :
-                                        acc_mem_issue_bypass_from_return  ? acc_mem_return_write_word :
-                                                                            acc_read_word_now;
-  assign acc_issue_base_word = acc_mem_issue_use_bypass ? acc_mem_issue_bypass_word : acc_read_word_now;
-  assign acc_issue_write_word = accumulate_chunk_word(acc_issue_base_word, acc_mem_issue_corr, acc_mem_issue_data);
-  assign acc_issue_pending_hit = acc_update &&
-                                 acc_mem_pending_valid &&
-                                 (bank_sel == acc_mem_pending_bank_sel) &&
-                                 (acc_chunk_addr == acc_mem_pending_addr);
-  assign acc_issue_return_hit = acc_update &&
-                                acc_mem_return_valid &&
-                                (bank_sel == acc_mem_return_bank_sel) &&
-                                (acc_chunk_addr == acc_mem_return_addr);
-  assign acc_issue_bypass_hit = acc_issue_pending_hit || acc_issue_return_hit;
-  assign norm_issue_pending_hit = norm_issue_fire &&
-                                  acc_mem_pending_valid &&
-                                  (norm_issue_bank_sel == acc_mem_pending_bank_sel) &&
-                                  (norm_issue_addr == acc_mem_pending_addr);
-  assign norm_issue_return_hit = norm_issue_fire &&
-                                 acc_mem_return_valid &&
-                                 (norm_issue_bank_sel == acc_mem_return_bank_sel) &&
-                                 (norm_issue_addr == acc_mem_return_addr);
-  assign norm_resp_pending_hit = norm_mem_return_valid &&
-                                 acc_mem_pending_valid &&
-                                 (norm_mem_return_bank_sel == acc_mem_pending_bank_sel) &&
-                                 (norm_mem_return_addr == acc_mem_pending_addr);
-  assign norm_resp_return_hit = norm_mem_return_valid &&
-                                acc_mem_return_valid &&
-                                (norm_mem_return_bank_sel == acc_mem_return_bank_sel) &&
-                                (norm_mem_return_addr == acc_mem_return_addr);
-  assign norm_resp_word_now = norm_resp_pending_hit ? acc_pending_write_word_now :
-                              norm_resp_return_hit  ? acc_mem_return_write_word :
-                                                      norm_mem_pending_word;
+  assign acc_read_hazard = acc_read_valid &&
+                           (bank_sel == acc_read_bank_sel) &&
+                           (acc_chunk_addr == acc_read_addr);
+  assign acc_mul_hazard = acc_mul_valid &&
+                          (bank_sel == acc_mul_bank_sel) &&
+                          (acc_chunk_addr == acc_mul_addr);
+  assign acc_add_hazard = acc_add_valid &&
+                          (bank_sel == acc_add_bank_sel) &&
+                          (acc_chunk_addr == acc_add_addr);
+  assign acc_ready = !acc_read_hazard &&
+                     !acc_mul_hazard &&
+                     !acc_add_hazard;
+  assign acc_fire = acc_update && acc_ready;
+  assign acc_base_word = acc_read_bank_sel
+                       ? chunk_or_zero(o_acc1_rd_word, o_acc1_tag[acc_read_addr], o_acc1_epoch)
+                       : chunk_or_zero(o_acc0_rd_word, o_acc0_tag[acc_read_addr], o_acc0_epoch);
+  assign acc_product_word_now = multiply_chunk_word(acc_base_word, acc_read_corr);
+  assign acc_sum_word_now = add_chunk_word(acc_mul_product_word, acc_mul_data);
+  assign norm_acc_bank_busy = (acc_read_valid && (acc_read_bank_sel == norm_issue_bank_sel)) ||
+                              (acc_mul_valid && (acc_mul_bank_sel == norm_issue_bank_sel)) ||
+                              (acc_add_valid && (acc_add_bank_sel == norm_issue_bank_sel));
+  // The first normalization read waits for the bank being normalized to drain;
+  // subsequent reads can overlap accumulation into the opposite ping-pong bank.
   assign norm_issue_fire = norm_active_now &&
-                           !acc_update &&
-                           !acc_mem_issue_valid &&
-                           !acc_mem_pending_valid &&
-                           !acc_mem_return_valid &&
+                           (!normalize && !norm_wait_acc_bank || !norm_acc_bank_busy) &&
                            !norm_mem_issue_valid &&
                            !norm_mem_pending_valid &&
                            (!norm_resp_valid || norm_resp_advance);
@@ -417,7 +455,7 @@ module output_buffer
     o_acc1_rd_en = 1'b0;
     o_acc1_rd_addr = '0;
 
-    if (acc_update && !acc_issue_bypass_hit) begin
+    if (acc_fire) begin
       if (!bank_sel) begin
         o_acc0_rd_en = 1'b1;
         o_acc0_rd_addr = acc_chunk_addr;
@@ -438,19 +476,16 @@ module output_buffer
     end
   end
 
-  assign acc_read_word_now = acc_mem_pending_bank_sel
-                           ? chunk_or_zero(o_acc1_rd_word, o_acc1_tag[acc_mem_pending_addr], o_acc1_epoch)
-                           : chunk_or_zero(o_acc0_rd_word, o_acc0_tag[acc_mem_pending_addr], o_acc0_epoch);
   assign norm_return_word = norm_mem_return_bank_sel
                           ? chunk_or_zero(o_acc1_rd_word, o_acc1_tag[norm_mem_return_addr], o_acc1_epoch)
                           : chunk_or_zero(o_acc0_rd_word, o_acc0_tag[norm_mem_return_addr], o_acc0_epoch);
 
-  assign o_acc0_wr_en = acc_mem_return_valid && !acc_mem_return_bank_sel;
-  assign o_acc1_wr_en = acc_mem_return_valid &&  acc_mem_return_bank_sel;
-  assign o_acc0_wr_addr = acc_mem_return_addr;
-  assign o_acc1_wr_addr = acc_mem_return_addr;
-  assign o_acc0_wr_data = acc_mem_return_write_word;
-  assign o_acc1_wr_data = acc_mem_return_write_word;
+  assign o_acc0_wr_en = acc_add_valid && !acc_add_bank_sel;
+  assign o_acc1_wr_en = acc_add_valid &&  acc_add_bank_sel;
+  assign o_acc0_wr_addr = acc_add_addr;
+  assign o_acc1_wr_addr = acc_add_addr;
+  assign o_acc0_wr_data = acc_add_write_word;
+  assign o_acc1_wr_data = acc_add_write_word;
   assign o_acc0_web = chunk_byte_we(o_acc0_wr_en);
   assign o_acc1_web = chunk_byte_we(o_acc1_wr_en);
 
@@ -504,30 +539,22 @@ module output_buffer
         o_acc0_tag[ar] <= 1'b0;
         o_acc1_tag[ar] <= 1'b0;
       end
-      acc_mem_pending_valid <= 1'b0;
-      acc_mem_pending_bank_sel <= 1'b0;
-      acc_mem_pending_addr <= '0;
-      acc_mem_pending_corr <= 32'd0;
-      acc_mem_pending_word <= '0;
-      acc_mem_pending_write_word <= '0;
-      acc_mem_issue_valid <= 1'b0;
-      acc_mem_issue_bank_sel <= 1'b0;
-      acc_mem_issue_addr <= '0;
-      acc_mem_issue_corr <= 32'd0;
-      acc_mem_issue_use_bypass <= 1'b0;
-      acc_mem_issue_bypass_from_pending <= 1'b0;
-      acc_mem_issue_bypass_from_return <= 1'b0;
-      acc_mem_issue_bypass_word <= '0;
-      acc_mem_return_valid <= 1'b0;
-      acc_mem_return_bank_sel <= 1'b0;
-      acc_mem_return_addr <= '0;
-      acc_mem_return_corr <= 32'd0;
-      acc_mem_return_word <= '0;
-      acc_mem_return_write_word <= '0;
+      acc_read_valid <= 1'b0;
+      acc_read_bank_sel <= 1'b0;
+      acc_read_addr <= '0;
+      acc_read_corr <= 32'd0;
+      acc_mul_valid <= 1'b0;
+      acc_mul_bank_sel <= 1'b0;
+      acc_mul_addr <= '0;
+      acc_mul_product_word <= '0;
+      acc_add_valid <= 1'b0;
+      acc_add_bank_sel <= 1'b0;
+      acc_add_addr <= '0;
+      acc_add_write_word <= '0;
+      norm_wait_acc_bank <= 1'b0;
       for (int lane = 0; lane < TILE_COLS; lane++) begin
-        acc_mem_issue_data[lane] <= 32'd0;
-        acc_mem_pending_data[lane] <= 32'd0;
-        acc_mem_return_data[lane] <= 32'd0;
+        acc_read_data[lane] <= 32'd0;
+        acc_mul_data[lane] <= 32'd0;
       end
 
       norm_active <= 1'b0;
@@ -549,8 +576,6 @@ module output_buffer
       norm_mem_issue_dim <= 7'd0;
       norm_mem_issue_lane <= 4'd0;
       norm_mem_issue_l_bits <= 32'd0;
-      norm_mem_issue_use_bypass <= 1'b0;
-      norm_mem_issue_bypass_word <= '0;
       norm_mem_return_valid <= 1'b0;
       norm_mem_return_bank_sel <= 1'b0;
       norm_mem_return_addr <= '0;
@@ -569,43 +594,32 @@ module output_buffer
       norm_pipe_source_bits <= 32'd0;
       norm_pipe_l_bits <= 32'd0;
     end else begin
-      if (acc_mem_return_valid) begin
-        if (!acc_mem_return_bank_sel)
-          o_acc0_tag[acc_mem_return_addr] <= o_acc0_epoch;
+      if (acc_add_valid) begin
+        if (!acc_add_bank_sel)
+          o_acc0_tag[acc_add_addr] <= o_acc0_epoch;
         else
-          o_acc1_tag[acc_mem_return_addr] <= o_acc1_epoch;
+          o_acc1_tag[acc_add_addr] <= o_acc1_epoch;
       end
 
-      acc_mem_return_valid <= acc_mem_pending_valid;
-      acc_mem_return_bank_sel <= acc_mem_pending_bank_sel;
-      acc_mem_return_addr <= acc_mem_pending_addr;
-      acc_mem_return_corr <= acc_mem_pending_corr;
-      acc_mem_return_word <= acc_mem_pending_word;
-      acc_mem_return_write_word <= acc_mem_pending_write_word;
+      acc_add_valid <= acc_mul_valid;
+      acc_add_bank_sel <= acc_mul_bank_sel;
+      acc_add_addr <= acc_mul_addr;
+      acc_add_write_word <= acc_sum_word_now;
+
+      acc_mul_valid <= acc_read_valid;
+      acc_mul_bank_sel <= acc_read_bank_sel;
+      acc_mul_addr <= acc_read_addr;
+      acc_mul_product_word <= acc_product_word_now;
       for (int lane = 0; lane < TILE_COLS; lane++) begin
-        acc_mem_return_data[lane] <= acc_mem_pending_data[lane];
+        acc_mul_data[lane] <= acc_read_data[lane];
       end
 
-      acc_mem_pending_valid <= acc_mem_issue_valid;
-      acc_mem_pending_bank_sel <= acc_mem_issue_bank_sel;
-      acc_mem_pending_addr <= acc_mem_issue_addr;
-      acc_mem_pending_corr <= acc_mem_issue_corr;
-      acc_mem_pending_word <= acc_issue_base_word;
-      acc_mem_pending_write_word <= acc_issue_write_word;
+      acc_read_valid <= acc_fire;
+      acc_read_bank_sel <= bank_sel;
+      acc_read_addr <= acc_chunk_addr;
+      acc_read_corr <= acc_correction;
       for (int lane = 0; lane < TILE_COLS; lane++) begin
-        acc_mem_pending_data[lane] <= acc_mem_issue_data[lane];
-      end
-
-      acc_mem_issue_valid <= acc_update;
-      acc_mem_issue_bank_sel <= bank_sel;
-      acc_mem_issue_addr <= acc_chunk_addr;
-      acc_mem_issue_corr <= acc_correction;
-      acc_mem_issue_use_bypass <= acc_issue_bypass_hit;
-      acc_mem_issue_bypass_from_pending <= acc_issue_pending_hit;
-      acc_mem_issue_bypass_from_return <= acc_issue_return_hit;
-      acc_mem_issue_bypass_word <= acc_issue_pending_hit ? acc_pending_write_word_now : acc_mem_return_write_word;
-      for (int lane = 0; lane < TILE_COLS; lane++) begin
-        acc_mem_issue_data[lane] <= acc_data[lane];
+        acc_read_data[lane] <= acc_data[lane];
       end
 
       if (norm_mem_return_valid) begin
@@ -613,7 +627,7 @@ module output_buffer
         norm_resp_row <= norm_mem_return_row;
         norm_resp_dim <= norm_mem_return_dim;
         norm_resp_l_bits <= norm_mem_return_l_bits;
-        norm_resp_source_bits <= norm_resp_word_now[norm_mem_return_lane * FP32_W +: FP32_W];
+        norm_resp_source_bits <= norm_mem_pending_word[norm_mem_return_lane * FP32_W +: FP32_W];
       end else if (norm_resp_valid && o_ready) begin
         norm_resp_valid <= 1'b0;
       end
@@ -633,7 +647,7 @@ module output_buffer
       norm_mem_pending_dim <= norm_mem_issue_dim;
       norm_mem_pending_lane <= norm_mem_issue_lane;
       norm_mem_pending_l_bits <= norm_mem_issue_l_bits;
-      norm_mem_pending_word <= norm_mem_issue_use_bypass ? norm_mem_issue_bypass_word : norm_return_word;
+      norm_mem_pending_word <= norm_return_word;
 
       norm_mem_issue_valid <= norm_issue_fire;
       norm_mem_issue_bank_sel <= norm_issue_bank_sel;
@@ -642,14 +656,17 @@ module output_buffer
       norm_mem_issue_dim <= norm_issue_dim;
       norm_mem_issue_lane <= norm_issue_lane;
       norm_mem_issue_l_bits <= norm_issue_l_bits;
-      norm_mem_issue_use_bypass <= norm_issue_pending_hit || norm_issue_return_hit;
-      norm_mem_issue_bypass_word <= norm_issue_pending_hit ? acc_pending_write_word_now : acc_mem_return_write_word;
 
       if (normalize) begin
         norm_active <= (active_rows != 5'd0);
         norm_row <= 5'd0;
         norm_dim <= 7'd0;
         norm_active_rows <= active_rows;
+        norm_wait_acc_bank <= (active_rows != 5'd0);
+      end
+
+      if (norm_issue_fire && (normalize || norm_wait_acc_bank)) begin
+        norm_wait_acc_bank <= 1'b0;
       end
 
       if (norm_issue_fire) begin
@@ -668,6 +685,8 @@ module output_buffer
   end
 `else
   logic [CHUNK_W-1:0] norm_chunk_word;
+
+  assign acc_ready = 1'b1;
 
   always_ff @(posedge clk) begin
     if (acc_update) begin

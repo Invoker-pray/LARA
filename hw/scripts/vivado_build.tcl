@@ -1,7 +1,9 @@
 set PROJ_NAME  "lara_attention"
 set PART       "xck26-sfvc784-2LV-c"
 set BOARD_SOM  "xilinx.com:kv260_som:part0:1.2"
-set FCLK_MHZ   60
+# K26 PL0 uses integer clock division. An 80 MHz request rounds down to
+# 76.923 MHz (13 ns), so use the next realizable rate to prove >=80 MHz.
+set FCLK_MHZ   83.333
 set N_JOBS     1
 set MAX_THREADS 1
 set HW_DIR     "hw"
@@ -222,6 +224,15 @@ report_timing_summary -file ${OUT_DIR}/reports/post_synth_timing_summary.rpt
 file delete -force ${OUT_DIR}/${PROJ_NAME}.runs/impl_1
 file mkdir ${OUT_DIR}/${PROJ_NAME}.runs/impl_1
 launch_runs impl_1 -to_step route_design -jobs ${N_JOBS}; wait_on_run impl_1
+# Do not publish a bitstream from an implementation that missed setup or hold.
+open_run impl_1
+set routed_wns [get_property SLACK [get_timing_paths -delay_type max -max_paths 1]]
+set routed_whs [get_property SLACK [get_timing_paths -delay_type min -max_paths 1]]
+puts "INFO: Routed timing gate: WNS=${routed_wns} ns, WHS=${routed_whs} ns"
+if {($routed_wns < 0.0) || ($routed_whs < 0.0)} {
+    puts "ERROR: Routed timing is not closed; bitstream generation is blocked."
+    exit 2
+}
 # Bitstream: route_design passes, then skip UCIO-1 DRC for internal PS-PL paths
 set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
 launch_runs impl_1 -to_step write_bitstream -jobs ${N_JOBS}

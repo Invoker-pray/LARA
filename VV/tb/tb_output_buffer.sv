@@ -4,7 +4,7 @@ module tb_output_buffer;
   import attn_pkg::*;
 
   logic clk, rst_n;
-  logic acc_update, bank_sel, normalize, clear_bank, clear_bank_sel;
+  logic acc_update, acc_ready, bank_sel, normalize, clear_bank, clear_bank_sel;
   logic [clog2_safe(TILE_ROWS)-1:0] acc_row;
   logic [2:0] acc_dim_blk;
   logic [4:0] active_rows;
@@ -55,6 +55,18 @@ module tb_output_buffer;
     end
   endtask
 
+  task automatic send_acc_update;
+    logic accept_now;
+    begin
+      acc_update = 1'b1;
+      do begin
+        @(posedge clk) accept_now = acc_ready;
+        #1 tick_marker = ~tick_marker;
+      end while (!accept_now);
+      acc_update = 1'b0;
+    end
+  endtask
+
   initial begin
     clk = 1'b0;
     rst_n = 1'b0;
@@ -97,9 +109,7 @@ module tb_output_buffer;
       else if (i == 2) acc_data[i] = 32'h3F80_0000; // 1.0
       else             acc_data[i] = 32'd0;
     end
-    acc_update = 1'b1;
-    tick();
-    acc_update = 1'b0;
+    send_acc_update();
     tick();
 
     // Second update on the same chunk to verify read-modify-write behavior.
@@ -108,9 +118,7 @@ module tb_output_buffer;
       else if (i == 1) acc_data[i] = 32'h3FC0_0000; // +1.5 => 4.5
       else             acc_data[i] = 32'd0;
     end
-    acc_update = 1'b1;
-    tick();
-    acc_update = 1'b0;
+    send_acc_update();
     tick();
 
     // Normalize from bank1 by flipping bank_sel low.
@@ -120,10 +128,14 @@ module tb_output_buffer;
     normalize = 1'b1;
     tick();
     normalize = 1'b0;
+    if (!acc_ready) begin
+      $display("FAIL opposite accumulation bank should remain ready during normalization");
+      err++;
+    end
 
     // Dimension 2 distinguishes the LUT approximation from exact division:
     // 1.0 / 1.5 rounds to bf16 0x3f2b exactly and 0x3f2a via this LUT.
-    wait_for_output(5'd0, 7'd0, 16'h4000, 8);
+    wait_for_output(5'd0, 7'd0, 16'h4000, 16);
     wait_for_output(5'd0, 7'd1, 16'h4040, 8);
     wait_for_output(5'd0, 7'd2, 16'h3F2A, 8);
 
