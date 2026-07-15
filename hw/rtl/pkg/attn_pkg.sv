@@ -176,12 +176,16 @@ package attn_pkg;
   localparam int CSR_ADDR_W = 14;
 
   // --- Control & Status (0x000–0x0FF) ---
-  localparam logic [13:0] CSR_CTRL            = 14'h000;  // [0] start, [1] soft_reset, [31:2] reserved
-  localparam logic [13:0] CSR_STATUS          = 14'h004;  // [0] busy, [1] done, [2] error, [31:3] reserved
+  localparam logic [13:0] CSR_CTRL            = 14'h000;  // [0] start W1P, [1] clear_status W1P
+  localparam logic [13:0] CSR_STATUS          = 14'h004;  // ready/busy/done/error/stream/load-request status
   localparam logic [13:0] CSR_SEQ_LEN         = 14'h008;  // Actual sequence length for this inference (≤ MAX_SEQ_LEN)
-  localparam logic [13:0] CSR_Q_TILE_IDX      = 14'h00C;  // Current Q tile index (read-only debug)
-  localparam logic [13:0] CSR_KV_TILE_IDX     = 14'h010;  // Current KV tile index (read-only debug)
-  localparam logic [13:0] CSR_HEAD_IDX        = 14'h014;  // Current Q head index (0..31), driver sets before start
+  localparam logic [13:0] CSR_Q_POS_BASE      = 14'h00C;  // Absolute Q position base for causal masking
+  localparam logic [13:0] CSR_KV_POS_BASE     = 14'h010;  // Absolute K/V position base for causal masking
+  localparam logic [13:0] CSR_CFG             = 14'h014;  // [0] causal enable
+  localparam logic [13:0] CSR_ERROR_CODE      = 14'h018;  // Sticky error classification
+  // [0] KV request, [1] Q request, [2] Q destination bank,
+  // [6:4] KV group, [10:8] Q group, [13:12] Q head, [23:16] Q tile.
+  localparam logic [13:0] CSR_LOAD_REQ        = 14'h01C;
 
   // --- Data Stream Control (0x020–0x04F) ---
   localparam logic [13:0] CSR_STREAM_SRC      = 14'h020;  // DDR source address [31:0] for next stream
@@ -197,9 +201,17 @@ package attn_pkg;
   // --- Performance Counters (0x100–0x1FF) ---
   localparam logic [13:0] CSR_PERF_CYCLES     = 14'h100;  // Total cycle count [31:0]
   localparam logic [13:0] CSR_PERF_CYCLES_HI  = 14'h104;  // Total cycle count [63:32]
-  localparam logic [13:0] CSR_PERF_STALLS     = 14'h108;  // Stall cycles (waiting for DDR/URAM)
-  localparam logic [13:0] CSR_PERF_Q_TILES    = 14'h10C;  // Number of Q tiles processed
-  localparam logic [13:0] CSR_PERF_KV_TILES   = 14'h110;  // Number of KV tiles processed
+  localparam logic [13:0] CSR_PERF_MAC_CYCLES = 14'h108;  // MAC-active cycles
+  localparam logic [13:0] CSR_PERF_STALLS     = 14'h10C;  // Stall cycles waiting for host/memory
+
+  typedef enum logic [7:0] {
+    ERR_NONE        = 8'h00,
+    ERR_BAD_CFG     = 8'h01,
+    ERR_BUSY_START  = 8'h02,
+    ERR_STREAM_LEN  = 8'h10,
+    ERR_STREAM_DEST = 8'h11,
+    ERR_RESULT_LEN  = 8'h12
+  } error_code_t;
 
   // ==================================================================
   // 8. FSM State Enum — Attention Controller State Machine

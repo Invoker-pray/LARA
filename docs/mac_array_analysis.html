@@ -43,7 +43,7 @@
 <h2>1. 阵列计算过程可视化</h2>
 <p>任务：Q_tile [32, 128] × K_tile^T [128, 64] = S_tile [32, 64]</p>
 
-<h3>1.1 16×16 阵列 — 基准方案 (256 DSP)</h3>
+<h3>1.1 16×16 阵列 — 当前基准（逻辑 256 PE，物理复用）</h3>
 <div class="mermaid">
 graph TB
     subgraph ARRAY_16["16×16 MAC Array"]
@@ -312,7 +312,7 @@ graph LR
 <h3>原因三：时序收敛</h3>
 
 <pre>
-关键路径分析 (200MHz = 5ns 周期):
+关键路径分析（当前签收约束：83.333MHz = 12ns 周期；200MHz 仅为历史探索目标）:
 
 16×16:
   PE 内部 bf16 MAC: ~2.5ns (DSP48E2 乘法 + 累加)
@@ -337,7 +337,7 @@ graph LR
 <h3>原因四：赛题约束 & 论文叙事</h3>
 
 <pre>
-16×16 → 256 DSP (20%) → "克制"
+16×16 → 逻辑 256 PE，v2.2 post-route 使用 163 DSP → "克制"
 16×32 → 512 DSP (41%) → "适度扩展"
 32×32 → 1024 DSP (82%) → "堆资源"
 
@@ -356,33 +356,33 @@ graph LR
 <div class="grid-item" style="border: 1px solid #4ecca3;">
 <h4>✅ 16×16 (基准)</h4>
 <table>
-<tr><td>DSP</td><td class="highlight">256 (20%)</td></tr>
+<tr><td>DSP</td><td class="highlight">163 routed（逻辑 256 PE，split/reuse）</td></tr>
 <tr><td>行数</td><td>16</td></tr>
 <tr><td>Softmax</td><td>16 路 ✓</td></tr>
 <tr><td>子块数</td><td>8</td></tr>
 <tr><td>时序</td><td>余量充足</td></tr>
 <tr><td>CIM 复用</td><td>直接复用</td></tr>
-<tr><td>定位</td><td class="adopt">v1.0 首选</td></tr>
+<tr><td>定位</td><td class="adopt">v2.2 当前签收基线</td></tr>
 </table>
 </div>
 
 <div class="grid-item" style="border: 1px solid #f0c060;">
 <h4>⚠️ 16×32 (扩展方向)</h4>
 <table>
-<tr><td>DSP</td><td class="highlight">512 (41%)</td></tr>
+<tr><td>DSP</td><td class="highlight">约 2× 逻辑列并行，需重新综合确认</td></tr>
 <tr><td>行数</td><td>16</td></tr>
 <tr><td>Softmax</td><td>16 路 ✓ (不变!)</td></tr>
 <tr><td>子块数</td><td>4 (减半)</td></tr>
-<tr><td>时序</td><td>+0.3ns, 可控</td></tr>
+<tr><td>时序</td><td>未实现，不能沿用估算</td></tr>
 <tr><td>CIM 复用</td><td>结构复用</td></tr>
-<tr><td>定位</td><td class="highlight">v2.0 扩展</td></tr>
+<tr><td>定位</td><td class="highlight">后续探索</td></tr>
 </table>
 </div>
 
 <div class="grid-item" style="border: 1px solid #ff6b6b;">
 <h4>❌ 32×32 (不推荐)</h4>
 <table>
-<tr><td>DSP</td><td class="reject">1024 (82%)</td></tr>
+<tr><td>DSP</td><td class="reject">超出当前资源/时序预算风险</td></tr>
 <tr><td>行数</td><td>32</td></tr>
 <tr><td>Softmax</td><td class="reject">32 路 (2×硬件)</td></tr>
 <tr><td>子块数</td><td>2 (最少)</td></tr>

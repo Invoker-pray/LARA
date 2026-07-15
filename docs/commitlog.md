@@ -44,6 +44,18 @@
   - `lara_attention.xsa`: `5f525b1badfcd73315f105cfa2cea5901a146bd2348121452ef6680aed305151`
 - 上述部署产物按仓库策略由 `.gitignore` 排除，不提交至 Git；`develop` 追踪 RTL、仿真测试、Vivado 脚本和开发文档，`master` 仅同步部署所需 RTL、构建配置及版本记录。
 
+> 当前工作区后续控制链已将 v2.0 的“全量 K/V 预加载”替换为 `CSR_LOAD_REQ` 请求驱动：片上只驻留当前 GQA group 的一个 K/V head，host driver 在一次 `start` 后显式服务 K/V/Q DMA。v2.0 条目中的预加载描述仅保留为历史记录，不代表当前 RTL。
+
+## 工作区后续版本 — v2.3 控制链整合（待 Vivado 重构建签收）
+
+- 选择性吸收 `fsm-driver-work` 的软硬件协同思路，不合并其与当前 KV cache 容量不匹配的旧 RTL 树。
+- `attn_core`/`attn_top` 采用一次 `start` 覆盖完整 group/head/tile 遍历；通过 `CSR_LOAD_REQ` 请求当前 KV head 和 Q tile，由 host driver 显式启动 AXI DMA。
+- `run_layer()` 串起宿主机 RMSNorm、QKV projection、RoPE、head-major bf16 packing、FPGA Attention 和输出恢复。
+- 修复 AXI-Lite 独立 AW/W 锁存、W1P start、sticky request/status/error，以及 AXI-Stream transfer 边界、连续事务和 pending beat 覆盖问题。
+- 新增 KV260 board bundle、零输入 smoke test、NPZ 预计算 Q/K/V 检查和上板验证指南。
+- 已验证：Python Golden 7/7、Python unittest 3/3、host helper、CSR/sink smoke、AXI Stream 8/8、Verilator lint；完整 VCS 回归需在可用的 Synopsys license server 上重新执行。
+- 本版本尚未产生新的 Vivado post-route 数据；在重新构建前不得把 v2.2 的 timing/resource 数字当作 v2.3 签收结果。
+
 ## 2026-07-09
 
 ### v2.0 — attn_core FSM 升级 + 设计对齐
@@ -55,7 +67,7 @@
 - 新增 active_q_rows / active_kv_cols (partial last tile 支持)
 - 新增 ST_ERROR + 配置校验 (seq_len=0, 越界检测)
 - done/error 改为 sticky level
-- 保留全量 K/V URAM 预加载 (ST_LOAD_KV)
+- 当时保留全量 K/V URAM 预加载 (ST_LOAD_KV；该行为已由后续请求驱动控制链替换)
 - 保留 MAC 分时复用 Phase A/B (ST_QK_DOT + ST_AV_DOT)
 
 **文档**：
@@ -72,7 +84,7 @@
 
 **核心计算**：
 - bf16_mac.sv — 原子 bf16 MAC PE (103/103 PASS)
-- attn_tile.sv — 16×16 MAC 阵列，2级流水线≥200MHz (64/64 PASS)
+- attn_tile.sv — 16×16 逻辑 MAC 阵列，模块级 2 级流水线回归通过（“≥200 MHz”为当时目标，非 post-route 结论）
 - softmax_engine.sv — Online Softmax + Causal Masking (304/304 PASS)
 - psum_accum.sv — 列累加器，SPLIT=2 (32/32 PASS)
 - attn_core.sv — FlashAttention 双层循环 FSM + GQA

@@ -41,6 +41,7 @@ module tb_stream;
   logic [31:0] bytes_sent;
   logic        src_done;
   logic        src_done_seen;
+  logic [3:0]  sink_done_count;
 
   // ==================================================================
   // DUT Instances (share clock)
@@ -65,10 +66,15 @@ module tb_stream;
   always #5 sink_clk = ~sink_clk;
 
   always_ff @(posedge sink_clk or negedge sink_rst_n) begin
-    if (!sink_rst_n)
+    if (!sink_rst_n) begin
       src_done_seen <= 1'b0;
-    else if (src_done)
-      src_done_seen <= 1'b1;
+      sink_done_count <= 4'd0;
+    end else begin
+      if (src_done)
+        src_done_seen <= 1'b1;
+      if (sink_done)
+        sink_done_count <= sink_done_count + 4'd1;
+    end
   end
 
   // ==================================================================
@@ -196,17 +202,18 @@ module tb_stream;
     // ================================================================
     test_num = 2; $display("--- Test %0d: Back-to-back ---", test_num);
     do_reset;
-    cfg_len   <= 32'd32;  // 32 bytes total
+    cfg_len   <= 32'd16;  // each TLAST-delimited DMA transfer is 16 bytes
     cfg_dest  <= 2'd1;
     tick();
     axis_send_aligned(4);  // 16 bytes
     settle();
     axis_send_aligned(4);  // 16 bytes
     wait_cycles(5);
-    if (bytes_received != 32) begin
-      $display("FAIL T2: got %0d exp 32", bytes_received); err_cnt++;
+    if (bytes_received != 16 || sink_done_count != 2) begin
+      $display("FAIL T2: final bytes=%0d done_count=%0d (exp 16,2)",
+               bytes_received, sink_done_count); err_cnt++;
     end
-    $display("  Test 2: bytes=%0d", bytes_received);
+    $display("  Test 2: final bytes=%0d transfers=%0d", bytes_received, sink_done_count);
 
     // ================================================================
     // Test 3: Overflow detection

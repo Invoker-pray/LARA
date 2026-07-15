@@ -2,6 +2,8 @@
 
 ## FPT'26 Design Competition — 完整准备路线图
 
+> 状态说明（2026-07-15）：本文主体是项目启动阶段的学习/规划材料，不代表当前实现状态。当前部署上限为 `MAX_SEQ_LEN=512`，v2.2 已在 KV260 83.333 MHz 完成 post-route 时序收敛（WNS `+0.040 ns`），资源为 163 DSP、87235 LUT、57306 FF、50 BRAM、48 URAM。当前 P0 已转为 CSR/DMA 软硬件协同、真实板上数值验证和端到端性能测量；文中的 200 MHz、2048 长度及早期资源数字只能作为探索目标。
+
 ---
 
 ## 目录
@@ -85,7 +87,7 @@ O = P × V            # [N, N] × [N, 128] = [N, 128]
 | fp32 | 4096² × 4 = **64 MB** |
 | bf16 | 4096² × 2 = **32 MB** |
 
-KV260 的 BRAM 总共才 **26.2 Mb ≈ 3.2 MB**，连一个 N×N 矩阵都放不下，根本不可能用朴素方法。
+KV260 的片上存储由约 **5.1 Mb BRAM + 20.7 Mb URAM** 组成（合计约 3.2 MB）。即使合计计算，仍无法容纳 4096×4096 的 N×N 矩阵，因此不可能用朴素方法。
 
 **FlashAttention 的核心洞察：**
 
@@ -205,14 +207,15 @@ Stage 3: SV+DIV   ──  与 V 乘加 + 行求和 + 归一化
 
 三个阶段用 `#pragma HLS dataflow` 重叠执行——当前 token 在做 QK^T 时，下一 token 的数据已经在加载了。
 
-**KV260 资源规划（关键！）：**
+**KV260 资源规划（早期估算；当前签收值见文档顶部和 `competition_alignment.md`）：**
 
 | 资源 | KV260 总量 | 建议分配 | 用途 |
 |------|-----------|---------|------|
 | DSP48E2 | 1,248 | ~800-1000 | 512 给矩阵乘法阵列 + 余量给 softmax |
-| BRAM | 26.2 Mb | ~20 Mb | K/V 缓存 + Q 缓存 + 中间结果 FIFO |
-| LUT | 256K | ~100-150K | bf16 控制逻辑、exp 查表、地址生成 |
-| FF | 512K | ~150-200K | 流水线寄存器 |
+| BRAM | 5.1 Mb | 50 tiles（v2.2） | Q/输出缓冲、LUT 和辅助存储 |
+| URAM | 20.7 Mb | 48 tiles（v2.2） | 当前 GQA group 的 K/V cache |
+| LUT | 117,120 | 87,235（v2.2） | bf16 控制逻辑、exp 查表、地址生成 |
+| FF | 234,240 | 57,306（v2.2） | 流水线寄存器 |
 | DDR4 | 4 GB | 按需 | 模型权重 + 输入/输出 |
 
 **为什么用行优先而不是 systolic array？**
@@ -531,6 +534,8 @@ for (int i = 0; i < N; i += B_r) {
 ---
 
 ## 7. 毕设资产：INT8-CIM 项目可迁移分析
+
+> 本节是项目启动阶段的迁移思路，不是当前 RTL 的模块合同。当前实现使用 `kv_cache_ram.sv` 的多 bank URAM（每次驻留一个 GQA group 的 KV head）和 `tile_buffer.sv` 的 Q ping-pong；不要将下方示例中的 BRAM 滑动窗口或 HLS pragma 视为已实现功能。
 
 > 你的毕设仓库：[Invoker-pray/INT8-CIM-of-jiao](https://github.com/Invoker-pray/INT8-CIM-of-jiao)  
 > 在 PYNQ-Z2 / KV260 上做的 INT8 存算一体 SoC FPGA 验证平台，跑 LeNet-5/MNIST

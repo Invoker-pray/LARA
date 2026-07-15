@@ -125,6 +125,8 @@
   Target: Llama3-8B / Llama3.1-8B Attention Accelerator · bf16 Precision · Kria KV260 (Without AI Cores)<br>
   Competition: FPT'26 Track B — "Llama3-8B or models with consistent parameters"
 </p>
+<div class="note"><strong>Current implementation snapshot (2026-07-15):</strong>
+v2.2 closes post-route timing at 83.333 MHz with 163 DSP, 87235 LUT, 57306 FF, 50 BRAM and 48 URAM. MAX_SEQ_LEN is 512. The host performs RMSNorm/QKV/RoPE; one FPGA start then uses CSR_LOAD_REQ to load one KV head per GQA group and one padded Q tile per request. Older 200 MHz, 256-DSP and MAX_SEQ_LEN=2048 values below are historical architecture estimates, not signoff results.</div>
 
 <!-- ================================================================ -->
 <!-- LEGEND -->
@@ -240,17 +242,16 @@ graph TB
 
 <div class="data-desc">
 <strong>Pipeline Order (one GQA group, one Q_tile):</strong><br>
-① K/V Full Load (DDR→URAM, once) → ② Q_tile Stream Load (DDR→Ping-Pong) →
+① CSR_LOAD_REQ 驱动当前 group 的 K/V DMA → ② Q_tile 请求加载 (DDR→Ping-Pong) →
 ③ Q×K^T (MAC Phase A) → ④ Scale + Mask → ⑤ Online Softmax →
 ⑥ P×V (MAC Phase B) → ⑦ O Accumulate → ⑧ Normalize + bf16 Truncate → ⑨ O_tile Writeback (DDR)
 </div>
 
 <div class="note">
 <strong>Key Design Decision — Host-Side QKV Projection:</strong>
-QKV 投影 (X @ Wq/Wk/Wv) 的计算量约 51.5 GMACs (L=2048)，是 Attention 计算 (~34.4 GMACs)
-的 1.5×，但需要加载 80 MB 权重。在 KV260 256 DSP 上做投影会占用 MAC 阵列 99.9% 的时间。
-正确的分工：投影在主机 ARM 端用 NumPy/PyTorch 完成，FPGA 只做 Attention 本身的计算。
-权重 Wq/Wk/Wv/Wo 不进入 FPGA 数据通路。
+QKV 投影由 <code>host_attention.py</code> 在 ARM/宿主机完成，再由 driver 转换为 head-major bf16 并通过 DMA 送入 PL。
+投影权重不进入当前 bitstream，避免与 Attention MAC 阵列争用资源。
+端到端性能必须分别报告 host projection、DMA 和 PL compute 时间，不能继续使用早期固定频率估算代替实测。
 </div>
 
 <!-- ================================================================ -->
@@ -291,7 +292,7 @@ QKV 投影 (X @ Wq/Wk/Wv) 的计算量约 51.5 GMACs (L=2048)，是 Attention �
 <tr>
   <td><strong>4. Algorithm Params</strong></td>
   <td><code>MAX_SEQ_LEN</code>, <code>HEAD_DIM</code>, <code>N_Q_HEADS</code>, <code>N_KV_HEADS</code></td>
-  <td>2048, 128, 32, 8</td>
+  <td>512（当前部署上限）, 128, 32, 8</td>
   <td>Llama3.1-8B specification</td>
 </tr>
 <tr>
@@ -302,19 +303,19 @@ QKV 投影 (X @ Wq/Wk/Wv) 的计算量约 51.5 GMACs (L=2048)，是 Attention �
 </tr>
 <tr>
   <td><strong>6. Memory Sizing</strong></td>
-  <td><code>MAX_N_Q_TILES</code>, <code>MAX_N_KV_TILES</code>, <code>WSRAM_DEPTH</code></td>
+  <td><code>MAX_N_Q_TILES</code>, <code>MAX_N_KV_TILES</code>, <code>KV_CACHE_DEPTH</code></td>
   <td>ceil(L/TILE_Q), ceil(L/TILE_KV)</td>
   <td>Auto-derived: NO manual numbers</td>
 </tr>
 <tr>
   <td><strong>7. CSR Map</strong></td>
   <td><code>CSR_CTRL</code>, <code>CSR_STATUS</code>, <code>CSR_STREAM_LEN</code>, ...</td>
-  <td>14'h000–14'h060</td>
+  <td>0x000–0x10C（当前实现）</td>
   <td>All CSR addresses explicitly defined</td>
 </tr>
 <tr>
   <td><strong>8. FSM States</strong></td>
-  <td><code>ST_IDLE</code>, <code>ST_LOAD_KV</code>, <code>ST_ATTN_LOOP</code>, <code>ST_DONE</code>, ...</td>
+  <td><code>ST_IDLE</code>, <code>ST_LOAD_KV</code>, <code>ST_Q_INIT</code>, <code>ST_DONE</code>, ...</td>
   <td>6-bit enum</td>
   <td>States for FlashAttention double-loop orchestration</td>
 </tr>
@@ -433,7 +434,7 @@ for accumulating up to 2^(23-7) = 65536 bf16 products without rounding error.<br
   <td>l (running sum per row)</td>
   <td>fp32</td>
   <td>32-bit</td>
-  <td>Accumulates exp() values; fp32 prevents overflow for L≤2048</td>
+  <td>Accumulates exp() values; 当前验证范围为 L≤512，更长序列需要分页策略</td>
 </tr>
 </table>
 </div>
@@ -456,7 +457,7 @@ for accumulating up to 2^(23-7) = 65536 bf16 products without rounding error.<br
 <h4>Interface</h4>
 <table class="iface-table">
 <tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
-<tr><td><code>clk</code></td><td>in</td><td>1</td><td>System clock (target 100-200 MHz)</td></tr>
+<tr><td><code>clk</code></td><td>in</td><td>1</td><td>PS PL0 clock; v2.2 post-route constraint 83.333 MHz</td></tr>
 <tr><td><code>rst_n</code></td><td>in</td><td>1</td><td>Asynchronous reset, active-low</td></tr>
 <tr><td><code>a_bf16</code></td><td>in</td><td>16</td><td>Operand A in bf16 format {sign, exp[7:0], mant[6:0]}</td></tr>
 <tr><td><code>b_bf16</code></td><td>in</td><td>16</td><td>Operand B in bf16 format</td></tr>
@@ -597,7 +598,7 @@ Feeds into psum_accum for further reduction and the softmax_engine for exp/max/s
 
 <div class="note">
 <strong>Time Multiplexing Rationale:</strong> Using one 16×16 array for both Q×K^T and P×V
-saves 256 DSPs (vs. two separate arrays). The array is idle during Softmax computation,
+saves a second physical MAC array. The current split/reuse implementation routes with 163 DSPs. The array is idle during Softmax computation,
 which takes ~O(Tk) cycles. For Tk=64, the idle time is acceptable (pipeline bubble).
 If Softmax latency becomes the bottleneck, double-buffering the MAC array inputs can help.
 </div>
@@ -696,7 +697,7 @@ At the end: O_acc[i][:] = Σ(j) P[i][j] × V[j][:] — the unnormalized attentio
 
 <h4>EXP Function Implementation</h4>
 <pre>
-Method: LUT + Linear Interpolation (recommended for v1.0)
+Method: LUT + Linear Interpolation (current bf16 baseline)
 
 ROM: 1024 entries × fp32 = 4 KB (1 BRAM)
 Input range: [-8, 8] (covers exp(-8)≈0.0003 to exp(8)≈2981)
@@ -797,12 +798,12 @@ Across all sub-blocks for one Q tile (L=512, Tq=32, Tk=64):
 <tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
 <tr><td><code>start</code></td><td>in</td><td>1</td><td>Start pulse from CSR (after Q/K/V are in DDR, config written)</td></tr>
 <tr><td><code>seq_len [15:0]</code></td><td>in</td><td>16</td><td>Current sequence length (from CSR, ≤ MAX_SEQ_LEN)</td></tr>
-<tr><td><code>gqa_group [2:0]</code></td><td>in</td><td>3</td><td>Current GQA group index (0..7)</td></tr>
-<tr><td><code>q_head [1:0]</code></td><td>in</td><td>2</td><td>Current Q head within group (0..3)</td></tr>
+<tr><td><code>current_group [2:0]</code></td><td>out</td><td>3</td><td>Current GQA group descriptor (0..7)</td></tr>
+<tr><td><code>current_head [1:0]</code></td><td>out</td><td>2</td><td>Current Q head within group (0..3)</td></tr>
 <tr><td><code>done</code></td><td>out</td><td>1</td><td>High when all GQA groups + heads are complete</td></tr>
 <tr><td><code>busy</code></td><td>out</td><td>1</td><td>High when FSM is active (any state except IDLE/DONE)</td></tr>
 <tr><td colspan="4"><em>— Memory Control —</em></td></tr>
-<tr><td><code>kv_load_start</code>, <code>kv_load_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish K/V DDR→URAM load</td></tr>
+<tr><td><code>kv_load_start</code>, <code>kv_load_done</code></td><td>out/in</td><td>1/1</td><td>Request/acknowledge current group K/V DMA</td></tr>
 <tr><td><code>q_load_start</code>, <code>q_load_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish Q_tile DDR→Ping-Pong load</td></tr>
 <tr><td><code>o_write_start</code>, <code>o_write_done</code></td><td>out/in</td><td>1/1</td><td>Trigger/finish O_tile writeback to DDR</td></tr>
 <tr><td colspan="4"><em>— Compute Control —</em></td></tr>
@@ -820,7 +821,7 @@ Across all sub-blocks for one Q tile (L=512, Tq=32, Tk=64):
 stateDiagram-v2
     [*] --> IDLE
     IDLE --> LOAD_KV: start=1
-    LOAD_KV --> Q_TILE_INIT: KV loaded to URAM
+    LOAD_KV --> Q_TILE_INIT: CSR_LOAD_REQ acknowledged and KV DMA complete
 
     state Q_TILE_INIT {
         [*] --> LOAD_Q: DMA Q_tile DDR→Ping-Pong
@@ -874,12 +875,12 @@ So K/V are loaded once per group, and the Q-tile loop runs 4 times (once per Q h
 <h2 id="sec-kvcache">9. kv_cache_ram.sv — K/V URAM Cache <span class="badge badge-mem">mem</span></h2>
 
 <div class="module-card">
-<h3>kv_cache_ram.sv — Full-Sequence K/V On-Chip Storage</h3>
+<h3>kv_cache_ram.sv — Current-Group K/V On-Chip Storage</h3>
 
 <div class="pipeline-pos">
   <span class="label">Pipeline Position:</span>
   <span class="pos">Pre-Attention Storage</span>
-  <span class="arrow">←</span> K/V from DDR via AXI Stream (loaded ONCE at start)
+  <span class="arrow">←</span> Current K/V head from DDR via AXI Stream (loaded once per GQA group)
   <span class="arrow">→</span> K_tile/V_tile to attn_tile (read REPEATEDLY during Attention loop)
 </div>
 
@@ -887,7 +888,7 @@ So K/V are loaded once per group, and the Q-tile loop runs 4 times (once per Q h
 <table class="iface-table">
 <tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
 <tr><td><code>clk</code>, <code>rst_n</code></td><td>in</td><td>1</td><td>Clock and reset</td></tr>
-<tr><td><code>wr_en</code></td><td>in</td><td>1</td><td>Write enable (during LOAD_KV phase only)</td></tr>
+<tr><td><code>wr_en</code></td><td>in</td><td>1</td><td>Write enable while servicing the current group's KV request</td></tr>
 <tr><td><code>wr_addr [15:0]</code></td><td>in</td><td>16</td><td>Write address (linear: token_idx × head_dim + dim_idx)</td></tr>
 <tr><td><code>wr_data [15:0]</code></td><td>in</td><td>16</td><td>Write data: one bf16 element of K or V</td></tr>
 <tr><td><code>rd_en</code></td><td>in</td><td>1</td><td>Read enable (during Attention loop)</td></tr>
@@ -899,23 +900,20 @@ So K/V are loaded once per group, and the Q-tile loop runs 4 times (once per Q h
 <h4>Storage Organization</h4>
 <pre>
 K Cache: [MAX_SEQ_LEN × HEAD_DIM] bf16 elements
-  = 2048 × 128 × 2 bytes = 512 KB per KV head
-  For all 8 KV heads: 8 × 512 KB = 4 MB (K only)
+  = 512 × 128 × 2 bytes = 128 KB for the current KV head
 
-V Cache: same structure, another 4 MB
+V Cache: same structure, another 128 KB
 
-Total K+V Cache: 8 MB (for all 8 KV heads, MAX_SEQ_LEN=2048)
+Total resident K+V payload: 256 KB at MAX_SEQ_LEN=512
 
 URAM budget on KV260: 64 × 288 Kb = 20.7 Mb ≈ 2.6 MB
-  → K+V for ALL 8 heads = 8 MB — exceeds URAM capacity at L=2048!
+  → the physical multi-bank layout uses 48 URAM tiles in the v2.2 routed design.
 
-Adaptive strategy:
-  L ≤ 512:   K+V = 1 MB + 1 MB = 2 MB → fits in URAM ✓
-  L ≤ 1024:  K+V = 2 MB + 2 MB = 4 MB → exceeds URAM ✗ → partial cache or BRAM spillover
-  L = 2048:  K+V = 4 MB + 4 MB = 8 MB → need multi-pass or reduced head caching
+Current strategy:
+  L ≤ 512: cache one KV head pair, reuse it for four Q heads, then reload at the next GQA group.
+  L > 512: not implemented; future work requires chunked or paged host transfers.
 
-For competition (likely seq_len ≤ 512): URAM caching is viable.
-For longer sequences: cache one GQA group at a time (1/8 of K/V = 0.5 MB @ L=2048).
+The 512 limit is an implementation contract, not an assumption about the competition input.
 
 Multi-bank organization for parallel access:
   TILE_KV=64 tokens read simultaneously → 64 parallel data paths
@@ -929,14 +927,15 @@ Multi-bank organization for parallel access:
 
 <div class="data-desc kv">
 <strong>K/V Data Structure Details:</strong><br>
-<strong>K:</strong> Shape [L, 1024] bf16. For Llama3.1-8B: L tokens × 8 KV heads × 128 head_dim = L × 1024.<br>
-Each K element is a bf16 value representing one dimension of one key vector.<br>
-<strong>V:</strong> Shape [L, 1024] bf16. Same organization.<br>
-<strong>Access pattern:</strong> Sequential writes during LOAD_KV (streaming from DDR).
+<strong>K source tensor:</strong> Shape [L, 1024] bf16 in host memory; each request selects one [L, 128] KV-head slice.<br>
+Each cached K element is a bf16 value representing one dimension of one key vector.<br>
+<strong>V source tensor:</strong> Shape [L, 1024] bf16; the cache stores the corresponding [L, 128] slice.<br>
+<strong>Access pattern:</strong> Sequential writes while servicing CSR_LOAD_REQ (streaming from DDR).
 Strided reads during Attention loop: for kv_start=0,64,128,..., read tokens [kv_start .. kv_start+63]
 across all 128 head dimensions. Each token's K/V is read 16 times (once per Q tile, for L=512, Tq=32).<br>
-<strong>This is why caching is critical:</strong> Without URAM cache, each K/V token would be re-read
-from DDR 16 times → 16× bandwidth amplification. With URAM, DDR read happens ONCE.
+<strong>This is why caching is critical:</strong> Within one GQA group, each K/V token is reused
+by four Q heads and multiple Q tiles. The host sends the slice once per group; subsequent KV-tile
+reads are served from URAM. Full-layer traffic and latency must be measured from DMA/performance counters.
 </div>
 </div>
 
@@ -978,9 +977,7 @@ Bank B: [──── IDLE ────] [LOAD Q_tile_1] [──── IDLE ─�
 MAC:    [── IDLE ──] [COMPUTE tile_0] [COMPUTE tile_1] [COMPUTE tile_2] ...
 
 Q_tile size: TILE_Q × head_dim = 32 × 128 × 2B = 8 KB
-DDR load time (15 GB/s effective): 8 KB / 15 GB/s ≈ 0.5 μs
-MAC compute time per Q tile (L=512, Tk=64): ~82 μs
-→ Loading is NOT the bottleneck; compute dominates by 160×
+DMA latency and MAC time are board/build dependent; do not infer a fixed ratio from payload size.
 → Ping-Pong buffer of just 2×8 KB = 16 KB is sufficient
 </pre>
 
@@ -1063,20 +1060,20 @@ for row i ∈ [0..TILE_Q-1]:
 <h4>CSR Register Map</h4>
 <table>
 <tr><th>Address</th><th>Name</th><th>Bits</th><th>Access</th><th>Description</th></tr>
-<tr><td><code>0x000</code></td><td>CTRL</td><td>[0] start, [1] soft_reset</td><td>W</td><td>Write 1 to start attention, write 2 to reset</td></tr>
-<tr><td><code>0x004</code></td><td>STATUS</td><td>[0] busy, [1] done, [2] error</td><td>R</td><td>Read accelerator status</td></tr>
+<tr><td><code>0x000</code></td><td>CTRL</td><td>[0] start, [1] clear_status</td><td>W1P</td><td>One-cycle start command; clear sticky status without resetting DMA</td></tr>
+<tr><td><code>0x004</code></td><td>STATUS</td><td>[0] ready, [1] busy, [2] done, [3] error, [4] stream_error, [5] KV req, [6] Q req</td><td>R</td><td>Control and host load-request status</td></tr>
 <tr><td><code>0x008</code></td><td>SEQ_LEN</td><td>[15:0]</td><td>R/W</td><td>Current sequence length (≤ MAX_SEQ_LEN)</td></tr>
-<tr><td><code>0x00C</code></td><td>GQA_CONFIG</td><td>[2:0] groups, [1:0] heads/group</td><td>R/W</td><td>GQA configuration</td></tr>
-<tr><td><code>0x010</code></td><td>TILE_CONFIG</td><td>[7:0] TILE_Q, [7:0] TILE_KV</td><td>R/W</td><td>Tile size override (0 = use pkg default)</td></tr>
-<tr><td><code>0x020</code></td><td>Q_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address of Q matrix</td></tr>
-<tr><td><code>0x024</code></td><td>K_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address of K matrix</td></tr>
-<tr><td><code>0x028</code></td><td>V_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address of V matrix</td></tr>
-<tr><td><code>0x02C</code></td><td>O_BASE_ADDR</td><td>[31:0]</td><td>R/W</td><td>DDR physical address for output O</td></tr>
-<tr><td><code>0x050</code></td><td>STREAM_DEST</td><td>[0] Q, [1] K, [2] V</td><td>R/W</td><td>Stream load destination select</td></tr>
-<tr><td><code>0x054</code></td><td>STREAM_LEN</td><td>[23:0]</td><td>R/W</td><td>Number of bytes to stream (write triggers DMA)</td></tr>
-<tr><td><code>0x060</code></td><td>RESULT_LEN</td><td>[23:0]</td><td>R</td><td>Bytes of output data available</td></tr>
-<tr><td><code>0x070</code></td><td>PERF_CYCLES</td><td>[31:0]</td><td>R</td><td>Performance counter: total cycles</td></tr>
-<tr><td><code>0x074</code></td><td>PERF_MAC_CYCLES</td><td>[31:0]</td><td>R</td><td>Performance counter: MAC active cycles</td></tr>
+<tr><td><code>0x00C</code></td><td>Q_POS_BASE</td><td>[15:0]</td><td>R/W</td><td>Absolute Q position base</td></tr>
+<tr><td><code>0x010</code></td><td>KV_POS_BASE</td><td>[15:0]</td><td>R/W</td><td>Absolute K/V position base</td></tr>
+<tr><td><code>0x014</code></td><td>CFG</td><td>[0] causal</td><td>R/W</td><td>Causal mask enable</td></tr>
+<tr><td><code>0x018</code></td><td>ERROR_CODE</td><td>[7:0]</td><td>R</td><td>Sticky error classification</td></tr>
+<tr><td><code>0x01C</code></td><td>LOAD_REQ</td><td>KV/Q request, bank, group/head/tile</td><td>R</td><td>Descriptor serviced by the host driver</td></tr>
+<tr><td><code>0x028</code></td><td>STREAM_LEN</td><td>[31:0]</td><td>R/W</td><td>PL-side byte checker only; PYNQ API starts DMA</td></tr>
+<tr><td><code>0x02C</code></td><td>STREAM_DEST</td><td>[1:0]</td><td>R/W</td><td>0=K, 1=V, 2=Q</td></tr>
+<tr><td><code>0x058</code></td><td>RESULT_LEN</td><td>[31:0]</td><td>R/W</td><td>Expected complete output byte length</td></tr>
+<tr><td><code>0x100</code></td><td>PERF_CYCLES</td><td>[31:0]</td><td>R</td><td>Total cycles</td></tr>
+<tr><td><code>0x108</code></td><td>PERF_MAC_CYCLES</td><td>[31:0]</td><td>R</td><td>MAC active cycles</td></tr>
+<tr><td><code>0x10C</code></td><td>PERF_STALLS</td><td>[31:0]</td><td>R</td><td>Cycles waiting for load/write completion</td></tr>
 </table>
 
 <div class="data-desc">
@@ -1103,7 +1100,6 @@ Directly reused from CIM project's <code>cim_axi_lite_slave.sv</code> (~95% code
 <table class="iface-table">
 <tr><th>Port</th><th>Dir</th><th>Width</th></tr>
 <tr><td><code>s_axis_tdata</code></td><td>in</td><td>32</td></tr>
-<tr><td><code>s_axis_tkeep</code></td><td>in</td><td>4</td></tr>
 <tr><td><code>s_axis_tlast</code></td><td>in</td><td>1</td></tr>
 <tr><td><code>s_axis_tvalid</code></td><td>in</td><td>1</td></tr>
 <tr><td><code>s_axis_tready</code></td><td>out</td><td>1</td></tr>
@@ -1118,7 +1114,6 @@ Routes data to: Q buffer, K cache, or V cache based on <code>dest</code>.</p>
 <table class="iface-table">
 <tr><th>Port</th><th>Dir</th><th>Width</th></tr>
 <tr><td><code>m_axis_tdata</code></td><td>out</td><td>32</td></tr>
-<tr><td><code>m_axis_tkeep</code></td><td>out</td><td>4</td></tr>
 <tr><td><code>m_axis_tlast</code></td><td>out</td><td>1</td></tr>
 <tr><td><code>m_axis_tvalid</code></td><td>out</td><td>1</td></tr>
 <tr><td><code>m_axis_tready</code></td><td>in</td><td>1</td></tr>
@@ -1132,10 +1127,10 @@ Packs 2×bf16 per 32-bit AXIS beat to DDR.</p>
 <div class="data-desc">
 <strong>AXI4-Stream Data Format:</strong><br>
 Each beat on the 32-bit AXIS bus carries 2 bf16 elements packed as {bf16_hi[15:0], bf16_lo[15:0]}.<br>
-<strong>K/V load burst:</strong> L×128 bf16 elements = L×128×2 bytes per head. For L=512: 128 KB per head.<br>
-At 32-bit bus width, this is 32K beats. At 15 GB/s effective DDR bandwidth: ~8.5 μs load time.<br>
-<strong>Q load:</strong> Per tile: 32×128×2B = 8 KB = 2K beats. ~0.5 μs per tile.<br>
-<strong>O writeback:</strong> Same as Q load. 8 KB per tile, ~0.5 μs.
+<strong>K/V load payload:</strong> L×128 bf16 elements = L×128×2 bytes per current head. For L=512: 128 KB per K or V slice.<br>
+At 32-bit bus width, this is 32K beats per slice. The values are payload sizes only; DMA latency depends on the board runtime.<br>
+<strong>Q load:</strong> Per tile: 32×128×2B = 8 KB = 2K beats.<br>
+<strong>O writeback:</strong> Logical tile payload is also 8 KB; partial final tiles may be zero-padded by the host driver.
 </div>
 </div>
 
@@ -1194,13 +1189,13 @@ and to provide clear interface contracts if implementation becomes feasible.
 <strong>QKV Projection Computational Analysis:</strong><br>
 <strong>Q = X @ Wq^T:</strong> [L, 4096] × [4096, 4096] = L × 4096 × 4096 MACs.<br>
 For L=512: 512 × 4096 × 4096 ≈ 8.6 GMACs.<br>
-On a 256-MAC array at 200 MHz: 8.6G / (256 × 200M) ≈ 168 ms — <strong>dominates everything.</strong><br>
+This projection is intentionally outside the PL timing/resource budget and is measured separately on the host.<br>
 K = X @ Wk^T: [L,4096] × [4096,1024] = L × 4096 × 1024 ≈ 2.1 GMACs (L=512).<br>
 V = X @ Wv^T: same ≈ 2.1 GMACs.<br>
 Total QKV projection: ~12.9 GMACs vs Attention: ~34.4M MACs (L=512, per GQA head pair).<br>
 <strong>Conclusion:</strong> QKV projection is ~375× more compute than Attention for L=512.
 It MUST stay on the host (ARM CPU or software preprocessing).
-<strong>Do not implement in FPGA for v1.0.</strong> Documented here for completeness and potential v2.0 with larger FPGA.
+<strong>Do not implement in the current PL attention bitstream.</strong> Host projection is integrated through <code>AttentionAccelerator.run_layer()</code>.
 </div>
 </div>
 
@@ -1234,8 +1229,7 @@ It MUST stay on the host (ARM CPU or software preprocessing).
 //   x_2i'   = x_2i × cos_pos - x_{2i+1} × sin_pos
 //   x_2i+1' = x_2i × sin_pos + x_{2i+1} × cos_pos
 
-ROM storage: MAX_SEQ_LEN × (head_dim/2) × 2 (cos+sin) × 2 bytes (bf16)
-           = 2048 × 64 × 2 × 2 = 512 KB
+Current implementation: vectorized host RoPE; no RoPE ROM is instantiated in the deployable PL path.
 Stored in BRAM, indexed by position.
 
 Latency: 1 cycle per pair (2 bf16 mults + 1 add/sub), 64 pairs → 64 cycles per token.
@@ -1246,7 +1240,7 @@ Can be pipelined: 4 pairs/cycle → 16 cycles per token.
 <strong>RoPE Integration Point:</strong><br>
 RoPE must be applied to Q and K <strong>after</strong> QKV projection and reshape to heads,
 but <strong>before</strong> the attention computation.<br>
-For the v1.0 implementation: RoPE can be applied on the host side (ARM CPU) before
+For the current implementation: RoPE is applied on the host side (ARM CPU) before
 writing Q and K to DDR. The FPGA attention accelerator receives pre-rotated Q and K.<br>
 Reason: RoPE is a lightweight element-wise operation (~2 MACs/element), and doing it
 on the host avoids adding a separate hardware module. If the host becomes a bottleneck,
@@ -1302,7 +1296,7 @@ the rope_engine can be inserted between DDR load and the MAC array.
 // Step 4: Inverse sqrt: 1/√mean (LUT or Newton iteration)
 // Step 5: Scale: x × inv_sqrt × γ → bf16
 
-// This is also a host-side operation for v1.0.
+// This is a host-side operation in the current deployment.
 // RMSNorm is applied before attention AND before FFN in Llama3's Pre-Norm architecture.
 </pre>
 </div>
@@ -1322,7 +1316,7 @@ the rope_engine can be inserted between DDR load and the MAC array.
 // O = Concat(all 32 head outputs) × Wo^T
 // = [L, 4096] × [4096, 4096] = L × 4096 × 4096 MACs
 // For L=512: ~8.6 GMACs — same order as Q projection.
-// Also kept on host for v1.0.
+// Also kept on the host in the current deployment.
 //
 // Weight: Wo [4096, 4096] bf16 = 32 MB.
 </pre>
@@ -1403,30 +1397,30 @@ with acceptable performance.
 <span style="color: var(--orange)">[Host ARM]</span>   → K = X_norm @ Wk^T → [512, 1024] bf16 → <span style="color: var(--accent)">DDR:K</span>
 <span style="color: var(--orange)">[Host ARM]</span>   → V = X_norm @ Wv^T → [512, 1024] bf16 → <span style="color: var(--accent)">DDR:V</span>
 <span style="color: var(--orange)">[Host ARM]</span>   → Apply RoPE to Q, K
-<span style="color: var(--orange)">[Host ARM]</span>   → Write base addresses to CSR
+<span style="color: var(--orange)">[Host ARM]</span>   → Pack head-major bf16 into PYNQ DMA buffers
 
 <span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
-║                        PHASE 1: K/V LOAD (ONCE)                               ║
+║                  PHASE 1: REQUEST-DRIVEN K/V LOAD PER GROUP                   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝</span>
 
-<span style="color: var(--orange)">[Host]</span> Write CSR_STREAM_DEST=K, CSR_STREAM_LEN=131072 → trigger DMA
-<span style="color: var(--accent)">[DDR:K]</span> → AXIS MM2S → <span style="color: var(--green)">[kv_cache_ram: K]</span>  512×128×2B = 128 KB, ~8.5 μs
-<span style="color: var(--orange)">[Host]</span> Write CSR_STREAM_DEST=V, CSR_STREAM_LEN=131072 → trigger DMA
-<span style="color: var(--accent)">[DDR:V]</span> → AXIS MM2S → <span style="color: var(--green)">[kv_cache_ram: V]</span>  512×128×2B = 128 KB, ~8.5 μs
+<span style="color: var(--orange)">[Host]</span> Read CSR_LOAD_REQ → configure DEST/LEN → call PYNQ DMA MM2S
+<span style="color: var(--accent)">[DDR:K]</span> → AXIS MM2S → <span style="color: var(--green)">[kv_cache_ram: K]</span>  L×128×2B
+<span style="color: var(--accent)">[DDR:V]</span> → AXIS MM2S → <span style="color: var(--green)">[kv_cache_ram: V]</span>  L×128×2B
+<span style="color: var(--muted)">CSR_STREAM_LEN only checks byte count; it does not trigger DMA.</span>
 
 <span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
 ║                   PHASE 2: ATTENTION DOUBLE LOOP (16 Q_tiles × 8 KV_tiles)    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝</span>
 
-<span style="color: var(--purple)">[FSM]</span> → ST_ATTN_LOOP
-<span style="color: var(--purple)">[FSM]</span>   q_tile = 0..15:                           <span style="color: var(--muted)">// outer loop</span>
+<span style="color: var(--purple)">[FSM]</span> → ST_Q_INIT / ST_KV_READ / ST_QK_DOT / ST_SOFTMAX / ST_AV_DOT
+<span style="color: var(--purple)">[FSM]</span>   group = 0..7, head = 0..3, q_tile = 0..15: <span style="color: var(--muted)">// nested traversal</span>
 
 <span style="color: var(--muted)">  // --- Q_tile Load ---</span>
 <span style="color: var(--accent)">  [DDR:Q]</span> → AXIS MM2S → <span style="color: var(--green)">[tile_buffer: Bank A]</span>  32×128×2B = 8 KB, ~0.5 μs
 
 <span style="color: var(--muted)">  // --- Softmax State Init ---</span>
-  <span style="color: var(--red)">[softmax_engine]</span> m[0..31] = -inf, l[0..31] = 0
-  <span style="color: var(--green)">[output_buffer]</span> O_acc[0..31][0..127] = 0
+  <span style="color: var(--red)">[softmax_engine]</span> m/l state covers 16 hardware rows per microtile; two microtiles form TILE_Q=32
+  <span style="color: var(--green)">[output_buffer]</span> O_acc is updated for each 16×128 microtile
 
   <span style="color: var(--purple)">[FSM]</span>   kv_tile = 0..7:                        <span style="color: var(--muted)">// inner loop</span>
 
@@ -1470,16 +1464,12 @@ with acceptable performance.
 <span style="color: var(--orange)">[Host ARM]</span> Residual: X + O → feed to next layer
 
 <span style="color: var(--muted)">╔══════════════════════════════════════════════════════════════════════════════╗
-║                            TIMING SUMMARY (L=512, 200MHz)                      ║
+║                    PERFORMANCE ACCOUNTING (no fixed estimate)                ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║ K/V load:  256 KB / 15 GB/s ≈ 17 μs            (once per GQA group, 8× total) ║
-║ Per Q tile: Q_load(0.5μs) + 8×KV_tile(~82μs) + O_write(0.5μs) ≈ 83 μs       ║
-║ Per head:   16 Q_tiles × 83 μs ≈ 1.33 ms                                      ║
-║ Per group:  4 heads × 1.33 ms ≈ 5.3 ms                                        ║
-║ All groups: 8 groups × 5.3 ms ≈ 42.5 ms                                       ║
-║ Total (1 layer): ~43 ms                                                       ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║ Without K/V URAM Cache: ~33 ms/GQA group → ~264 ms/layer → 6× slower        ║
+║ K/V payload: 256 KB per GQA group; eight groups are serviced sequentially.   ║
+║ Q/O payloads are transferred per head/tile, with zero-padding on final tiles. ║
+║ Report host projection, DMA, PL compute and stall counters separately.        ║
+║ Do not turn an assumed DDR bandwidth or module-level timing into throughput. ║
 ╚══════════════════════════════════════════════════════════════════════════════╝</span>
 </pre>
 </div>

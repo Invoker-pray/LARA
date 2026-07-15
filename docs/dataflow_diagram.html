@@ -27,6 +27,7 @@
 <body>
 
 <h1>图2：数据通路 & 控制流详图</h1>
+<div class="note"><b>当前实现边界：</b>v2.2/v2.3 为 83.333 MHz、MAX_SEQ_LEN=512 的单序列 prefill。host 完成 QKV/RoPE；一次 start 后由 driver 响应 CSR_LOAD_REQ。片上每次只缓存当前 GQA group 的 KV head，L>512 分页路径尚未实现。</div>
 <p>K/V-Stationary 数据流 · FSM 状态机 · FlashAttention 循环 · 设计方向评估</p>
 
 <!-- ==================== 数据流主图 ==================== -->
@@ -47,8 +48,8 @@ graph LR
 
     subgraph PL["FPGA PL — K/V-Stationary 数据流"]
         subgraph URAM["URAM 片上存储 (20.7 Mb)"]
-            K_CACHE["K Cache<br/>[L, 1024] bf16<br/><b>全量缓存，仅加载一次</b>"]
-            V_CACHE["V Cache<br/>[L, 1024] bf16<br/><b>全量缓存，仅加载一次</b>"]
+            K_CACHE["K Cache<br/>当前 KV head [L,128] bf16<br/><b>每 GQA group 请求一次</b>"]
+            V_CACHE["V Cache<br/>当前 KV head [L,128] bf16<br/><b>每 GQA group 请求一次</b>"]
             Q_BUF["Q Tile Buffer<br/>[2×Tq, 128] Ping-Pong<br/><b>流式，小 buffer</b>"]
             O_ACC["O Accumulator<br/>[Tq, 128] fp32"]
         end
@@ -62,9 +63,9 @@ graph LR
         end
     end
 
-    %% 第一阶段: K/V 加载 (仅一次)
-    K_DDR -->|"AXIS (一次)"| MM2S -->|"K_full"| K_CACHE
-    V_DDR -->|"AXIS (一次)"| MM2S -->|"V_full"| V_CACHE
+    %% 请求驱动的 K/V 加载：每个 GQA group 一次
+    K_DDR -->|"AXIS (KV request)"| MM2S -->|"当前 K head"| K_CACHE
+    V_DDR -->|"AXIS (KV request)"| MM2S -->|"当前 V head"| V_CACHE
 
     %% 第二阶段: Attention 循环
     Q_DDR -->|"AXIS (流式, 每tile)"| MM2S -->|"Q_tile"| Q_BUF
@@ -87,7 +88,7 @@ stateDiagram-v2
     [*] --> IDLE: 上电复位
 
     IDLE --> LOAD_KV: start=1
-    LOAD_KV --> ATTENTION_LOOP: K/V 全量加载到 URAM 完成
+    LOAD_KV --> ATTENTION_LOOP: 当前 group 的 K/V DMA 完成
 
     state ATTENTION_LOOP {
         [*] --> Q_TILE_INIT: 取下一个 Q_tile (DDR→Ping-Pong)
@@ -116,7 +117,7 @@ stateDiagram-v2
 </div>
 
 <!-- ==================== 访存模式对比 ==================== -->
-<h2>2.3 K/V Cache vs No-Cache — DDR 流量对比</h2>
+<h2>2.3 K/V Cache vs No-Cache — DDR 流量对比（单个 GQA group，L=512）</h2>
 <div class="desc">
 <table>
 <tr><th>场景</th><th>K DDR 读取</th><th>V DDR 读取</th><th>总 DDR 流量 (L=512)</th><th>URAM 用量</th></tr>
@@ -124,21 +125,21 @@ stateDiagram-v2
   <td><span class="reject">无 K/V Cache</span></td>
   <td>每个 Q tile 重读一次<br/>(L/Tq) × L × 128 × 2B</td>
   <td>每个 Q tile 重读一次<br/>(L/Tq) × L × 128 × 2B</td>
-  <td><span class="reject">~32 MB</span><br/>(K 16MB + V 16MB)</td>
+  <td><span class="reject">~16 MB</span><br/>(K 8MB + V 8MB，4 个 Q heads)</td>
   <td>0 MB</td>
 </tr>
 <tr>
-  <td><span class="adopt">K/V 全量 URAM Cache</span></td>
-  <td>仅加载一次<br/>L × 128 × 2B</td>
-  <td>仅加载一次<br/>L × 128 × 2B</td>
-  <td><span class="adopt">~256 KB</span><br/>(K 128KB + V 128KB)</td>
-  <td><span class="adopt">~2 MB</span><br/>(K 1MB + V 1MB)</td>
+  <td><span class="adopt">当前 KV head URAM Cache</span></td>
+  <td>每 GQA group 加载一次<br/>L × 128 × 2B</td>
+  <td>每 GQA group 加载一次<br/>L × 128 × 2B</td>
+  <td><span class="adopt">256 KB</span><br/>(K 128KB + V 128KB)</td>
+  <td><span class="adopt">48 URAM tiles</span><br/>(多 bank 物理实现，payload 256KB)</td>
 </tr>
 </table>
 <p>
-  <b>核心收益</b>：用 2 MB URAM 换 128× DDR 流量减少（32 MB → 256 KB）。<br/>
-  KV260 DDR 实际带宽 ~15 GB/s → 节省的 32 MB = 2.1 ms 加载时间 / 层。<br/>
-  这是整个设计中最关键的优化决策。
+  <b>核心收益</b>：一个 K/V pair 在 4 个 Q heads × 16 个 Q tiles 间复用；每 group 的 K/V host transfer 仅 256 KB。完整 8-group 事务的当前 cache 流量约 2 MB。<br/>
+  DDR 带宽与端到端 DMA 时间必须以板上实测为准；本设计当前通过 GQA group 复用减少 K/V 发送次数，而不是用固定带宽估算替代实测。<br/>
+  这是当前控制链和性能分析的关键边界。
 </p>
 </div>
 
@@ -149,12 +150,12 @@ stateDiagram-v2
 <h3>✅ 推荐采用</h3>
 <table>
 <tr><th>#</th><th>方向</th><th>原理 & 收益</th></tr>
-<tr><td class="adopt">①</td><td><b>K/V-Stationary</b></td><td>K/V 全量 URAM 缓存，消除 DDR 重读。用 2 MB URAM 换 128× 带宽节省。</td></tr>
+<tr><td class="adopt">①</td><td><b>K/V-Stationary</b></td><td>当前 KV head 在 URAM 驻留，4 个 Q heads 共享同一次 K/V DMA。</td></tr>
 <tr><td class="adopt">②</td><td><b>Q 流式加载</b></td><td>Q 只遍历一次，每 tile 从 DDR 加载后立即消费。省 512 KB URAM。</td></tr>
-<tr><td class="adopt">③</td><td><b>MAC 分时复用</b></td><td>同一阵列做 Q×K^T + A×V，省 DSP（256 vs 两套 512）。</td></tr>
+<tr><td class="adopt">③</td><td><b>MAC 分时复用</b></td><td>同一逻辑阵列做 Q×K^T + A×V；v2.2 post-route 使用 163 DSP。</td></tr>
 <tr><td class="adopt">④</td><td><b>流式数据通路</b></td><td>S_tile 和 P_tile 不写回 SRAM，MAC→Softmax→MAC 全流水直通。</td></tr>
 <tr><td class="adopt">⑤</td><td><b>QKV 投影在主机端</b></td><td>投影计算量大 (1000× Attention)，放在 ARM/软件。FPGA 只做 Attention。</td></tr>
-<tr><td class="adopt">⑥</td><td><b>自适应循环次序</b></td><td>L≤512: Q-outer 全缓存；L>512: 降级为分块加载 (论文扩展性讨论)。</td></tr>
+<tr><td class="adopt">⑥</td><td><b>GQA group 循环</b></td><td>L≤512: 当前 KV head 驻留并被 4 个 Q heads 复用；L>512: 分页/分块尚未实现。</td></tr>
 <tr><td class="adopt">⑦</td><td><b>分块计算</b></td><td>FlashAttention 基础 — 整个设计的前提。</td></tr>
 </table>
 
@@ -175,9 +176,10 @@ stateDiagram-v2
 <p>以一个 GQA 组为例（4 Q heads + 1 KV head），L=512, Tq=32, Tk=64：</p>
 
 <pre>
-<span style="color:#8b949e">// ===== 阶段 1: K/V 预加载 (启动时，仅一次) =====</span>
-<span style="color:#4ecca3">DDR → URAM:</span> K[0..511][0..127] bf16  <span style="color:#8b949e">// 128 KB, ~8.5 μs</span>
-<span style="color:#4ecca3">DDR → URAM:</span> V[0..511][0..127] bf16  <span style="color:#8b949e">// 128 KB, ~8.5 μs</span>
+<span style="color:#8b949e">// ===== 阶段 1: 当前 GQA group 的请求驱动加载 =====</span>
+<span style="color:#e8a87c">CSR_LOAD_REQ</span> → host 选择 group/head → 显式启动 K DMA 和 V DMA
+<span style="color:#4ecca3">DDR → URAM:</span> K_group[0..511][0..127] bf16  <span style="color:#8b949e">// 当前 KV head，128 KB</span>
+<span style="color:#4ecca3">DDR → URAM:</span> V_group[0..511][0..127] bf16  <span style="color:#8b949e">// 当前 KV head，128 KB</span>
 
 <span style="color:#8b949e">// ===== 阶段 2: Attention 双层循环 =====</span>
 <span style="color:#ff7b72">for</span> q_start in [0, 32, 64, ..., 480]:              <span style="color:#8b949e">// 16 次 Q tile 迭代</span>
@@ -186,7 +188,7 @@ stateDiagram-v2
     <span style="color:#e8a87c">DDR_LOAD:</span> Q[q_start:q_start+32][0..127]         <span style="color:#8b949e">// 8 KB, ~0.5 μs</span>
 
     <span style="color:#8b949e">// Online Softmax 状态初始化</span>
-    m[0..31] = -inf;  l[0..31] = 0;  O_acc = 0
+    m[0..15] = -inf;  l[0..15] = 0;  O_acc = 0  // two 16-row microtiles form TILE_Q=32
 
     <span style="color:#ff7b72">for</span> kv_start in [0, 64, 128, ..., 448]:           <span style="color:#8b949e">// 8 次 KV tile 迭代</span>
 
@@ -209,15 +211,10 @@ stateDiagram-v2
     O_tile[0..31][0..127] = bf16(O_acc[0..31][0..127] / l[0..31])
     <span style="color:#e8a87c">DDR_WRITE:</span> O_tile                                  <span style="color:#8b949e">// 8 KB, ~0.5 μs</span>
 
-<span style="color:#8b949e">// ===== 时序估算 (L=512, 200MHz) =====</span>
-<span style="color:#8b949e">// K/V 预加载:   256 KB / 15 GB/s = 17 μs             (仅一次, 可隐藏)</span>
-<span style="color:#8b949e">// 每 Q tile:    Q加载 0.5μs + 计算 8×(5.1+5.1)μs + O写回 0.5μs ≈ 82.6 μs</span>
-<span style="color:#8b949e">// 16 Q tiles:   16 × 82.6 μs ≈ 1.32 ms</span>
-<span style="color:#8b949e">// 总延迟:       ~1.34 ms / GQA组</span>
-<span style="color:#8b949e">// 8 GQA 组串行: ~10.7 ms / 层</span>
-<span style="color:#4ecca3">// ★ 关键: 如果没有 K/V URAM Cache, 每个 Q tile 都要从 DDR 重读 K/V</span>
-<span style="color:#4ecca3">//    额外 DDR 开销: 16 × (128KB+128KB) / 15GB/s ≈ 256 μs / Q tile</span>
-<span style="color:#4ecca3">//    总延迟 → ~4.1 ms / 组 → ~33 ms / 层 → 3× 变慢</span>
+<span style="color:#8b949e">// ===== 当前签收时序（post-route） =====</span>
+<span style="color:#8b949e">// 不再用固定 DDR 带宽估算签收性能；请读取 driver/Vivado counter</span>
+<span style="color:#8b949e">// 一个 group 的 K/V 传输为 256 KB，随后服务 4 个 Q heads</span>
+<span style="color:#8b949e">// group 完成后切换 cache 并发出下一次 KV_LOAD_REQ</span>
 </pre>
 </div>
 
@@ -226,7 +223,7 @@ stateDiagram-v2
 <div class="desc">
 <table>
 <tr><th>路径</th><th>数据</th><th>方向</th><th>关键点</th></tr>
-<tr><td class="path">① K/V 预加载</td><td>K [L,1024] + V [L,1024]</td><td>DDR → URAM Cache</td><td><b>仅一次</b>，Attention 循环中不再访问 DDR</td></tr>
+<tr><td class="path">① K/V 请求加载</td><td>当前 K/V head [L,128]</td><td>DDR → URAM Cache</td><td>每 GQA group 一次；同组 4 个 Q heads 复用</td></tr>
 <tr><td class="path">② Q 流式加载</td><td>Q_tile [Tq, 128] bf16</td><td>DDR → Ping-Pong Buffer</td><td>每 tile 只加载一次，立即消费</td></tr>
 <tr><td class="path">③ Q×K^T</td><td>S_tile [Tq, Tk] fp32</td><td>Q Buffer + K URAM → MAC Array</td><td><b>流式直通</b>，不写回 SRAM</td></tr>
 <tr><td class="path">④ Online Softmax</td><td>P_tile [Tq, Tk] fp32</td><td>Scale → Softmax → MAC Array</td><td>维护 m/l/O_acc 跨 tile 状态</td></tr>

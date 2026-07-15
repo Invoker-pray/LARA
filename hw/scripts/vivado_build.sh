@@ -73,6 +73,9 @@ echo " Deploy files: vivado_proj/deploy/"
 echo "   lara_attention.bit  — FPGA bitstream"
 echo "   lara_attention.hwh  — hardware handoff (for PYNQ)"
 echo "   lara_attention.xsa  — XSA export"
+if bash "${PROJECT_ROOT}/hw/scripts/package_kv260.sh"; then
+  echo "   board_bundle/       — bit/hwh/xsa + driver + smoke-test guide"
+fi
 echo ""
 echo " To program KV260:"
 echo "   scp vivado_proj/deploy/lara_attention.bit root@kv260:/lib/firmware/xilinx/"

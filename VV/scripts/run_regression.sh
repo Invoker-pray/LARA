@@ -6,34 +6,37 @@ TESTS="bf16_mac psum_accum attn_tile softmax stream kv_cache_ram output_buffer a
 SYNTH_TESTS="attn_tile_synth psum_accum_synth softmax_synth"
 XPM_TESTS="output_buffer_xpm"
 PASS=0; FAIL=0
+run_one() {
+  local tb="$1"
+  local log="/tmp/lara_regression_${tb}.log"
+  if bash "VV/scripts/run_tb_${tb}.sh" >"${log}" 2>&1; then
+    if grep -q 'ALL.*PASSED' "${log}"; then
+      echo "  PASS"
+      PASS=$((PASS+1))
+      return 0
+    fi
+  fi
+  echo "  FAIL (see ${log})"
+  tail -n 12 "${log}" || true
+  FAIL=$((FAIL+1))
+}
+
 for tb in $TESTS; do
   echo "=== $tb ==="
-  if bash VV/scripts/run_tb_${tb}.sh 2>&1 | grep -q 'ALL.*PASSED'; then
-    echo "  PASS"; PASS=$((PASS+1))
-  else
-    echo "  FAIL"; FAIL=$((FAIL+1))
-  fi
+  run_one "$tb"
 done
 
 if [ "${RUN_SYNTH_PATHS:-0}" = "1" ]; then
   for tb in $SYNTH_TESTS; do
     echo "=== $tb ==="
-    if bash VV/scripts/run_tb_${tb}.sh 2>&1 | grep -q 'ALL.*PASSED'; then
-      echo "  PASS"; PASS=$((PASS+1))
-    else
-      echo "  FAIL"; FAIL=$((FAIL+1))
-    fi
+    run_one "$tb"
   done
 fi
 
 if [ "${RUN_XPM_PATHS:-0}" = "1" ]; then
   for tb in $XPM_TESTS; do
     echo "=== $tb ==="
-    if bash VV/scripts/run_tb_${tb}.sh 2>&1 | grep -q 'ALL.*PASSED'; then
-      echo "  PASS"; PASS=$((PASS+1))
-    else
-      echo "  FAIL"; FAIL=$((FAIL+1))
-    fi
+    run_one "$tb"
   done
 fi
 echo "=========================="

@@ -1,5 +1,7 @@
 # Vivado 增量布线恢复说明
 
+> 当前状态（2026-07-15）：`checkpoint/v2.2` 和现有 `physopt.dcp` 对应 v2.2 RTL。`develop` 已开始整合新的 CSR/DMA request-service 控制链，因此这些旧 checkpoint 只能复现 v2.2，不能验证当前工作区修改。完成本轮 RTL 后必须先运行一次完整 `vivado_build.sh`，生成新的 physopt checkpoint，才能再次使用本文恢复流程。
+
 ## 1. 背景
 
 完整的 KV260 Vivado 构建包含 BD 生成、OOC 综合、顶层综合、优化、布局、物理优化、布线、时序报告和 bitstream 导出。对本项目而言，综合和布局耗时较长，而 `route_design` 完成后还需要生成正式时序/DRC 报告才能确认是否可以发布 bitstream。

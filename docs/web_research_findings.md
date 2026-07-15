@@ -48,7 +48,7 @@
 - **来源**: llama.cpp PR #12014 (JohannesGaessler, 2024)
 - **核心思想**: 同 GQA group 内, 加载的 K/V 数据被 4 个 Q head 复用, 减少 token/block
 - **收益**: RTX 3090 上 1.59× 加速 (Llama 8B)
-- **LARA 应用状态**: ✅ FSM 已有 group_cnt/head_cnt 循环，但 K/V 加载未跨 head 缓存复用
+- **LARA 应用状态**: ✅ 已通过 `CSR_LOAD_REQ` + driver request-service 实现跨 head K/V 复用；每个 group 加载一次，服务 4 个 Q heads
 - **参考**: [GitHub PR #12014](https://github.com/ggml-org/llama.cpp/pull/12014)
 
 ### 2.3 KV Cache 量化压缩
@@ -193,11 +193,11 @@
   - vLLM 将高吞吐建立在 **PagedAttention + continuous batching + chunked prefill + prefix caching** 上。
   - 仓库 README 明确把这些列为核心能力。
 - **对 LARA 的启发**:
-  - LARA 当前是单请求 / 单 tile 控制视角，更像“kernel accelerator”，还不是“serving-oriented runtime”。
+  - LARA 当前仍是单序列 prefill kernel，而不是 serving-oriented runtime；但控制已升级为一次 start 覆盖完整 group/head/tile 遍历。
   - 但其中两个思想可以直接迁移到硬件控制：
     1. **chunked prefill**：将大 prefill 分块处理，减少缓存峰值压力，适合 `L > 512` 的降级模式。
     2. **prefix reuse / KV reuse**：如果上层软件以后支持多轮对话，KV cache 不能只看“本次层内复用”，还要看“跨请求/跨步复用”。
-  - 这类优化更偏系统层，短期不如把 `kv_cache_ram` 真正做成可综合多 bank URAM 更重要。
+  - 这类优化偏系统层；当前先维持 `MAX_SEQ_LEN=512` 的可复现路径，长上下文再引入 chunked/paged fallback。
 
 ### 8.3 FlashInfer：当前工业实践已经把 prefill / decode / mixed batching 分开优化
 
@@ -226,10 +226,8 @@
   - PR 中还直接点名：**LLaMA 3 uses GQA with 4 Q per K/V**。
 - **对 LARA 的启发**:
   - 这是最贴近 Llama3.1-8B 的现实优化。
-  - LARA 当前 `attn_core.sv` 已经有 `group_cnt/head_cnt` 这层循环骨架，但：
-    - `attn_top.sv` 里还没有完整把“一个 KV head 服务 4 个 Q heads”的真实数据流走通；
-    - K/V cache 的装载与复用仍然偏占位。
-  - **这项优化优先级很高**，因为它既符合模型结构，又不会改变数值语义。
+  - LARA 当前 `attn_core.sv` 保留 `group_cnt/head_cnt` 循环，`attn_top.sv` 通过 `CSR_LOAD_REQ` 将“一个 KV head 服务 4 个 Q heads”接入真实 CSR/DMA request-service。
+  - **这项优化已实现，下一步应以板上 DMA/数值结果确认，而不是继续停留在架构假设。**
 
 ### 8.5 KV cache 压缩：更适合 Phase 2 或更大板卡，不适合现在先做
 
@@ -302,47 +300,45 @@
   - 把 online softmax 更新重写成 associative prefix scan，平行深度从串行更新压到 `O(log n)`。
 - **对 LARA 的启发**:
   - 如果后续 `softmax_engine` 真成为主瓶颈，这是最值得研究的算法级替代路线之一。
-  - 但当前 LARA 的首要问题仍然是：综合路径大量 placeholder，softmax 的 synthesis path 还没做真。
+  - 当前综合路径已进入 v2.2 routed design；ELSA 只作为 softmax 成为新瓶颈后的算法研究方向。
 
 ---
 
 ## 9. 基于代码、文档和外部调研的直接结论
 
-### 9.1 当前最该优先补齐的，不是新模块，而是“把高性能版本做实”
+### 9.1 历史 P0 审计项及当前关闭状态
 
 按优先级排序：
 
-1. **`kv_cache_ram.sv` 的真正多 bank URAM 实现**
-   - 当前 synthesis 路径仍是缩小版 placeholder。
-   - 这是所有长序列性能和可综合性的前提。
+1. **`kv_cache_ram.sv` 的真正多 bank URAM 实现：已关闭**
+   - 当前使用 8-bank XPM/URAM 组织，v2.2 post-route 使用 48 URAM tiles。
+   - 容量合同是当前 KV head、`MAX_SEQ_LEN=512`，不是 8 个 KV heads 同时驻留。
 
-2. **`softmax_engine.sv` 的完整 synthesis path**
-   - 当前综合分支仍是简化逻辑，`P` 近似直通、`correction=1.0` placeholder。
-   - 这意味着“仿真通过”不等于“上板语义正确”。
+2. **`softmax_engine.sv` 的完整 synthesis path：已关闭**
+   - LUT exp、correction、m/l state 和 partial tile 路径已进入当前综合版本。
 
-3. **`psum_accum.sv` 的完整 synthesis 累加路径**
-   - 当前综合分支是 zero / basic register 占位，不是最终实现。
+3. **`psum_accum.sv` 的完整 synthesis 累加路径：已关闭**
+   - split/reuse 累加路径已通过 VCS/综合回归。
 
-4. **`output_buffer.sv` 的 synthesis 数值路径**
-   - 当前 correction / normalize 在综合分支并没有完整落地。
+4. **`output_buffer.sv` 的 synthesis 数值路径：已关闭**
+   - correction multiply/add 已流水化，normalize、RAW hazard 和 bank drain 已进入 v2.2 routed design。
 
-5. **`attn_top.sv` 的真实 head/group/tile 数据流**
-   - 现在更像 integration skeleton，不是完整可部署 top。
+5. **`attn_top.sv` 的 head/group/tile 数据流：数据通路已关闭，板控继续验证**
+   - 32 Q heads / 8 KV groups / partial Q/KV tile traversal 已通过 full traversal；本轮继续关闭真实 CSR/DMA 板控。
 
-6. **GQA 级别的 K/V 复用做实**
-   - 这是最贴近 Llama3.1-8B 的性能点。
-   - 可以直接借鉴 llama.cpp 的实践。
+6. **GQA 级别的 K/V 复用：本轮实现**
+   - CSR_LOAD_REQ + driver 每 group 发送一次 K/V，4 个 Q heads 复用。
 
 ### 9.2 相比 `~/git/xx`，LARA 还没完全继承到的性能工程能力
 
-`xx` 已有、LARA 还不够完整的能力：
+`xx` 已有、LARA 仍需继续补齐的能力（当前 RTL/driver 已有基本闭环，板上证据仍待补齐）：
 
 - **完整 DMA 数据通路和状态机打磨**
   - `xx` 的 stream sink/source 更完整，包含 staging、一致的 commit 时序、read-back pipeline。
 
 - **软件侧的 DMA / overlap / profiling 闭环**
   - `xx/sw/cim_driver.py` 已经把 DMA load、S2MM readback、ping-pong overlap、分项 timing 做得很完整。
-  - LARA 的 `sw/attn_driver.py` 目前还是轻量原型。
+  - LARA 的 `sw/attn_driver.py` 已支持 request-service、DMA/compute/stall counter 和 workstation mock；真正的 PYNQ latency/overlap 仍需板上测量。
 
 - **批处理 / overlap 导向的 driver 设计**
   - `xx` 有明确的 ping-pong batch 推进逻辑；
@@ -354,12 +350,11 @@
 
 ### 9.3 对 LARA 最现实的性能路线
 
-**P0：先把“文档已经定义、但综合路径还是占位”的模块补齐**
-- `kv_cache_ram`
-- `softmax_engine`
-- `psum_accum`
-- `output_buffer`
-- `attn_top`
+**P0：当前改为关闭板上控制和可复现证据链**
+- CSR/AXIS request-service 控制
+- PYNQ DMA zero-input smoke
+- 预计算 Q/K/V 与 Golden Model 对比
+- board latency / DMA / stall counter 记录
 
 **P1：在不改变模型语义前提下做性能增强**
 - GQA 跨 4 个 Q heads 的 K/V 复用
@@ -378,3 +373,50 @@
 > **把 K/V cache、softmax、psum、output 的综合版本做真**，再把  
 > **GQA 复用 + overlap** 做完整。  
 > 这两类工作带来的收益，大概率会比立即引入近似 softmax 或 KV 压缩更稳、更可控。
+
+---
+
+## 10. 2026-07-15 赛题复核与本轮采用的优化
+
+### 10.1 官方赛题事实（重新核对）
+
+- **官方页面**：[FPT'26 Design Competition](https://fpt2026.uark.edu/fpt26-design-competition/)。页面明确将 Track B 定义为 FPGA attention acceleration，目标为 Llama3-8B 或参数一致模型。
+- Track B 要求支持 **bf16**，并允许选择带 AI Core 或不带 AI Core 的配置；当前 LARA 选择“不带 AI Core”的 KV260 配置，目标是尽量减少 DSP/LUT/FF。
+- 官方评价维度是 **performance、hardware architecture optimizations、scalability**，因此只证明功能正确不够，还需要报告资源、时序、DMA/板上吞吐和可扩展边界。
+- 官方提交要求包括 IEEE 双栏两页以内技术论文（可附录）、最多 5 分钟板上演示；本地 `docs/Track-B-Submission-Guidelines.docx` 还要求 Vivado/Vitis 2025.2、可复现源码、FPGA 工程和 testbench。
+
+当前设计与硬性要求的对应关系：
+
+| 要求 | 当前状态 | 证据/边界 |
+|---|---|---|
+| Llama3-8B 参数一致 | 符合 | 32 Q heads、8 KV heads、head dim 128、GQA 4:1 |
+| bf16 | 符合 | bf16 MAC、host bf16 packing、AXIS 两个 bf16/beat |
+| Attention 在 FPGA | 符合 | QK、online softmax、AV、O accumulation 在 PL |
+| QKV projection 是否必须上板 | 不要求 | 架构文档将其定义为 host-side boundary；本轮补齐自动化 host→DMA→FPGA 流程 |
+| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.2 post-route 163 DSP、87235 LUT、57306 FF |
+| performance/scalability | 部分完成 | 83.333 MHz 已收敛；当前单序列 prefill、`MAX_SEQ_LEN=512`，decode/batching 尚未承诺 |
+
+早期 HTML 文档中的“≥200 MHz”“256 DSP”等是架构估算或历史目标，不是当前签收结果。论文和演示应使用 Vivado post-route 报告中的 83.333 MHz、资源和实测板上数据。
+
+### 10.2 外部方案的可追溯结论
+
+1. **FlashAttention-2**：论文摘要明确指出减少 non-matmul FLOPs、沿 sequence 并行和重新划分 work partition；来源：[arXiv:2307.08691](https://arxiv.org/abs/2307.08691)。LARA 对应采用 online softmax、K/V on-chip reuse、Q/K/V tile overlap，而不是照搬 GPU warp 实现。
+2. **llama.cpp GQA 实践**：已合并的 [PR #12014](https://github.com/ggml-org/llama.cpp/pull/12014) 明确写出 GQA 时跨多个 Q head 复用已加载 K/V，并指出 LLaMA 3 使用 4 个 Q 对 1 个 K/V。LARA 本轮将这一点从“文档建议”落实为 driver 请求服务：每个 KV group 只发送一次 K/V，服务 4 个 Q heads。
+3. **KV cache/long-context 系统**：PagedAttention、FlashInfer、FlightLLM 等方案都把 KV cache 的分页、复用和 memory hierarchy 当作核心；但它们通常面向 decode、batch 或更大平台。KV260 当前优先关闭真实 URAM/BRAM 容量和事务正确性，不在 bf16 基线尚未板上验证前引入 KV 压缩或稀疏误差。
+
+### 10.3 本轮实现的优化
+
+- **GQA-aware DMA**：硬件通过 `CSR_LOAD_REQ` 暴露 KV/Q load request；driver 按 group/head/tile 描述符响应。K/V 从每 Q head 重复加载变为每 GQA group 加载一次，理论 K/V 传输次数降低 4×。
+- **固定 Q tile padding**：最后不足 32 行的 Q tile 在 host 侧补零，硬件仍使用 `active_q_rows` 屏蔽无效行，避免 tile buffer 写计数跨 tile 错位。
+- **单次 start、请求驱动**：取消同学分支中与当前单 bank KV cache 不匹配的 full-run 全量 K/V preload；一次 start 覆盖完整 group/head/tile 遍历，软件只服务硬件请求。
+- **AXI 控制可靠性**：AW/W 地址和数据独立锁存，start 改为 W1P；status/error/done sticky；`0x100` performance CSR 不再与 `CTRL` 别名。
+- **AXIS 事务边界**：sink 每个 DMA transfer 独立清零计数并锁存 destination，等高 halfword 真正写入后才发 done；source 限制 pending beat 不能被新 halfword 覆盖。
+- **Host bf16/RoPE**：driver 使用 IEEE bf16 RNE packing，不把 float16 内存布局误当 bf16；host RoPE 改为向量化实现并支持 Q/K position base。
+
+### 10.4 下一步优化优先级
+
+1. **P0：完成真实板上控制链签收**：CSR/AXIS VCS test、零输入 smoke、预计算 Q/K/V 对 Golden Model，记录 DMA byte count、stall cycles 和端到端 latency。
+2. **P1：双缓冲事务重叠**：保留当前单 KV cache，继续让下一 Q tile 在当前 tile 计算/写回时填入空闲 Q bank；若要 KV double-buffer，需要重新评估 URAM（当前 48/64 tiles）。
+3. **P1：提高 softmax/psum 的真实综合效率**：先以 post-route critical path 为依据，再评估 base-2 Softermax；近似方案必须增加 bf16 误差回归，不能只看 LUT/频率。
+4. **P2：长上下文扩展**：将 512 上限拆成 chunked prefill 或分页 KV cache；这属于 scalability 加分项，不应破坏当前 Llama3.1 bf16 基线。
+5. **P2：性能模型和板上 benchmark**：分离 host projection、DMA K/V、DMA Q、PL compute、DMA O 时间，报告 tokens/s、有效 MAC 利用率和 bytes/token。

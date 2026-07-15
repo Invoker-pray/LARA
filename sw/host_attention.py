@@ -102,31 +102,29 @@ def reshape_to_heads(
 def apply_rope_host(
     vec: np.ndarray,       # [L, head_dim] bf16
     theta_base: float = 10000.0,
-    head_dim: int = HEAD_DIM
+    head_dim: int = HEAD_DIM,
+    position_base: int = 0,
 ) -> np.ndarray:
     """
     Apply Rotary Position Embedding to Q or K on the host.
     For v1.0, this can run on either host or FPGA (rope_engine.sv).
     """
+    if vec.ndim != 2 or vec.shape[1] != head_dim:
+        raise ValueError(f"RoPE input must have shape [L, {head_dim}], got {vec.shape}")
     L = vec.shape[0]
     vec_fp32 = vec.astype(np.float32)
     n_pairs = head_dim // 2
-
-    theta = np.array(
-        [theta_base ** (-2.0 * d / head_dim) for d in range(n_pairs)],
-        dtype=np.float32
-    )
-
-    for pos in range(L):
-        phase = pos * theta
-        cos_vals = np.cos(phase)
-        sin_vals = np.sin(phase)
-        for d in range(n_pairs):
-            a, b = vec_fp32[pos, 2*d], vec_fp32[pos, 2*d+1]
-            vec_fp32[pos, 2*d]   = a * cos_vals[d] - b * sin_vals[d]
-            vec_fp32[pos, 2*d+1] = a * sin_vals[d] + b * cos_vals[d]
-
-    return fp32_to_bf16(vec_fp32.astype(np.float32))
+    theta = theta_base ** (-2.0 * np.arange(n_pairs, dtype=np.float32) / head_dim)
+    positions = np.arange(position_base, position_base + L, dtype=np.float32)
+    phase = positions[:, None] * theta[None, :]
+    cos_vals = np.cos(phase)
+    sin_vals = np.sin(phase)
+    pairs = vec_fp32.reshape(L, n_pairs, 2)
+    even = pairs[:, :, 0].copy()
+    odd = pairs[:, :, 1].copy()
+    pairs[:, :, 0] = even * cos_vals - odd * sin_vals
+    pairs[:, :, 1] = even * sin_vals + odd * cos_vals
+    return fp32_to_bf16(vec_fp32)
 
 
 # ============================================================================

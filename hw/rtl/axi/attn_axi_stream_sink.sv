@@ -1,114 +1,108 @@
 // ============================================================================
-// attn_axi_stream_sink.sv — AXI4-Stream Data Receiver (DDR→PL)
+// attn_axi_stream_sink.sv - AXI4-Stream DMA input unpacker
 // ============================================================================
-// Receives packed 32-bit AXIS beats, each containing 2 bf16 values:
-//   bits[15:0]  = elem0
-//   bits[31:16] = elem1
-//
-// The module converts each accepted AXIS beat into two scalar bf16 output beats
-// on successive cycles. This preserves every input element and keeps the rest of
-// the datapath scalar, which matches tile_buffer/kv_cache_ram write interfaces.
-//
-// cfg_len is counted in BYTES of the AXIS input stream, not scalar output bytes.
-// done/overflow/underflow therefore track the external DMA transfer contract.
-// ============================================================================
+// One AXIS beat contains {bf16_hi, bf16_lo}. A transfer completion is pulsed
+// only after the buffered high half has been delivered to the selected memory.
+// This makes K/V/Q request completion unambiguous to the top-level controller.
 
 module attn_axi_stream_sink
   import attn_pkg::*;
 (
     input  logic        clk,
     input  logic        rst_n,
-
-    // --- AXIS Slave ---
     input  logic [31:0] s_axis_tdata,
     input  logic        s_axis_tvalid,
     output logic        s_axis_tready,
     input  logic        s_axis_tlast,
-
-    // --- Configuration (from CSR) ---
     input  logic [1:0]  cfg_dest,
-    input  logic [31:0] cfg_len,       // bytes expected on AXIS input
+    input  logic [31:0] cfg_len,
     input  logic [3:0]  cfg_burst,
-
-    // --- Scalar bf16 output ---
     output logic        data_valid,
     output logic [15:0] data_out,
     output logic        data_last,
     output logic [1:0]  dest_sel,
-
-    // --- Status ---
     output logic [31:0] bytes_received,
     output logic        overflow,
     output logic        underflow,
     output logic        done
 );
-
-  logic        hold_hi_valid;
-  logic [15:0] hold_hi_data;
-  logic        hold_hi_last;
-  logic [1:0]  hold_dest;
+  logic have_hi;
+  logic [15:0] hi_buf;
+  logic hi_last;
+  logic [1:0] xfer_dest;
+  logic [31:0] xfer_len;
   logic [31:0] byte_cnt;
+  logic in_xfer;
   (* keep = "true" *) logic unused_cfg_burst;
 
-  assign unused_cfg_burst = &{1'b0, |cfg_burst};
+  wire [1:0] accepted_dest = in_xfer ? xfer_dest : cfg_dest;
+  wire [31:0] accepted_len = in_xfer ? xfer_len : cfg_len;
+  wire dest_valid = (accepted_dest == STREAM_TO_K_CACHE) ||
+                    (accepted_dest == STREAM_TO_V_CACHE) ||
+                    (accepted_dest == STREAM_TO_Q_BUF);
+  wire [31:0] next_byte_cnt = in_xfer ? byte_cnt + 32'd4 : 32'd4;
 
-  // Accept a new AXIS beat only when the second half buffer is empty.
-  assign s_axis_tready = !hold_hi_valid;
+  assign unused_cfg_burst = &{1'b0, |cfg_burst};
+  // Keep draining a malformed transfer through TLAST so AXI DMA cannot wedge.
+  assign s_axis_tready = !have_hi;
+  assign bytes_received = byte_cnt;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      hold_hi_valid <= 1'b0;
-      hold_hi_data  <= 16'd0;
-      hold_hi_last  <= 1'b0;
-      hold_dest     <= 2'd0;
-      data_valid    <= 1'b0;
-      data_out      <= 16'd0;
-      data_last     <= 1'b0;
-      dest_sel      <= 2'd0;
-      byte_cnt      <= 32'd0;
-      overflow      <= 1'b0;
-      underflow     <= 1'b0;
-      done          <= 1'b0;
+      have_hi    <= 1'b0;
+      hi_buf     <= 16'd0;
+      hi_last    <= 1'b0;
+      xfer_dest  <= STREAM_TO_K_CACHE;
+      xfer_len   <= 32'd0;
+      byte_cnt   <= 32'd0;
+      in_xfer    <= 1'b0;
+      data_valid <= 1'b0;
+      data_out   <= 16'd0;
+      data_last  <= 1'b0;
+      dest_sel   <= STREAM_TO_K_CACHE;
+      overflow   <= 1'b0;
+      underflow  <= 1'b0;
+      done       <= 1'b0;
     end else begin
       data_valid <= 1'b0;
       data_last  <= 1'b0;
+      done       <= 1'b0;
 
-      // Drain second half first when present.
-      if (hold_hi_valid) begin
-        data_valid    <= 1'b1;
-        data_out      <= hold_hi_data;
-        data_last     <= hold_hi_last;
-        dest_sel      <= hold_dest;
-        hold_hi_valid <= 1'b0;
-      end
+      if (have_hi) begin
+        data_valid <= 1'b1;
+        data_out   <= hi_buf;
+        data_last  <= hi_last;
+        dest_sel   <= xfer_dest;
+        have_hi    <= 1'b0;
+        if (hi_last) begin
+          done    <= 1'b1;
+          in_xfer <= 1'b0;
+          if (byte_cnt < xfer_len)
+            underflow <= 1'b1;
+        end
+      end else if (s_axis_tvalid && s_axis_tready) begin
+        if (!in_xfer) begin
+          byte_cnt  <= 32'd0;
+          overflow  <= 1'b0;
+          underflow <= 1'b0;
+          xfer_dest <= cfg_dest;
+          xfer_len  <= cfg_len;
+          in_xfer   <= 1'b1;
+        end
 
-      // Accept a new AXIS beat when possible. Low half is emitted immediately,
-      // high half is buffered for the next cycle.
-      if (s_axis_tvalid && s_axis_tready) begin
-        data_valid    <= 1'b1;
-        data_out      <= s_axis_tdata[15:0];
-        data_last     <= 1'b0;
-        dest_sel      <= cfg_dest;
+        data_valid <= 1'b1;
+        data_out   <= s_axis_tdata[15:0];
+        data_last  <= 1'b0;
+        dest_sel   <= in_xfer ? xfer_dest : cfg_dest;
+        hi_buf     <= s_axis_tdata[31:16];
+        hi_last    <= s_axis_tlast;
+        have_hi    <= 1'b1;
+        byte_cnt   <= next_byte_cnt;
 
-        hold_hi_valid <= 1'b1;
-        hold_hi_data  <= s_axis_tdata[31:16];
-        hold_hi_last  <= s_axis_tlast;
-        hold_dest     <= cfg_dest;
-
-        byte_cnt <= byte_cnt + 32'd4;
-
-        if (byte_cnt >= cfg_len && !s_axis_tlast)
+        if (!dest_valid || next_byte_cnt > accepted_len ||
+            (next_byte_cnt == accepted_len && !s_axis_tlast))
           overflow <= 1'b1;
-        if (s_axis_tlast && (byte_cnt + 32'd4 < cfg_len))
-          underflow <= 1'b1;
-        if (s_axis_tlast)
-          done <= 1'b1;
-        else if (byte_cnt == 32'd0)
-          done <= 1'b0;
       end
     end
   end
-
-  assign bytes_received = byte_cnt;
-
 endmodule
