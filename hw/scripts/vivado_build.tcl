@@ -36,11 +36,11 @@ set rtl [list \
 ]
 add_files -norecurse ${rtl}
 add_files -norecurse [list \
-    VV/data/exp_lut.hex \
-    VV/data/recip_lut.hex \
-    VV/data/rope_theta.hex \
-    VV/data/rope_sincos_sin.hex \
-    VV/data/rope_sincos_cos.hex \
+    ${HW_DIR}/data/exp_lut.hex \
+    ${HW_DIR}/data/recip_lut.hex \
+    ${HW_DIR}/data/rope_theta.hex \
+    ${HW_DIR}/data/rope_sincos_sin.hex \
+    ${HW_DIR}/data/rope_sincos_cos.hex \
 ]
 add_files -fileset constrs_1 -norecurse ${HW_DIR}/constraints/attn_soc.xdc
 add_files -fileset utils_1 -norecurse ${HW_DIR}/scripts/pre_bitstream.tcl
