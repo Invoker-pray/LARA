@@ -1,12 +1,14 @@
 # Track B 赛题对齐审计
 
-审计日期：2026-07-15
+审计日期：2026-07-17
 
 ## 1. 依据
 
 - 官方赛题页面：[FPT'26 Design Competition](https://fpt2026.uark.edu/fpt26-design-competition/)
 - 本地提交指南：[Track-B-Submission-Guidelines.docx](Track-B-Submission-Guidelines.docx)
 - 外部调研与来源：[web_research_findings.md](web_research_findings.md)
+
+2026-07-17 重新核对官方页面：Track B 明确要求面向 Llama3-8B（或参数一致模型）的 FPGA attention acceleration，支持 bf16，并强调 customized dataflow、fine-grained parallelism、hardware-aware optimization；评价维度为 performance、hardware architecture optimizations 和 scalability。当前设计满足这些硬性边界，QKV projection 保持 host-side 是系统分工选择，不是赛题偏离。
 
 官方 Track B 的关键要求是：面向 Llama3-8B 或参数一致模型的 FPGA attention acceleration，支持 bf16；设计需要体现 customized dataflow、fine-grained parallelism 和 hardware-aware optimization；评价关注 performance、hardware architecture optimizations 和 scalability。
 
