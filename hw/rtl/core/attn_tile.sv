@@ -155,9 +155,14 @@ module attn_tile
   logic [31:0] block_acc_bits [TILE_ROWS][TILE_COLS];
   logic [31:0] active_sum_bits [TILE_ROWS][PHASE_COLS];
   logic [31:0] col_reduce [PHASE_COLS];
-  logic [1:0]  split_phase_r;
-  logic        clear_accum_r;
-  logic        accum_en_r;
+  // Keep a local copy of the phase/control bits for each MAC row.  The
+  // original single registers drove every reduction and accumulator bit,
+  // creating a very high-fanout route from the MAC control plane to the
+  // output buffer.  These copies update on the same edge, so the module's
+  // visible latency and arithmetic contract are unchanged.
+  (* keep = "true" *) logic [1:0] split_phase_row_r [TILE_ROWS];
+  (* keep = "true" *) logic       clear_accum_row_r [TILE_ROWS];
+  (* keep = "true" *) logic       accum_en_row_r    [TILE_ROWS];
 
   generate
     for (sr = 0; sr < TILE_ROWS; sr++) begin : SYN_ROW
@@ -176,30 +181,28 @@ module attn_tile
 
   always_comb begin
     int rr, cc, pc;
-    int phase_offset;
     logic [31:0] acc_base;
     logic [31:0] acc_sum;
-
-    phase_offset = 0;
-    phase_offset = 0;
-    if ((TILE_SPLIT_FACTOR > 1) && (split_phase_r == 2'd1))
-      phase_offset = PHASE_COLS;
 
     // One physical adder per active PE. The split phase selects which half of
     // the 16-column accumulator state is read and written.
     for (rr = 0; rr < TILE_ROWS; rr++) begin
       for (pc = 0; pc < PHASE_COLS; pc++) begin
-        acc_base = clear_accum_r ? 32'd0 : block_acc_bits[rr][pc + phase_offset];
-        active_sum_bits[rr][pc] = accum_en_r
+        acc_base = clear_accum_row_r[rr]
+                 ? 32'd0
+                 : block_acc_bits[rr][pc + ((TILE_SPLIT_FACTOR > 1 &&
+                    split_phase_row_r[rr] == 2'd1) ? PHASE_COLS : 0)];
+        active_sum_bits[rr][pc] = accum_en_row_r[rr]
                                 ? fp32_add(acc_base, pe_prod_r[rr][pc])
                                 : acc_base;
       end
     end
 
     for (cc = 0; cc < PHASE_COLS; cc++) begin
-      acc_sum = accum_en_r ? pe_prod_r[0][cc] : 32'd0;
+      acc_sum = accum_en_row_r[0] ? pe_prod_r[0][cc] : 32'd0;
       for (rr = 1; rr < TILE_ROWS; rr++) begin
-        acc_sum = fp32_add(acc_sum, accum_en_r ? pe_prod_r[rr][cc] : 32'd0);
+        acc_sum = fp32_add(acc_sum,
+                           accum_en_row_r[rr] ? pe_prod_r[rr][cc] : 32'd0);
       end
       col_reduce[cc] = acc_sum;
     end
@@ -209,9 +212,10 @@ module attn_tile
       if (TILE_SPLIT_FACTOR <= 1) begin
         if (cc < PHASE_COLS)
           col_out[cc] = col_reduce[cc];
-      end else if ((split_phase_r == 2'd0) && (cc < PHASE_COLS)) begin
+      end else if ((split_phase_row_r[0] == 2'd0) && (cc < PHASE_COLS)) begin
         col_out[cc] = col_reduce[cc];
-      end else if ((split_phase_r == 2'd1) && (cc >= PHASE_COLS) && (cc < (2 * PHASE_COLS))) begin
+      end else if ((split_phase_row_r[0] == 2'd1) &&
+                   (cc >= PHASE_COLS) && (cc < (2 * PHASE_COLS))) begin
         col_out[cc] = col_reduce[cc - PHASE_COLS];
       end
     end
@@ -223,11 +227,12 @@ module attn_tile
         // block_acc_bits holds the completed previous transaction.
         if (cc < PHASE_COLS && TILE_SPLIT_FACTOR <= 1)
           block_out[rr][cc] = active_sum_bits[rr][cc];
-        else if ((split_phase_r == 2'd0) && (cc < PHASE_COLS))
+        else if ((split_phase_row_r[rr] == 2'd0) && (cc < PHASE_COLS))
           block_out[rr][cc] = active_sum_bits[rr][cc];
-        else if ((split_phase_r == 2'd1) && (cc >= PHASE_COLS) && (cc < 2 * PHASE_COLS))
+        else if ((split_phase_row_r[rr] == 2'd1) &&
+                 (cc >= PHASE_COLS) && (cc < 2 * PHASE_COLS))
           block_out[rr][cc] = active_sum_bits[rr][cc - PHASE_COLS];
-        else if (clear_accum_r)
+        else if (clear_accum_row_r[rr])
           block_out[rr][cc] = 32'd0;
         else
           block_out[rr][cc] = block_acc_bits[rr][cc];
@@ -238,16 +243,20 @@ module attn_tile
   integer pr, pc;
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      split_phase_r <= 2'd0;
-      clear_accum_r <= 1'b0;
-      accum_en_r    <= 1'b0;
+      for (pr = 0; pr < TILE_ROWS; pr = pr + 1) begin
+        split_phase_row_r[pr] <= 2'd0;
+        clear_accum_row_r[pr] <= 1'b0;
+        accum_en_row_r[pr]    <= 1'b0;
+      end
       for (pr = 0; pr < TILE_ROWS; pr = pr + 1)
         for (pc = 0; pc < PHASE_COLS; pc = pc + 1)
           pe_prod_r[pr][pc] <= 32'd0;
     end else begin
-      split_phase_r <= split_phase;
-      clear_accum_r <= clear_accum;
-      accum_en_r    <= accum_en;
+      for (pr = 0; pr < TILE_ROWS; pr = pr + 1) begin
+        split_phase_row_r[pr] <= split_phase;
+        clear_accum_row_r[pr] <= clear_accum;
+        accum_en_row_r[pr]    <= accum_en;
+      end
       for (pr = 0; pr < TILE_ROWS; pr = pr + 1)
         for (pc = 0; pc < PHASE_COLS; pc = pc + 1)
           pe_prod_r[pr][pc] <= pe_prod[pr][pc];
@@ -261,18 +270,18 @@ module attn_tile
         for (ac = 0; ac < TILE_COLS; ac++)
           block_acc_bits[ar][ac] <= 32'd0;
     end else begin
-      if (clear_accum_r) begin
+      if (clear_accum_row_r[0]) begin
         for (ar = 0; ar < TILE_ROWS; ar++)
           for (ac = 0; ac < TILE_COLS; ac++)
             block_acc_bits[ar][ac] <= 32'd0;
       end
 
-      if (accum_en_r) begin
+      if (accum_en_row_r[0]) begin
         for (ar = 0; ar < TILE_ROWS; ar++) begin
           for (ac = 0; ac < PHASE_COLS; ac++) begin
-            if ((TILE_SPLIT_FACTOR <= 1) || (split_phase_r == 2'd0))
+            if ((TILE_SPLIT_FACTOR <= 1) || (split_phase_row_r[ar] == 2'd0))
               block_acc_bits[ar][ac] <= active_sum_bits[ar][ac];
-            else if (split_phase_r == 2'd1)
+            else if (split_phase_row_r[ar] == 2'd1)
               block_acc_bits[ar][ac + PHASE_COLS] <= active_sum_bits[ar][ac];
           end
         end

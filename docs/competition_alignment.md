@@ -1,6 +1,6 @@
 # Track B 赛题对齐审计
 
-审计日期：2026-07-17
+审计日期：2026-07-18
 
 ## 1. 依据
 
@@ -23,7 +23,7 @@
 | 细粒度并行 | 16×16 逻辑阵列、8-bank KV、tile/subtile 调度 | `attn_tile.sv`、`kv_cache_ram.sv`、`attn_core.sv` | 已实现 |
 | 硬件感知优化 | C4/DSP pipeline、P_STORE distributed RAM、Explore route、GQA K/V reuse | v2.2 reports、`web_research_findings.md` | 已实现 |
 | 无 AI Core 配置 | KV260 PL-only，不依赖 AI Engine | `hw/scripts/vivado_build.tcl` | 已对齐 |
-| 性能证据 | 83.333 MHz post-route，WNS `+0.049 ns`、WHS `+0.011 ns`；driver 记录 DMA/compute/stall counter | `vivado_proj/reports`、board guide | 时序已完成，板上待测 |
+| 性能证据 | 83.333 MHz post-route，v2.5 Phase 1 Explore WNS `+0.062 ns`、WHS `+0.010 ns`；driver 记录 DMA/compute/stall counter | `vivado_proj/reports`、board guide | 时序已完成，板上待测 |
 | scalability | 当前单序列 prefill，MAX_SEQ_LEN=512 | `attn_pkg.sv`、board guide | 明确边界，长上下文待后续 |
 
 ## 3. Host/FPGA 分工是否偏离赛题
@@ -56,3 +56,18 @@ FPGA: QK^T -> online softmax -> P×V -> output normalization
 3. 资源、83.333 MHz timing/DRC、端到端 tokens/s 和 stall counter 的可复现报告。
 4. 对 `MAX_SEQ_LEN=512` 的边界、partial Q/KV tile、causal mask 和 GQA group 切换测试。
 5. 5 分钟以内板上演示视频和两页以内技术论文主文。
+
+## 6. v2.5 Phase 1 timing evidence
+
+- The clean RTL build keeps the Track B host/FPGA boundary and exact bf16 semantics
+  unchanged. `split_phase`, `accum_en`, and `clear_accum` are copied into one
+  register bank per MAC row; all copies update on the same edge, so no protocol
+  latency is added.
+- Default route from this clean build was intentionally rejected at WNS `-0.585 ns`.
+  Explore routing from the matching physopt checkpoint produced WNS `+0.062 ns`,
+  WHS `+0.010 ns`, zero TNS/THS, 144592/144592 fully routed nets, and zero DRC
+  errors. The post-route critical path moved to the softmax row-index/max path,
+  showing that the previous MAC-control fanout was no longer dominant.
+- The timing gain costs resources: 95267 LUT, 57838 FF, 50 BRAM, 48 URAM, and
+  165 DSP. This is a signed-off optimization build, not a claim of higher
+  throughput until board latency is measured.

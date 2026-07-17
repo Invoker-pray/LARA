@@ -155,3 +155,32 @@
 - 修正 Python golden model 的 `MAX_SEQ_LEN` 合同漂移：从早期 `2048` 改为当前部署上限 `512`，不改变已有小尺寸结果。
 - Phase 0 基线保持 v2.4：WNS `+0.049 ns`、WHS `+0.011 ns`、88065 LUT、57718 FF、50 BRAM、48 URAM、165 DSP，147793/147793 routable nets fully routed，DRC errors `0`。
 - Python golden `7/7`、driver unittest `5/5`、benchmark matrix、脚本语法和 `git diff --check` 通过；VCS 仍需可用 Synopsys license server。
+
+## 2026-07-18
+
+### v2.5 Phase 1 — MAC 控制扇出收敛与 clean-build Explore 签核
+
+- 针对 v2.4 critical path 的 MAC 控制扇出，在 `attn_tile.sv` 中将 `split_phase`、
+  `accum_en` 和 `clear_accum` 复制到每个 MAC 行的本地寄存器；所有副本同一时钟沿
+  更新，不改变 tile、AXI、causal 或 GQA 时序协议。`KEEP` 属性保留局部复制意图，
+  Vivado physical synthesis 进一步完成 329 个控制复制单元。
+- 物理-only DCP 实验的 Explore route 达到 WNS `+0.103 ns`，但没有改变 netlist，
+  因而只作为参考；随后从该 RTL 的 clean build 重新综合、布局、物理优化并从匹配
+  `attn_soc_wrapper_physopt.dcp` 恢复 Explore，得到可复现的签核结果。
+- 默认 route 按门禁拒绝：WNS `-0.585 ns`、WHS `+0.010 ns`。Explore post-route：
+  WNS `+0.062 ns`、WHS `+0.010 ns`、TNS/THS `0`；187523 个 timing endpoints，
+  144592/144592 routable nets fully routed，DRC errors `0`。
+- 资源：95267 LUT、57838 FF、50 BRAM（34 RAMB36 + 32 RAMB18）、48 URAM、165 DSP。
+  相比 v2.4 增加约 7202 LUT 和 120 FF；关键 setup path 已从 MAC split-phase 路径
+  转移到 softmax `sm_row_idx -> sm_row_max`，下一阶段应优先处理 softmax 控制/归约，
+  不再盲目扩大 MAC 阵列。
+- 测试：Python golden `7/7`、driver unittest `5/5`、attn_tile Verilator lint、
+  Python compile、shell syntax、`git diff --check` 通过。VCS 定向回归因 Synopsys
+  license server 不可连接而未执行，未将 license 错误计为 RTL 失败。
+- v2.5 Phase 1 部署产物 SHA-256：
+  - `lara_attention.bit`: `3f67775c779ff432d86b47f96a9acd2d014a2c50c334bf28ec9f781e0f8c7248`
+  - `lara_attention.hwh`: `9314cb7495468339de887d29d748f22b297af3f609be25d13e2ab7e3d1f2df75`
+  - `lara_attention.xsa`: `3ca3e85016d4c9a13005b94fc85167d9d7483e0100efee859225e22f03bef43d`
+- bitstream、Vivado 工程、报告和仿真生成物继续由 `.gitignore` 排除；`develop` 保留
+  优化 RTL、分析脚本和验证环境，`master` 只同步可部署 RTL、约束、构建/签核脚本及
+  版本记录。该结果只证明时序收敛，不代表已完成 KV260 实板吞吐测试。
