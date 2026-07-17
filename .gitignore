@@ -67,6 +67,8 @@ vivado_project/
 .hw/
 .ip_user_files/
 *.cache/
+*_CongestedCLBsAndNets.txt
+checkpoint/
 
 
 # ============================================================================
