@@ -2,7 +2,7 @@
 
 ## FPT'26 Design Competition — 完整准备路线图
 
-> 状态说明（2026-07-15）：本文主体是项目启动阶段的学习/规划材料，不代表当前实现状态。当前部署上限为 `MAX_SEQ_LEN=512`，v2.3 已在 KV260 83.333 MHz 完成 post-route 时序收敛（WNS `+0.021 ns`），资源为 163 DSP、87372 LUT、57219 FF、50 BRAM、48 URAM。当前 P0 已转为 CSR/DMA 软硬件协同、真实板上数值验证和端到端性能测量；文中的 200 MHz、2048 长度及早期资源数字只能作为探索目标。
+> 状态说明（2026-07-17）：本文主体是项目启动阶段的学习/规划材料，不代表当前实现状态。当前部署上限为 `MAX_SEQ_LEN=512`，v2.4 已在 KV260 83.333 MHz 完成 post-route 时序收敛（WNS `+0.049 ns`，WHS `+0.011 ns`），资源为 165 DSP、88065 LUT、57718 FF、50 BRAM、48 URAM。当前 P0 已转为 CSR/DMA 软硬件协同、真实板上数值验证和端到端性能测量；文中的 200 MHz、2048 长度及早期资源数字只能作为探索目标。
 
 ---
 
@@ -177,7 +177,7 @@ typedef ap_fixed<16, 8> bf16_custom;  // 16-bit, 8-bit 整数部分
 
 ### Layer 3: FPGA 数据流架构设计
 
-参考 **SWAT (DAC 2024)** 的行优先数据流——这是目前最清晰的 FPGA attention 加速器设计范式：
+参考 **SWAT（sparse sliding-window attention，arXiv:2405.17025）** 的窗口化数据流。它是稀疏滑动窗口 attention 研究，不是 LARA 当前 dense、causal baseline 的直接性能基线；这里仅借鉴窗口调度和片上复用的思路：
 
 ```
                     ┌────────── Q Buffer ──────────┐
@@ -213,7 +213,7 @@ Stage 3: SV+DIV   ──  与 V 乘加 + 行求和 + 归一化
 |------|-----------|---------|------|
 | DSP48E2 | 1,248 | ~800-1000 | 512 给矩阵乘法阵列 + 余量给 softmax |
 | BRAM | 5.1 Mb | 50 tiles（v2.2） | Q/输出缓冲、LUT 和辅助存储 |
-| URAM | 20.7 Mb | 48 tiles（v2.3） | 当前 GQA group 的 K/V cache |
+| URAM | 20.7 Mb | 48 tiles（v2.4） | 当前 GQA group 的 K/V cache |
 | LUT | 117,120 | 87,235（v2.2） | bf16 控制逻辑、exp 查表、地址生成 |
 | FF | 234,240 | 57,306（v2.2） | 流水线寄存器 |
 | DDR4 | 4 GB | 按需 | 模型权重 + 输入/输出 |
@@ -480,7 +480,7 @@ for (int i = 0; i < N; i += B_r) {
 |--------|------|------|
 | **Online softmax 的状态管理** | ⭐⭐⭐⭐⭐ | m/l/O 三个状态的更新逻辑是数据流中最复杂的部分，必须确保流水线不阻塞 |
 | **bf16 乘累加的精度验证** | ⭐⭐⭐⭐ | HLS C 仿真输出与 Python 参考对比，查精度损失源头 |
-| **DDR4 带宽优化** | ⭐⭐⭐⭐ | KV260 DDR4 理论带宽 ~19.2 GB/s，必须用 burst transfer + 双缓冲；SWAT 用输入驻留策略达到了 100% 的片外传输效率 |
+| **DDR4 带宽优化** | ⭐⭐⭐⭐ | KV260 DDR4 理论带宽 ~19.2 GB/s，必须用 burst transfer + 双缓冲；SWAT 的窗口化复用可作为稀疏访问参考，但其带宽数字不能直接套用到 LARA dense 路径 |
 | **多 head 并行调度** | ⭐⭐⭐ | GQA 下 Q-head / KV-head 的映射和复用调度 |
 | **RoPE 实现** | ⭐⭐⭐ | 在 QK^T 之前对 Q/K 施加旋转变换，用 CORDIC 或查表 |
 | **资源利用率拉满** | ⭐⭐⭐ | DSP/BRAM/LUT 的平衡——用了太多 DSP 则 LUT 不够做控制，反之亦然 |
@@ -510,7 +510,7 @@ for (int i = 0; i < N; i += B_r) {
 |------|-----------|
 | [FlashAttention (NeurIPS 2022)](https://arxiv.org/abs/2205.14135) | 分块 + online softmax 的原始论文，算法基础 |
 | [FlashAttention-2 (2023)](https://arxiv.org/abs/2307.08691) | 改进的并行策略和缩放技巧 |
-| [SWAT (DAC 2024)](https://arxiv.org/abs/2405.17025) | **最重要的参考**——完整的 FPGA attention 加速器，数据流、HLS pragma、资源数据都有 |
+| [SWAT (sparse sliding-window attention)](https://arxiv.org/abs/2405.17025) | 稀疏窗口调度和片上复用的参考；不作为 LARA dense attention 的直接性能基线 |
 | [Persistent-State Dataflow (2025)](https://arxiv.org/abs/2603.05931) | 另一种 FPGA attention 数据流范式 |
 | [Llama 3 技术报告](https://arxiv.org/abs/2407.21783) | GQA、RoPE 等 Llama3 特有结构的权威描述 |
 
@@ -592,7 +592,7 @@ DDR4 ─── DMA ─────→│  K/V Buffer A    │←───→│ 
                     └─────────────────┘     └─────────────────┘
 ```
 
-这是 SWAT 论文 "输入驻留 (input stationary)" 策略的物理实现——K/V 数据驻留在 BRAM 中，Q 逐行流过。你毕设里已经完整实现过这套 ping-pong 机制。
+这是将 SWAT 的窗口化/片上复用思想映射到 LARA 的一种候选实现。SWAT 面向稀疏滑动窗口，不能直接把论文中的数据流或吞吐数字当作当前 dense attention 的结论；LARA 的实际边界仍以 RTL、Vivado 和板上测量为准。
 
 **关键差异**：毕设的缓冲区切换是**层间**的（FC1 OBUF → FC2 IBUF）；Track B 的缓冲区切换是 **tile 间**的（K/V block j → block j+1），但物理实现是一样的。
 

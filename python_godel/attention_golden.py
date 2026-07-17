@@ -505,6 +505,14 @@ def test_exp_lut_accuracy():
     rel_err = np.abs((approx - exact) / exact)
     max_rel_err = np.max(rel_err)
     assert max_rel_err < 0.001, f"EXP LUT max relative error {max_rel_err:.6f} > 0.1%"
+
+    boundary = np.array([-9.0, -8.0001, -8.0, -7.9999, 0.0, 0.0001], dtype=np.float32)
+    boundary_out = exp_lut_lookup(boundary, lut)
+    assert np.array_equal(boundary_out[:2], np.zeros(2, dtype=np.float32))
+    assert boundary_out[2] > 0.0
+    assert boundary_out[3] > 0.0
+    assert boundary_out[4] == np.float32(1.0)
+    assert boundary_out[5] == np.float32(1.0)
     return True
 
 

@@ -190,7 +190,7 @@ package attn_pkg;
   // --- Data Stream Control (0x020–0x04F) ---
   localparam logic [13:0] CSR_STREAM_SRC      = 14'h020;  // DDR source address [31:0] for next stream
   localparam logic [13:0] CSR_STREAM_SRC_HI   = 14'h024;  // DDR source address [63:32] (reserved for 64-bit)
-  localparam logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Stream length in bytes. Write triggers DMA start.
+  localparam logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Endpoint length in bytes; software starts AXI DMA separately
   localparam logic [13:0] CSR_STREAM_DEST     = 14'h02C;  // Stream destination select: 0=K_CACHE, 1=V_CACHE, 2=Q_BUF
 
   // --- Result Stream Control (0x050–0x07F) ---

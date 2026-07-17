@@ -167,8 +167,45 @@ module tb_softmax;
       end
     end
 
+    // Directed truncation contract: after max subtraction, values below -8
+    // must contribute exactly zero rather than being clamped to exp(-8).
+    tick();
+    active_rows = 5'd1;
+    active_cols = 5'd2;
+    for (ri = 0; ri < TILE_ROWS; ri++)
+      for (ci = 0; ci < TILE_COLS; ci++)
+        s_data[ri][ci] = 32'd0;
+    s_data[0][1] = 32'hC300_0000; // -128 / sqrt(128) < -8
+    s_valid = 1'b1;
+    kv_tile_first = 1'b1;
+    kv_tile_last = 1'b1;
+    tick();
+    s_valid = 1'b0;
+    kv_tile_first = 1'b0;
+    kv_tile_last = 1'b0;
+
+    wait_cycles = 0;
+    while ((p_valid !== 1'b1) && (wait_cycles < 2000)) begin
+      tick();
+      wait_cycles++;
+    end
+    settle();
+    if (p_valid !== 1'b1) begin
+      $display("FAIL softmax boundary timeout after %0d cycles", wait_cycles);
+      err++;
+    end else begin
+      if (p_data[0][0] != 32'h3F80_0000) begin
+        $display("FAIL exp(0) boundary: got=%h exp=3f800000", p_data[0][0]);
+        err++;
+      end
+      if (p_data[0][1] != 32'h0000_0000) begin
+        $display("FAIL exp(x<-8) boundary: got=%h exp=00000000", p_data[0][1]);
+        err++;
+      end
+    end
+
     if (err == 0)
-      $display("ALL %0d CHECKS PASSED", TILE_ROWS * (3 + TILE_COLS));
+      $display("ALL %0d CHECKS PASSED", TILE_ROWS * (3 + TILE_COLS) + 2);
     else
       $display("%0d ERRORS", err);
     $finish;

@@ -1,6 +1,6 @@
 # Vivado 增量布线恢复说明
 
-> 当前状态（2026-07-15）：`checkpoint/v2.3` 和 `vivado_proj/lara_attention.runs/impl_1/attn_soc_wrapper_routed.dcp` 对应 v2.3 RTL，Explore 恢复后已签收 WNS +0.021 ns / WHS +0.011 ns。`checkpoint/v2.2` 仅作为旧版本复现参考；任何后续 RTL 修改都必须重新生成 physopt checkpoint 后才能使用恢复脚本。
+> 当前状态（2026-07-17）：`checkpoint/v2.4` 和 `vivado_proj/lara_attention.runs/impl_1/attn_soc_wrapper_routed.dcp` 对应当前 develop RTL，Explore 恢复后已签收 WNS +0.049 ns / WHS +0.011 ns。默认 route 曾得到 WNS -0.671 ns，未生成 bitstream；只有恢复脚本的最终 signoff 通过后才发布 v2.4 产物。旧 checkpoint 仅作为对应版本的复现参考；任何后续 RTL 修改都必须重新生成 physopt checkpoint 后才能使用恢复脚本。
 
 ## 1. 背景
 

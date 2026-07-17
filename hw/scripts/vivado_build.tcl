@@ -66,6 +66,7 @@ connect_bd_net [get_bd_pins ps8/pl_resetn0] [get_bd_pins rst_gen/ext_reset_in]
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma
 set_property -dict [list CONFIG.c_include_sg {0} CONFIG.c_include_s2mm {1} \
+    CONFIG.c_sg_length_width {26} \
     CONFIG.c_m_axis_mm2s_tdata_width {32} CONFIG.c_s_axis_s2mm_tdata_width {32} \
     CONFIG.c_mm2s_burst_size {16}] [get_bd_cells axi_dma]
 

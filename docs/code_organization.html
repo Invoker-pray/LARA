@@ -126,7 +126,7 @@
   Competition: FPT'26 Track B — "Llama3-8B or models with consistent parameters"
 </p>
 <div class="note"><strong>Current implementation snapshot (2026-07-15):</strong>
-v2.3 closes post-route timing at 83.333 MHz with WNS +0.021 ns, WHS +0.011 ns, 163 DSP, 87372 LUT, 57219 FF, 50 BRAM and 48 URAM. MAX_SEQ_LEN is 512. The host performs RMSNorm/QKV/RoPE; one FPGA start then uses CSR_LOAD_REQ to load one KV head per GQA group and one padded Q tile per request. Older 200 MHz, 256-DSP and MAX_SEQ_LEN=2048 values below are historical architecture estimates, not signoff results.</div>
+v2.4 closes post-route timing at 83.333 MHz with WNS +0.049 ns, WHS +0.011 ns, 165 DSP, 88065 LUT, 57718 FF, 50 BRAM and 48 URAM. MAX_SEQ_LEN is 512. The host performs RMSNorm/QKV/RoPE; one FPGA start then uses CSR_LOAD_REQ to load one KV head per GQA group and one padded Q tile per request. Older 200 MHz, 256-DSP and MAX_SEQ_LEN=2048 values below are historical architecture estimates, not signoff results.</div>
 
 <!-- ================================================================ -->
 <!-- LEGEND -->
@@ -457,7 +457,7 @@ for accumulating up to 2^(23-7) = 65536 bf16 products without rounding error.<br
 <h4>Interface</h4>
 <table class="iface-table">
 <tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
-<tr><td><code>clk</code></td><td>in</td><td>1</td><td>PS PL0 clock; v2.3 post-route constraint 83.333 MHz</td></tr>
+<tr><td><code>clk</code></td><td>in</td><td>1</td><td>PS PL0 clock; v2.4 post-route constraint 83.333 MHz</td></tr>
 <tr><td><code>rst_n</code></td><td>in</td><td>1</td><td>Asynchronous reset, active-low</td></tr>
 <tr><td><code>a_bf16</code></td><td>in</td><td>16</td><td>Operand A in bf16 format {sign, exp[7:0], mant[6:0]}</td></tr>
 <tr><td><code>b_bf16</code></td><td>in</td><td>16</td><td>Operand B in bf16 format</td></tr>
@@ -598,7 +598,7 @@ Feeds into psum_accum for further reduction and the softmax_engine for exp/max/s
 
 <div class="note">
 <strong>Time Multiplexing Rationale:</strong> Using one 16×16 array for both Q×K^T and P×V
-saves a second physical MAC array. The current split/reuse implementation routes with 163 DSPs. The array is idle during Softmax computation,
+saves a second physical MAC array. The current split/reuse implementation routes with 165 DSPs. The array is idle during Softmax computation,
 which takes ~O(Tk) cycles. For Tk=64, the idle time is acceptable (pipeline bubble).
 If Softmax latency becomes the bottleneck, double-buffering the MAC array inputs can help.
 </div>
@@ -1536,7 +1536,7 @@ LARA/
 <strong>Document Version:</strong> 1.0 — 2026-07-07<br>
 <strong>Competition:</strong> FPT'26 Track B — "Llama3-8B or models with consistent parameters"<br>
 <strong>Target Platform:</strong> Kria KV260 (Zynq UltraScale+, Without AI Cores)<br>
-<strong>Key References:</strong> FlashAttention (Dao et al., 2022), SWAT (DAC 2024),
+<strong>Key References:</strong> FlashAttention (Dao et al., 2022), SWAT (sparse sliding-window attention),
 FSA/SystolicAttention (EPFL, 2025), FLASH-D (2025), H-FA (2025)
 </div>
 

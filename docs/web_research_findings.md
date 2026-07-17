@@ -7,12 +7,12 @@
 
 ## 1. Softmax 近似优化
 
-### 1.1 Softermax: Base-2 Softmax (NVIDIA 2023)
-- **来源**: Stevens et al., "Softermax: Hardware/Software Co-Design of an Efficient Softmax for Transformers", DAC 2023
+### 1.1 Softermax: Base-2 Softmax (DAC 2021)
+- **来源**: Stevens et al., "Softermax: Hardware/Software Co-Design of an Efficient Softmax for Transformers", DAC 2021; preprint: <https://arxiv.org/abs/2103.09301>
 - **核心思想**: 将 `eˣ` 替换为 `2ˣ`，correction factor `exp(m_old - m_new)` 变为移位操作，消除 EXP LUT
 - **收益**: 2.35× 能效, 0.90× 面积
 - **LARA 应用状态**: ⬜ 未实现 — 当前使用 1024-entry EXP LUT + 线性插值
-- **实现难度**: 低 — 替换 `exp_lookup()` 函数 + `$bitstoshortreal` 移位操作
+- **实现难度**: 中 — 需要重定义缩放/归一化路径并同步更新 Python golden model；不能用 `$bitstoshortreal` 作为可综合实现
 - **备注**: 精度需 Python golden model 验证，对 bf16 的 3 位十进制精度可能足够
 
 ### 1.2 SafeSoftmax 输入范围裁剪
@@ -38,7 +38,7 @@
 ## 2. KV Cache 优化
 
 ### 2.1 PD-Swap: KV260 动态部分重配置
-- **来源**: Zhang et al. (UC Irvine), "PD-Swap: Prefill-Decode Logic Swapping for End-to-End LLM Inference on Edge FPGAs", arXiv:2512.11550, 2024
+- **来源**: Zhang et al. (UC Irvine), "PD-Swap: Prefill-Decode Logic Swapping for End-to-End LLM Inference on Edge FPGAs", arXiv:2512.11550, 2025
 - **核心思想**: Prefill 和 Decode 使用不同的硬件加速器，通过动态部分重配置 (DPR) 在毫秒级切换
 - **收益**: KV260 上 27 tokens/s, 1.3-2.1× 高于静态加速器
 - **LARA 应用状态**: ⬜ 未实现 — DPR 需要 Vivado 特殊流程
@@ -62,7 +62,7 @@
 ## 3. FlashAttention 架构优化
 
 ### 3.1 FlatAttention: Tile-Based Many-PE Dataflow
-- **来源**: Li et al., "FlatAttention", ISVLSI 2025
+- **来源**: Li et al., "FlatAttention", ISVLSI 2025 / follow-up preprint 2026
 - **核心思想**: Tile-based systolic array, 89.3% MAC 利用率
 - **LARA 应用状态**: ⬜ 当前是单 MAC 阵列分时复用，利用率较低
 
@@ -149,7 +149,7 @@
 ### P1 — 性能关键
 | 优化 | 参考 | 收益 |
 |------|------|------|
-| Softermax (eˣ→2ˣ) | NVIDIA DAC 2023 | 省 BRAM, 消除 EXP LUT 插值误差 |
+| Softermax (eˣ→2ˣ) | DAC 2021 | 省 BRAM, 消除 EXP LUT 插值误差；必须先完成精度回归 |
 | C4 流水线 L→M→ACC 三段 | xx C4 pipeline | 100→125MHz |
 | 16×32 MAC 参数化 | mac_array_analysis.html | 2× MAC 吞吐 |
 
@@ -311,7 +311,7 @@
 按优先级排序：
 
 1. **`kv_cache_ram.sv` 的真正多 bank URAM 实现：已关闭**
-   - 当前使用 8-bank XPM/URAM 组织，v2.3 post-route 使用 48 URAM tiles。
+   - 当前使用 8-bank XPM/URAM 组织，v2.4 post-route 使用 48 URAM tiles。
    - 容量合同是当前 KV head、`MAX_SEQ_LEN=512`，不是 8 个 KV heads 同时驻留。
 
 2. **`softmax_engine.sv` 的完整 synthesis path：已关闭**
@@ -393,7 +393,7 @@
 | bf16 | 符合 | bf16 MAC、host bf16 packing、AXIS 两个 bf16/beat |
 | Attention 在 FPGA | 符合 | QK、online softmax、AV、O accumulation 在 PL |
 | QKV projection 是否必须上板 | 不要求 | 架构文档将其定义为 host-side boundary；本轮补齐自动化 host→DMA→FPGA 流程 |
-| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.3 post-route 163 DSP、87372 LUT、57219 FF |
+| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.4 post-route 165 DSP、88065 LUT、57718 FF |
 | performance/scalability | 部分完成 | 83.333 MHz 已收敛；当前单序列 prefill、`MAX_SEQ_LEN=512`，decode/batching 尚未承诺 |
 
 早期 HTML 文档中的“≥200 MHz”“256 DSP”等是架构估算或历史目标，不是当前签收结果。论文和演示应使用 Vivado post-route 报告中的 83.333 MHz、资源和实测板上数据。

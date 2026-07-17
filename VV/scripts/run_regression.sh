@@ -41,4 +41,9 @@ if [ "${RUN_XPM_PATHS:-0}" = "1" ]; then
 fi
 echo "=========================="
 echo "Passed: $PASS / $((PASS+FAIL))"
-[ $FAIL -eq 0 ] && echo "ALL TESTS PASSED" || echo "SOME TESTS FAILED"
+if [ "$FAIL" -eq 0 ]; then
+  echo "ALL TESTS PASSED"
+else
+  echo "SOME TESTS FAILED"
+  exit 1
+fi

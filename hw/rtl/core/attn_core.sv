@@ -81,6 +81,7 @@ module attn_core
   logic [2:0]  group_cnt;
   logic [7:0]  n_q_tiles, n_kv_tiles;
   logic [7:0]  q_tile_last_idx, kv_tile_last_idx;
+  logic [7:0]  kv_tile_limit_idx;
   logic        kv_prefetch_issued;
   logic        q_load_inflight;
   logic        q_prefetch_next_tile;
@@ -105,6 +106,9 @@ module attn_core
   always_comb begin
     logic [15:0] q_tile_base_u;
     logic [15:0] kv_tile_base_u;
+    logic [16:0] q_end_abs_u;
+    logic [16:0] kv_delta_u;
+    logic [7:0]  causal_tile_idx_u;
     logic [4:0]  q_remainder;
     logic [5:0]  kv_remainder;
 
@@ -127,6 +131,24 @@ module attn_core
     active_kv = ((kv_tile_idx == kv_tile_last_idx) && (kv_remainder != 6'd0))
                 ? {1'b0, kv_remainder}
                 : 7'(TILE_KV);
+
+    // Causal attention never needs a KV tile whose first token is beyond the
+    // last active Q token. Keep the diagonal tile even when it is only partly
+    // valid; softmax_engine performs the element-level future-token mask there.
+    // If q_end is before kv_pos_base, retain tile 0 so the transaction still
+    // produces a well-defined all-masked/zero output.
+    q_end_abs_u = {1'b0, q_pos_start} + ((active_q == 6'd0) ? 17'd0 : active_q - 6'd1);
+    causal_tile_idx_u = 8'd0;
+    if (q_end_abs_u >= {1'b0, kv_pos_base_r}) begin
+      kv_delta_u = q_end_abs_u - {1'b0, kv_pos_base_r};
+      // TILE_KV is fixed at 64 in the deployed geometry, so use a shift
+      // rather than inferring a general divider in the controller path.
+      causal_tile_idx_u = 8'(kv_delta_u[16:6]);
+    end
+    if (causal_r && (causal_tile_idx_u < kv_tile_last_idx))
+      kv_tile_limit_idx = causal_tile_idx_u;
+    else
+      kv_tile_limit_idx = kv_tile_last_idx;
   end
 
   // Output position + active rows/cols
@@ -285,7 +307,7 @@ module attn_core
             // Prefetch next Q tile: q_load_start fires during NORMALIZE+WRITE_O
           end
           if (mac_done) begin
-            if (kv_tile_idx < kv_tile_last_idx)
+            if (kv_tile_idx < kv_tile_limit_idx)
               kv_tile_idx <= kv_tile_idx + 8'd1;
           end
         end
@@ -293,10 +315,12 @@ module attn_core
           if (o_write_done) begin
             if (q_tile_idx < q_tile_last_idx) begin
               q_tile_idx <= q_tile_idx + 8'd1;
+              kv_tile_idx <= 8'd0;
               buf_sel    <= ~buf_sel;   // toggle Q ping-pong bank
               o_bank_sel <= ~o_bank_sel; // toggle O_acc bank
             end else begin
               q_tile_idx <= 8'd0;
+              kv_tile_idx <= 8'd0;
               if (head_cnt < LAST_Q_HEAD) begin
                 head_cnt <= head_cnt + 2'd1;
               end else begin
@@ -339,7 +363,7 @@ module attn_core
       ST_QK_DOT:   if (mac_done)        next_state = ST_SOFTMAX;
       ST_SOFTMAX:  if (softmax_done)    next_state = ST_AV_DOT;
       ST_AV_DOT:   if (mac_done) begin
-        if (kv_tile_idx < kv_tile_last_idx) next_state = ST_KV_READ;
+        if (kv_tile_idx < kv_tile_limit_idx) next_state = ST_KV_READ;
         else                              next_state = ST_NORMALIZE;
       end
       ST_NORMALIZE:                     next_state = ST_WRITE_O;
@@ -388,19 +412,19 @@ module attn_core
       ST_KV_READ: begin
         mac_start     = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
       end
       ST_QK_DOT: begin
         mac_phase     = 1'b0;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
         if (q_prefetch_next_tile)
           q_load_start = !q_load_inflight;
       end
       ST_SOFTMAX: begin
         softmax_start = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
         if (q_prefetch_next_tile)
           q_load_start = !q_load_inflight;
         if (q_prefetch_head_or_group_early)
@@ -409,7 +433,7 @@ module attn_core
       ST_AV_DOT: begin
         mac_phase     = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
-        kv_tile_last  = (kv_tile_idx == kv_tile_last_idx);
+        kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
         if (q_prefetch_next_tile)
           q_load_start = !q_load_inflight;
         if (q_prefetch_head_or_group_early)

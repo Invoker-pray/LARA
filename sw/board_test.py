@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ def main() -> int:
     parser.add_argument("--bitstream", required=True, help="path to lara_attention.bit; matching .hwh must be beside it")
     parser.add_argument("--seq-len", type=int, help="sequence length; inferred from --npz when omitted")
     parser.add_argument("--npz", help="optional NPZ containing q_heads, k_heads and v_heads as bf16 uint16 arrays")
+    parser.add_argument("--profile-json", help="optional path for the structured run profile")
     args = parser.parse_args()
 
     if args.npz:
@@ -49,6 +51,12 @@ def main() -> int:
     print(f"  sequence length: {args.seq_len}")
     print(f"  perf: {accel.read_perf()}")
     print(f"  output words: {out.size}")
+    if accel.last_profile is not None:
+        print(json.dumps(accel.last_profile.to_dict(), indent=2))
+        if args.profile_json:
+            accel.save_last_profile(args.profile_json)
+            print(f"  profile: {Path(args.profile_json).resolve()}")
+    accel.close()
     return 0
 
 

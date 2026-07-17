@@ -3,10 +3,11 @@
 module tb_attn_top_loop_control;
   import attn_pkg::*;
 
-  localparam int TEST_SEQ = 64;
+  localparam int TEST_SEQ = 512;
   localparam int EXPECT_GROUPS = N_KV_HEADS;
   localparam int EXPECT_HEADS = N_Q_HEADS;
   localparam int EXPECT_Q_LOADS = EXPECT_HEADS * ((TEST_SEQ + TILE_Q - 1) / TILE_Q);
+  localparam int EXPECT_QK_PAIRS = 72 * EXPECT_HEADS;
 
   logic clk, rst_n;
   logic [13:0] s_axi_awaddr, s_axi_araddr;
@@ -35,6 +36,8 @@ module tb_attn_top_loop_control;
   bit saw_head_switch_prefetch_norm;
   bit saw_group_switch_prefetch_norm;
   bit seen_all_groups;
+  int qk_pair_count;
+  logic qk_state_d;
   logic kv_load_start_d, q_load_start_d, group_advance_d;
   logic tick_marker;
 
@@ -85,6 +88,7 @@ module tb_attn_top_loop_control;
       kv_load_start_d <= dut.kv_load_start;
       q_load_start_d <= dut.q_load_start;
       group_advance_d <= dut.group_advance;
+      qk_state_d <= (dut.u_fsm.state == ST_QK_DOT);
     end
   end
 
@@ -96,6 +100,10 @@ module tb_attn_top_loop_control;
         q_load_pulses++;
       if (dut.group_advance && !group_advance_d)
         group_advance_pulses++;
+      if ((dut.u_fsm.state == ST_QK_DOT) && !qk_state_d)
+        begin
+          qk_pair_count++;
+        end
 
       if ((dut.q_load_start && !q_load_start_d) &&
           (dut.u_fsm.state == ST_QK_DOT)) begin
@@ -194,6 +202,7 @@ module tb_attn_top_loop_control;
     saw_head_switch_prefetch_norm = 1'b0;
     saw_group_switch_prefetch_norm = 1'b0;
     seen_all_groups = 1'b0;
+    qk_pair_count = 0;
     tick_marker = 1'b0;
 
     #20 rst_n = 1'b1;
@@ -234,6 +243,10 @@ module tb_attn_top_loop_control;
       $display("FAIL group_advance_pulses=%0d exp=%0d", group_advance_pulses, EXPECT_GROUPS - 1);
       err++;
     end
+    if (qk_pair_count != EXPECT_QK_PAIRS) begin
+      $display("FAIL causal QK tile pairs=%0d exp=%0d", qk_pair_count, EXPECT_QK_PAIRS);
+      err++;
+    end
     if (!(saw_overlap_prefetch || saw_overlap_prefetch_softmax)) begin
       $display("FAIL did not observe overlap prefetch in ST_QK_DOT/ST_SOFTMAX/ST_AV_DOT");
       err++;
@@ -266,7 +279,7 @@ module tb_attn_top_loop_control;
   end
 
   initial begin
-    #1_000_000 tick_marker = ~tick_marker;
+    #5_000_000 tick_marker = ~tick_marker;
     $display("FAIL timeout waiting for attn_top loop control completion");
     $fatal(1);
   end
