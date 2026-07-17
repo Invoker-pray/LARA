@@ -40,7 +40,7 @@ FPGA: QK^T -> online softmax -> P×V -> output normalization
 ## 4. 不应再作为当前结论的旧内容
 
 - `200 MHz`、`≥200 MHz`：早期模块/架构目标；当前可发布结论是 83.333 MHz post-route。
-- `256 DSP`：16×16 逻辑 PE 数，不是物理 DSP 用量；当前 v2.4 post-route 为 165 DSP。
+- `256 DSP`：16×16 逻辑 PE 数，不是物理 DSP 用量；当前 v2.5 Phase 1 post-route 为 165 DSP。
 - `MAX_SEQ_LEN=2048`：早期参数草案；当前实现和构建合同为 512。
 - “8 个 KV heads 全量同时驻留 URAM”：当前片上 cache 只承载当前 KV head/group，GQA group 切换时由 host driver 重载。
 - “写 `CSR_STREAM_LEN` 触发 DMA”：当前 DMA 必须由 PYNQ send/recv channel 显式启动。

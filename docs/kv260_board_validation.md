@@ -1,6 +1,6 @@
 # KV260 上板与板上验证指南
 
-本指南对应当前 `develop` 的 v2.4 控制链：宿主机负责 RMSNorm、QKV projection 和可选 RoPE，KV260 PL 负责 bf16 FlashAttention。当前硬件使用 16×16 MAC、8 个 KV cache bank、32 行 Q tile 双缓冲，单次事务的最大序列长度为 512。
+本指南对应当前 `develop` 的 v2.5 Phase 1 控制链：宿主机负责 RMSNorm、QKV projection 和可选 RoPE，KV260 PL 负责 bf16 FlashAttention。当前硬件使用 16×16 MAC、8 个 KV cache bank、32 行 Q tile 双缓冲，单次事务的最大序列长度为 512。
 
 ## 1. 交付物
 
@@ -41,7 +41,7 @@ bash hw/scripts/package_kv260.sh
 sha256sum vivado_proj/board_bundle/lara_attention.{bit,hwh,xsa}
 ```
 
-当前 v2.4 签核结果为 post-route WNS `+0.049 ns`、WHS `+0.011 ns`、TNS/THS `0`、DRC errors `0`；对应报告和哈希已放入 `vivado_proj/board_bundle/`。本轮默认 route 的 WNS 为 `-0.671 ns`，由 `vivado_resume_route.tcl` 从同一轮 physopt checkpoint 以 `route_design -directive Explore` 重布线后通过门禁。后续重构建仍应以新一轮报告为准，不要把旧 checkpoint 的 slack 当成新 bitstream 的签核证据。
+当前 v2.5 Phase 1 签核结果为 post-route WNS `+0.062 ns`、WHS `+0.010 ns`、TNS/THS `0`、DRC errors `0`；对应报告位于 `vivado_proj/reports/`，部署文件位于 `vivado_proj/deploy/`。本轮默认 route 的 WNS 为 `-0.585 ns`，由 `vivado_resume_route.tcl` 从同一轮 physopt checkpoint 以 `route_design -directive Explore` 重布线后通过门禁。后续重构建仍应以新一轮报告为准，不要把旧 checkpoint 的 slack 当成新 bitstream 的签核证据。
 
 ## 3. 拷贝到板卡
 

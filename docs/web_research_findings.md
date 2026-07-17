@@ -393,7 +393,7 @@
 | bf16 | 符合 | bf16 MAC、host bf16 packing、AXIS 两个 bf16/beat |
 | Attention 在 FPGA | 符合 | QK、online softmax、AV、O accumulation 在 PL |
 | QKV projection 是否必须上板 | 不要求 | 架构文档将其定义为 host-side boundary；本轮补齐自动化 host→DMA→FPGA 流程 |
-| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.4 post-route 165 DSP、88065 LUT、57718 FF |
+| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.5 Phase 1 post-route 165 DSP、95267 LUT、57838 FF |
 | performance/scalability | 部分完成 | 83.333 MHz 已收敛；当前单序列 prefill、`MAX_SEQ_LEN=512`，decode/batching 尚未承诺 |
 
 早期 HTML 文档中的“≥200 MHz”“256 DSP”等是架构估算或历史目标，不是当前签收结果。论文和演示应使用 Vivado post-route 报告中的 83.333 MHz、资源和实测板上数据。
