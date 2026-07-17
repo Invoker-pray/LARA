@@ -236,7 +236,7 @@ LARA 当前应遵循“CSR 配置 endpoint，软件显式启动 DMA”的描述�
 
 ## 7. 学习时最容易犯的错误
 
-- 把 `256` 个逻辑 PE 当成 `256` 个实际 DSP；当前 routed design 实际使用 163 DSP。
+- 把 `256` 个逻辑 PE 当成 `256` 个实际 DSP；当前 v2.4 routed design 实际使用 165 DSP。
 - 把历史 200 MHz、`MAX_SEQ_LEN=2048` 当成当前签收结果；当前 post-route 基线是 83.333 MHz、`MAX_SEQ_LEN=512`。
 - 看到 LUT/BRAM 余量就直接扩大 MAC；关键路径和布线拥塞可能先失败。
 - 用 false path/multicycle path 掩盖真实 setup violation。
