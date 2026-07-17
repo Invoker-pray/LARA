@@ -47,7 +47,7 @@ FP32_W      = 32
 PSUM_W      = 32
 
 # Algorithm Parameters (§4) — Llama3.1-8B
-MAX_SEQ_LEN   = 2048
+MAX_SEQ_LEN   = 512
 HEAD_DIM      = 128
 N_Q_HEADS     = 32
 N_KV_HEADS    = 8
