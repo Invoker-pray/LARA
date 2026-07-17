@@ -129,3 +129,21 @@
 - 生成并校验 `vivado_proj/deploy/{lara_attention.bit,lara_attention.hwh,lara_attention.xsa}`，同步归档到 `checkpoint/v2.3`；board bundle 另含 post-route timing/route/utilization/DRC 报告。
 - v2.3 部署产物 SHA-256：bit `b720f04cb928b6b3d60805fb39f8c3a3f9727e704d4796017da42ff0dad67547`，hwh `e54091fbbd342cf8769f2def1b3146c6380896d37e2d8c692f57d60ad450330a`，xsa `7444bc69a0f69c8c7c6f9c42e96a1449a07883d4813c43789552a7cf9cf926ed`。
 - 上述部署产物与 Vivado 工程仍由 `.gitignore` 排除；`develop` 追踪控制软件、仿真和板测工具，`master` 追踪可独立构建的 RTL、约束、脚本及版本记录。
+
+## 2026-07-17
+
+### v2.4 — 控制链回归、语义修正与 Explore 物理收敛
+
+- 统一 RTL、Python golden model 和 softmax testbench 的边界语义：`x < -8 -> 0`、`-8 <= x <= 0 -> EXP LUT`、`x > 0 -> 1`。
+- 为 `AXI DMA` 固定 `C_SG_LENGTH_WIDTH=26`，覆盖 `L=512` 最大输出传输；driver 增加可复用 DMA buffer、request-service profiling、bitstream SHA-256 和 git 元数据。
+- 完成 causal KV tile 上界 early-exit，并修复 Q tile/head/group 切换时 `kv_tile_idx` 未复位的问题；回归覆盖 `L=512` 的 tile traversal。
+- 新增 FPGA attention 学习路径文档，并修正调研资料中 Softermax（DAC 2021）、PD-Swap（2025）和 SWAT（sparse sliding-window attention）的过时描述。
+- 新一轮完整 Vivado 默认 route 得到 WNS `-0.671 ns`，按门禁阻止 bitstream；随后从同一轮 `attn_soc_wrapper_physopt.dcp` 使用 `route_design -directive Explore` 恢复布线。
+- v2.4 post-route（83.333 MHz / 12.000 ns）：WNS `+0.049 ns`、TNS `0`、WHS `+0.011 ns`、THS `0`；147793/147793 routable nets fully routed，0 routing errors，0 DRC errors。
+- 最终资源：88065 LUT、57718 FF、50 BRAM（34 RAMB36 + 32 RAMB18）、48 URAM、165 DSP；HWH 已核验 `C_SG_LENGTH_WIDTH=26`。
+- Python golden 7/7、driver unittest 5/5、`git diff --check` 通过；完整 VCS 回归仍需在可用 Synopsys license server 上执行，两个历史 backpressure testbench 失败已确认可在 clean baseline 重现。
+- 成功部署文件归档到 `checkpoint/v2.4`，并生成 `vivado_proj/board_bundle`。SHA-256：
+  - `lara_attention.bit`: `726554e2b44315b7e8cc57234c0b08b7c010354b2debca8e14c5069149625b70`
+  - `lara_attention.hwh`: `51f56e1d2e32af2ad2decd890e6b6467448d49db8a8f415c2fdbee2ac7917540`
+  - `lara_attention.xsa`: `9ed9fa0b5c37c8712377fe15c8fa456628dcc76149db8372766596cd27ff3520`
+- `.bit/.hwh/.xsa`、Vivado 工程和仿真生成物继续由 `.gitignore` 排除；`develop` 保留控制软件、仿真和板测工具，`master` 只同步上板 RTL、构建脚本、约束和版本文档。

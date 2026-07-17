@@ -24,6 +24,8 @@ module softmax_engine_basic
   localparam int LUT_DEPTH = 1024;
   localparam logic [31:0] FP32_NEG_INF_BITS = 32'hFF80_0000;
   localparam logic [31:0] FP32_ZERO_BITS    = 32'h0000_0000;
+  localparam logic [31:0] FP32_ONE_BITS     = 32'h3F80_0000;
+  localparam logic [31:0] FP32_NEG_EIGHT_BITS = 32'hC100_0000;
   localparam shortreal NEG_INF_SR   = -1.0e30;
   localparam shortreal NEG_EIGHT_SR = -8.0;
   localparam shortreal ZERO_SR      = 0.0;
@@ -54,22 +56,24 @@ module softmax_engine_basic
 `endif
 
   function automatic shortreal exp_lookup(input shortreal x);
-    shortreal x_clamped;
     shortreal idx_float, frac;
     integer idx_lo, idx_hi;
     shortreal v_lo, v_hi;
     begin
-      if (x < NEG_EIGHT_SR)      x_clamped = NEG_EIGHT_SR;
-      else if (x > ZERO_SR)      x_clamped = ZERO_SR;
-      else                       x_clamped = x;
-      idx_float = (x_clamped + EIGHT_SR) * shortreal'(LUT_DEPTH - 1) / EIGHT_SR;
-      idx_lo = integer'(idx_float);
-      idx_hi = idx_lo + 1;
-      if (idx_hi >= LUT_DEPTH) idx_hi = LUT_DEPTH - 1;
-      frac = idx_float - shortreal'(idx_lo);
-      v_lo = $bitstoshortreal(exp_lut[idx_lo]);
-      v_hi = $bitstoshortreal(exp_lut[idx_hi]);
-      exp_lookup = v_lo + frac * (v_hi - v_lo);
+      if (x < NEG_EIGHT_SR) begin
+        exp_lookup = ZERO_SR;
+      end else if (x > ZERO_SR) begin
+        exp_lookup = ONE_SR;
+      end else begin
+        idx_float = (x + EIGHT_SR) * shortreal'(LUT_DEPTH - 1) / EIGHT_SR;
+        idx_lo = integer'(idx_float);
+        idx_hi = idx_lo + 1;
+        if (idx_hi >= LUT_DEPTH) idx_hi = LUT_DEPTH - 1;
+        frac = idx_float - shortreal'(idx_lo);
+        v_lo = $bitstoshortreal(exp_lut[idx_lo]);
+        v_hi = $bitstoshortreal(exp_lut[idx_hi]);
+        exp_lookup = v_lo + frac * (v_hi - v_lo);
+      end
     end
   endfunction
 
@@ -224,14 +228,18 @@ module softmax_engine_basic
     integer idx_num;
     integer idx;
     begin
-      x_q = fp32_to_q8_15(x);
-      if (x_q < -24'sd262144) x_q = -24'sd262144;
-      else if (x_q > 24'sd0)  x_q = 24'sd0;
-      idx_num = integer'(x_q) + 262144;
-      idx = (idx_num * (LUT_DEPTH - 1)) >>> 18;
-      if (idx < 0) idx = 0;
-      else if (idx >= LUT_DEPTH) idx = LUT_DEPTH - 1;
-      exp_lookup_bits = exp_lut[idx];
+      if (fp32_gt(FP32_NEG_EIGHT_BITS, x)) begin
+        exp_lookup_bits = FP32_ZERO_BITS;
+      end else if (fp32_gt(x, FP32_ZERO_BITS)) begin
+        exp_lookup_bits = FP32_ONE_BITS;
+      end else begin
+        x_q = fp32_to_q8_15(x);
+        idx_num = integer'(x_q) + 262144;
+        idx = (idx_num * (LUT_DEPTH - 1)) >>> 18;
+        if (idx < 0) idx = 0;
+        else if (idx >= LUT_DEPTH) idx = LUT_DEPTH - 1;
+        exp_lookup_bits = exp_lut[idx];
+      end
     end
   endfunction
 
