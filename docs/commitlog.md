@@ -147,3 +147,11 @@
   - `lara_attention.hwh`: `51f56e1d2e32af2ad2decd890e6b6467448d49db8a8f415c2fdbee2ac7917540`
   - `lara_attention.xsa`: `9ed9fa0b5c37c8712377fe15c8fa456628dcc76149db8372766596cd27ff3520`
 - `.bit/.hwh/.xsa`、Vivado 工程和仿真生成物继续由 `.gitignore` 排除；`develop` 保留控制软件、仿真和板测工具，`master` 只同步上板 RTL、构建脚本、约束和版本文档。
+
+### v2.5 Phase 0 — 基线冻结与可复现测量
+
+- 新增 `hw/scripts/collect_signoff_metrics.py`，从 Vivado timing/route/utilization/DRC 报告、Git、HWH 和部署文件提取 JSON/CSV 基线；生成内容保存在被忽略的 `vivado_proj/optimization_baseline/`。
+- 新增 `python_godel/benchmark_matrix.py`，以固定 seed 覆盖 `L=16/32/64/128/256/512`、causal/non-causal、32 Q heads、8 KV heads 和 GQA 4:1。
+- 修正 Python golden model 的 `MAX_SEQ_LEN` 合同漂移：从早期 `2048` 改为当前部署上限 `512`，不改变已有小尺寸结果。
+- Phase 0 基线保持 v2.4：WNS `+0.049 ns`、WHS `+0.011 ns`、88065 LUT、57718 FF、50 BRAM、48 URAM、165 DSP，147793/147793 routable nets fully routed，DRC errors `0`。
+- Python golden `7/7`、driver unittest `5/5`、benchmark matrix、脚本语法和 `git diff --check` 通过；VCS 仍需可用 Synopsys license server。
