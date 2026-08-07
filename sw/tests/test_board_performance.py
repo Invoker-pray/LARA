@@ -1,3 +1,4 @@
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +15,9 @@ from sw.attn_driver import (
 from sw.board_performance import (
     BoardCase,
     FreshOverlayRunner,
+    _resolve_case_sets,
     _stats,
+    _write_csv,
     benchmark_case,
     cpu_attention_numpy,
     discover_cases,
@@ -22,6 +25,17 @@ from sw.board_performance import (
 
 
 class BoardPerformanceTest(unittest.TestCase):
+    def test_case_sets_are_explicitly_resolved_and_labels_are_unique(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            resolved = _resolve_case_sets([("custom", directory)])
+            self.assertEqual(resolved, [("custom", directory.resolve())])
+            with self.assertRaisesRegex(ValueError, "duplicate case-set label"):
+                _resolve_case_sets([
+                    ("custom", directory),
+                    ("custom", directory / "second"),
+                ])
+
     def test_fresh_overlay_runner_closes_each_sample_and_preserves_profile(self):
         instances = []
 
@@ -86,10 +100,9 @@ class BoardPerformanceTest(unittest.TestCase):
         self.assertIsNone(result["fpga"]["pl_total_cycles_stats"])
         self.assertIsNone(result["fpga"]["pl_transaction_ms_from_cycles"])
         self.assertIsNone(result["fpga"]["pl_core_active_ms_excluding_stalls"])
-        self.assertIsNone(result["fpga"]["pl_effective_gops_median"])
-        self.assertIsNone(result["speedup"]["cpu_over_fpga_pl_transaction"])
-        self.assertIsNone(result["architecture_per_cycle"]["pl_active_ops_per_cycle"])
-        self.assertIsNotNone(result["architecture_per_cycle"]["cpu_ops_per_cycle"])
+        self.assertNotIn("speedup", result)
+        self.assertNotIn("architecture_per_cycle", result)
+        self.assertIsNotNone(result["cpu_baseline"]["estimated_cycles_stats"])
         self.assertEqual(result["fpga"]["host_to_host_attention_ms"]["median"], 1.25)
 
     def test_valid_pl_counters_split_transaction_compute_and_stall(self):
@@ -138,11 +151,29 @@ class BoardPerformanceTest(unittest.TestCase):
             result["fpga"]["pl_mac_active_ms_from_cycles"]["median"],
             600 / cycles_per_ms,
         )
-        per_cycle = result["architecture_per_cycle"]
-        self.assertEqual(per_cycle["cpu_clock_mhz"], 1000.0)
-        self.assertGreater(per_cycle["cpu_estimated_cycles_median"], 0)
-        self.assertGreater(per_cycle["pl_active_ops_per_cycle"], 0)
-        self.assertGreater(per_cycle["pl_active_efficiency_over_cpu"], 0)
+        cpu = result["cpu_baseline"]
+        self.assertEqual(cpu["cpu_clock_mhz"], 1000.0)
+        self.assertGreater(cpu["estimated_cycles_stats"]["median"], 0)
+        self.assertNotIn("speedup", result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "measurements.csv"
+            _write_csv(csv_path, [result])
+            with csv_path.open(newline="", encoding="utf-8") as stream:
+                row = next(csv.DictReader(stream))
+        self.assertEqual(row["fpga_bit_exact"], "True")
+        self.assertIn("pl_cycles_median", row)
+        self.assertIn("fpga_e2e_ms_median", row)
+        self.assertIn("cpu_ms_median", row)
+        self.assertIn("cpu_estimated_cycles_median", row)
+        for forbidden in (
+            "speedup_pl",
+            "speedup_e2e",
+            "pl_effective_gops",
+            "cpu_effective_gops",
+            "pl_active_ops_per_cycle",
+        ):
+            self.assertNotIn(forbidden, row)
 
     def test_cpu_baseline_uniform_attention(self):
         length = 4

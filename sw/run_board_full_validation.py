@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -18,10 +19,42 @@ from typing import Any
 
 
 REQUIRED_LENGTHS = (1, 16, 32, 64, 128)
-CASE_SETS = (
-    ("q3kv3", "board_cases_rtl_contract_v2.6_fixed"),
-    ("q31kv7", "board_cases_rtl_contract_v2.6_q31_kv7"),
-)
+MAX_SEQ_LEN = 512
+
+
+def _parse_case_set(value: str) -> tuple[str, Path]:
+    if "=" not in value:
+        raise argparse.ArgumentTypeError("case set must be LABEL=DIRECTORY")
+    label, directory = value.split("=", 1)
+    if not label or not directory:
+        raise argparse.ArgumentTypeError("case set must be LABEL=DIRECTORY")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", label) is None:
+        raise argparse.ArgumentTypeError(
+            "case-set label may contain only letters, digits, '.', '_' and '-'"
+        )
+    return label, Path(directory)
+
+
+def _resolve_case_sets(values: list[tuple[str, Path]]) -> tuple[tuple[str, Path], ...]:
+    labels: set[str] = set()
+    resolved: list[tuple[str, Path]] = []
+    for label, directory in values:
+        if label in labels:
+            raise ValueError(f"duplicate case-set label: {label}")
+        labels.add(label)
+        resolved.append((label, directory.expanduser().resolve()))
+    return tuple(resolved)
+
+
+def _select_case_set(
+    case_sets: tuple[tuple[str, Path], ...], label: str
+) -> tuple[tuple[str, Path], ...]:
+    selected = tuple(item for item in case_sets if item[0] == label)
+    if not selected:
+        raise ValueError(
+            f"mode requires --case-set {label}=DIRECTORY"
+        )
+    return selected
 
 
 def _sha256(path: Path) -> str:
@@ -184,6 +217,21 @@ def _copy_provenance(root: Path, result_dir: Path, bitstream: Path) -> dict[str,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bitstream", default="./lara_attention.bit")
+    parser.add_argument(
+        "--case-set",
+        action="append",
+        type=_parse_case_set,
+        required=True,
+        metavar="LABEL=DIRECTORY",
+        help="repeatable; explicitly select each test-case directory",
+    )
+    parser.add_argument(
+        "--lengths",
+        nargs="+",
+        type=int,
+        default=list(REQUIRED_LENGTHS),
+        help="sequence lengths to validate; default: 1 16 32 64 128",
+    )
     parser.add_argument("--output-dir", default="./board_full_results")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
@@ -220,6 +268,11 @@ def main() -> int:
         action="store_true",
         help="run only the maximum supported q31/kv7 L512 causal case",
     )
+    mode_group.add_argument(
+        "--causal-only",
+        action="store_true",
+        help="run only causal cases for the selected case sets and lengths",
+    )
     args = parser.parse_args()
     if args.warmup < 0 or args.repeats < 1:
         parser.error("--warmup must be >= 0 and --repeats must be >= 1")
@@ -231,22 +284,34 @@ def main() -> int:
         parser.error("--cpu-core must be >= 0")
     if args.cpu_clock_mhz is not None and args.cpu_clock_mhz <= 0:
         parser.error("--cpu-clock-mhz must be > 0")
+    if any(length < 1 or length > MAX_SEQ_LEN for length in args.lengths):
+        parser.error(f"all --lengths values must be in 1..{MAX_SEQ_LEN}")
+    if len(set(args.lengths)) != len(args.lengths):
+        parser.error("--lengths values must not contain duplicates")
 
     root = Path.cwd().resolve()
     bitstream = Path(args.bitstream).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    try:
+        supplied_case_sets = _resolve_case_sets(args.case_set)
+        if args.extended_q31kv7_l512:
+            selected_case_sets = _select_case_set(supplied_case_sets, "q31kv7")
+        elif args.quick_q31kv7:
+            selected_case_sets = _select_case_set(supplied_case_sets, "q31kv7")
+        else:
+            selected_case_sets = supplied_case_sets
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if args.extended_q31kv7_l512:
-        selected_case_sets = (CASE_SETS[1],)
         selected_lengths = (512,)
         causal_only = True
     elif args.quick_q31kv7:
-        selected_case_sets = (CASE_SETS[1],)
         selected_lengths = (1, 128)
         causal_only = True
     else:
-        selected_case_sets = CASE_SETS
-        selected_lengths = REQUIRED_LENGTHS
-        causal_only = False
+        selected_lengths = tuple(args.lengths)
+        causal_only = args.causal_only
     expected_functional_total = len(selected_lengths) * (1 if causal_only else 2)
     expected_performance_total = expected_functional_total * len(selected_case_sets)
     required_files = [
@@ -257,7 +322,7 @@ def main() -> int:
         root / "board_matrix.py",
         root / "board_performance.py",
     ]
-    required_files.extend(root / directory for _, directory in selected_case_sets)
+    required_files.extend(directory for _, directory in selected_case_sets)
     missing = [str(path) for path in required_files if not path.exists()]
     if missing:
         raise FileNotFoundError("required board inputs are missing: " + ", ".join(missing))
@@ -281,7 +346,7 @@ def main() -> int:
     manifest_path = output_dir / "run_manifest.json"
     consolidated_path = output_dir / "consolidated_results.json"
     manifest: dict[str, Any] = {
-        "schema": "lara-kv260-full-validation-v1",
+        "schema": "lara-kv260-full-validation-v3.0",
         "status": "RUNNING",
         "started_utc": datetime.now(timezone.utc).isoformat(),
         "working_directory": str(root),
@@ -289,7 +354,9 @@ def main() -> int:
         "configuration": {
             "bitstream": str(bitstream),
             "lengths": list(selected_lengths),
-            "case_sets": dict(selected_case_sets),
+            "case_sets": {
+                label: str(directory) for label, directory in selected_case_sets
+            },
             "causal_only": causal_only,
             "quick_q31kv7": args.quick_q31kv7,
             "extended_q31kv7_l512": args.extended_q31kv7_l512,
@@ -314,7 +381,7 @@ def main() -> int:
                 python,
                 str(root / "board_matrix.py"),
                 "--bitstream", str(bitstream),
-                "--cases", str(root / case_directory),
+                "--cases", str(case_directory),
                 "--output-dir", str(result_path),
                 "--lengths", *(str(length) for length in selected_lengths),
             ]
@@ -340,7 +407,7 @@ def main() -> int:
                 "--lengths", *(str(length) for length in selected_lengths),
             ]
             for label, case_directory in selected_case_sets:
-                command.extend(["--case-set", f"{label}={root / case_directory}"])
+                command.extend(["--case-set", f"{label}={case_directory}"])
             if causal_only:
                 command.append("--causal-only")
             if args.cpu_core is not None:
