@@ -90,11 +90,13 @@ module bf16_mac
   // Normalize: if mant_prod[15]=1, shift right 1 and inc exponent
   logic       norm_shift;
   logic [7:0] exp_norm;
-  logic [6:0] mant_norm; // 7-bit explicit for bf16-range fp32
+  logic [22:0] mant_norm; // preserve the full BF16×BF16 product in FP32
 
   assign norm_shift = mant_prod[15];
   assign exp_norm   = norm_shift ? (exp_prod[7:0] + 8'd1) : exp_prod[7:0];
-  assign mant_norm  = norm_shift ? mant_prod[14:8] : mant_prod[13:7];
+  assign mant_norm  = norm_shift
+                    ? {mant_prod[14:0], 8'd0}
+                    : {mant_prod[13:0], 9'd0};
 
   // Zeros/special values
   logic a_zero, b_zero, a_inf, b_inf, a_nan, b_nan;
@@ -115,7 +117,7 @@ module bf16_mac
     else if (a_zero | b_zero)
       product_fp32 = {sign_prod, 8'd0, 23'd0};       // 0
     else
-      product_fp32 = {sign_prod, exp_norm, mant_norm, 16'd0}; // normal
+      product_fp32 = {sign_prod, exp_norm, mant_norm}; // normal
   end
 
   // Pipeline register (C4_MUL_PIPE)

@@ -219,7 +219,7 @@ module kv_cache_ram
       logic [VEC_WORD_W/8-1:0] vec_we0, vec_we1, vec_we2, vec_we3;
       logic [VEC_WORD_W/8-1:0] vec_we4, vec_we5, vec_we6, vec_we7;
       logic [VEC_WORD_W-1:0] vec_selected_word;
-      logic rd_vec_en_d;
+      logic [2:0] rd_vec_dim_blk_idx_d;
 
       assign vec_din = vec_slot_word(wr_dim_slot_idx, wr_data);
       assign vec_we0 = (wr_en && (wr_dim_blk_idx == 3'd0)) ? vec_byte_we_for_slot(wr_dim_slot_idx) : '0;
@@ -261,7 +261,7 @@ module kv_cache_ram
 
       always_comb begin
         vec_selected_word = '0;
-        unique case (rd_vec_dim_blk_idx)
+        unique case (rd_vec_dim_blk_idx_d)
           3'd0: vec_selected_word = vec_dout0;
           3'd1: vec_selected_word = vec_dout1;
           3'd2: vec_selected_word = vec_dout2;
@@ -275,9 +275,9 @@ module kv_cache_ram
 
       always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-          rd_vec_en_d <= 1'b0;
+          rd_vec_dim_blk_idx_d <= 3'd0;
         end else begin
-          rd_vec_en_d <= rd_vec_en;
+          rd_vec_dim_blk_idx_d <= rd_vec_dim_blk_idx;
         end
       end
 
@@ -289,10 +289,12 @@ module kv_cache_ram
           rd_vec_data[lane] = '0;
         end
 
-        if (rd_vec_en_d) begin
-          for (int lane = 0; lane < TILE_COLS; lane++) begin
-            rd_vec_data[lane] = vec_selected_word[lane*BF16_W +: BF16_W];
-          end
+        // The controller prefetches V once and consumes it across both MAC
+        // split phases. XPM read data retains its last value when enb=0,
+        // matching the behavioral memory path; do not clear the vector in
+        // the cycles between prefetches.
+        for (int lane = 0; lane < TILE_COLS; lane++) begin
+          rd_vec_data[lane] = vec_selected_word[lane*BF16_W +: BF16_W];
         end
       end
     end

@@ -84,6 +84,7 @@ module attn_core
   logic [7:0]  kv_tile_limit_idx;
   logic        kv_prefetch_issued;
   logic        q_load_inflight;
+  logic        q_prefetch_issued;
   logic        q_prefetch_next_tile;
   logic        q_prefetch_next_head_or_group;
   logic        q_prefetch_head_or_group_early;
@@ -121,6 +122,8 @@ module attn_core
     n_kv_tiles = 8'(seq_len_r[15:6]) + ((kv_remainder != 6'd0) ? 8'd1 : 8'd0);
     q_tile_last_idx  = n_q_tiles  - 8'd1;
     kv_tile_last_idx = n_kv_tiles - 8'd1;
+    kv_delta_u       = 17'd0;
+    kv_tile_limit_idx = kv_tile_last_idx;
     q_pos_start  = q_pos_base_r + q_tile_base_u;
     kv_pos_start = kv_pos_base_r + kv_tile_base_u;
     // Active rows in current Q tile
@@ -137,7 +140,8 @@ module attn_core
     // valid; softmax_engine performs the element-level future-token mask there.
     // If q_end is before kv_pos_base, retain tile 0 so the transaction still
     // produces a well-defined all-masked/zero output.
-    q_end_abs_u = {1'b0, q_pos_start} + ((active_q == 6'd0) ? 17'd0 : active_q - 6'd1);
+    q_end_abs_u = {1'b0, q_pos_start} +
+                  ((active_q == 6'd0) ? 17'd0 : {11'd0, active_q} - 17'd1);
     causal_tile_idx_u = 8'd0;
     if (q_end_abs_u >= {1'b0, kv_pos_base_r}) begin
       kv_delta_u = q_end_abs_u - {1'b0, kv_pos_base_r};
@@ -147,8 +151,6 @@ module attn_core
     end
     if (causal_r && (causal_tile_idx_u < kv_tile_last_idx))
       kv_tile_limit_idx = causal_tile_idx_u;
-    else
-      kv_tile_limit_idx = kv_tile_last_idx;
   end
 
   // Output position + active rows/cols
@@ -188,11 +190,12 @@ module attn_core
   // start_ready: accept only in IDLE
   assign start_ready = (state == ST_IDLE);
   assign q_prefetch_next_tile = kv_tile_last && (q_tile_idx < q_tile_last_idx);
-  assign q_prefetch_next_head_or_group =
-      (q_tile_idx == q_tile_last_idx) &&
-      ((head_cnt < LAST_Q_HEAD) || (group_cnt < LAST_GQA_GROUP));
-  assign q_prefetch_head_or_group_early =
-      q_prefetch_next_head_or_group && kv_tile_last;
+  // A head/group transition reuses the same Q bank when the current Q tile
+  // is the only tile.  Do not prefetch the following head into that bank while
+  // it is still being consumed; the next head is loaded synchronously through
+  // ST_Q_INIT after the current writeback completes.
+  assign q_prefetch_next_head_or_group = 1'b0;
+  assign q_prefetch_head_or_group_early = 1'b0;
   assign q_load_bank_sel = (((state == ST_QK_DOT) || (state == ST_SOFTMAX) || (state == ST_AV_DOT) ||
                              ((state == ST_NORMALIZE) && (q_tile_idx < q_tile_last_idx)) ||
                              ((state == ST_WRITE_O) && (q_tile_idx < q_tile_last_idx))) &&
@@ -207,8 +210,11 @@ module attn_core
     cfg_valid = 1'b1;
     if (seq_len == 16'd0)                           cfg_valid = 1'b0;
     if (seq_len > MAX_SEQ_LEN_U16)                 cfg_valid = 1'b0;
-    if ({1'b0, cfg_q_pos_base} + {1'b0, seq_len} > MAX_SEQ_LEN_U17)  cfg_valid = 1'b0;
-    if ({1'b0, cfg_kv_pos_base} + {1'b0, seq_len} > MAX_SEQ_LEN_U17) cfg_valid = 1'b0;
+    // MAX_SEQ_LEN limits the resident tensor length, not its absolute
+    // position. Position bases are 16-bit CSR values; only reject a range
+    // that would overflow the 16-bit absolute-position arithmetic.
+    if ({1'b0, cfg_q_pos_base} + {1'b0, seq_len} > 17'h1_0000)  cfg_valid = 1'b0;
+    if ({1'b0, cfg_kv_pos_base} + {1'b0, seq_len} > 17'h1_0000) cfg_valid = 1'b0;
   end
 
   // ==================================================================
@@ -221,20 +227,25 @@ module attn_core
       stall_cycles <= 32'd0;
       perf_valid   <= 1'b0;
     end else begin
-      if (state == ST_IDLE) begin
+      // Retain the completed transaction counters while idle so software can
+      // read them after observing DONE.  Clear only when a new transaction is
+      // actually accepted; clearing on every IDLE cycle erased the result
+      // before an AXI-Lite read could occur.
+      if ((state == ST_IDLE) && start && start_ready) begin
         cycle_cnt    <= 32'd0;
         mac_cycles   <= 32'd0;
         stall_cycles <= 32'd0;
       end else begin
-        cycle_cnt <= cycle_cnt + 32'd1;
+        if (state != ST_IDLE)
+          cycle_cnt <= cycle_cnt + 32'd1;
+        if (state == ST_QK_DOT || state == ST_AV_DOT)
+          mac_cycles <= mac_cycles + 32'd1;
+        // Stall cycles: waiting for external done signals.
+        if ((state == ST_LOAD_KV && !kv_load_done) ||
+            (state == ST_Q_INIT  && !q_load_done)  ||
+            (state == ST_WRITE_O && !o_write_done))
+          stall_cycles <= stall_cycles + 32'd1;
       end
-      if (state == ST_QK_DOT || state == ST_AV_DOT)
-        mac_cycles <= mac_cycles + 32'd1;
-      // Stall cycles: waiting for external done signals
-      if ((state == ST_LOAD_KV && !kv_load_done) ||
-          (state == ST_Q_INIT  && !q_load_done)  ||
-          (state == ST_WRITE_O && !o_write_done))
-        stall_cycles <= stall_cycles + 32'd1;
       // Perf valid pulse at DONE
       if (state == ST_DONE)
         perf_valid <= 1'b1;
@@ -261,6 +272,7 @@ module attn_core
       o_bank_sel   <= 1'b0;
       kv_prefetch_issued <= 1'b0;
       q_load_inflight <= 1'b0;
+      q_prefetch_issued <= 1'b0;
       done         <= 1'b0;
       error        <= 1'b0;
     end else begin
@@ -278,6 +290,7 @@ module attn_core
         group_cnt     <= 3'd0;
         kv_prefetch_issued <= 1'b0;
         q_load_inflight <= 1'b0;
+        q_prefetch_issued <= 1'b0;
         done          <= 1'b0;  // clear sticky done
         error         <= 1'b0;  // clear sticky error
       end
@@ -313,6 +326,11 @@ module attn_core
         end
         ST_WRITE_O: begin
           if (o_write_done) begin
+            // A Q prefetch belongs to the tile/head that follows this
+            // writeback. Re-arm the one-shot request guard when advancing
+            // the loop; the request itself, if launched in this cycle, wins
+            // over the re-arm below.
+            q_prefetch_issued <= 1'b0;
             if (q_tile_idx < q_tile_last_idx) begin
               q_tile_idx <= q_tile_idx + 8'd1;
               kv_tile_idx <= 8'd0;
@@ -339,6 +357,13 @@ module attn_core
         end
         default: begin end
       endcase
+
+      // q_load_inflight only describes the DMA handshake and is cleared as
+      // soon as the target bank becomes ready. Keep a separate one-shot
+      // marker for the current tile/head prefetch so a long QK/softmax/AV
+      // state cannot issue the same request again.
+      if (q_load_start && (q_prefetch_next_tile || q_prefetch_next_head_or_group))
+        q_prefetch_issued <= 1'b1;
     end
   end
 
@@ -373,8 +398,7 @@ module attn_core
           else             next_state = ST_Q_INIT;
         end
         else if (head_cnt < LAST_Q_HEAD) begin
-          if (q_load_done) next_state = ST_KV_READ;
-          else             next_state = ST_Q_INIT;
+          next_state = ST_Q_INIT;
         end
         else if (group_cnt < LAST_GQA_GROUP)
           next_state = ST_LOAD_KV;
@@ -418,26 +442,30 @@ module attn_core
         mac_phase     = 1'b0;
         kv_tile_first = (kv_tile_idx == 8'd0);
         kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
+        // Once the next-tile prefetch completes, q_load_done clears the
+        // in-flight flag while this state can still last for several cycles.
+        // Gate the request with q_load_done as well, otherwise the same tile
+        // is streamed repeatedly and can invalidate the ready ping-pong bank.
         if (q_prefetch_next_tile)
-          q_load_start = !q_load_inflight;
+          q_load_start = !q_load_inflight && !q_prefetch_issued;
       end
       ST_SOFTMAX: begin
         softmax_start = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
         kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
         if (q_prefetch_next_tile)
-          q_load_start = !q_load_inflight;
+          q_load_start = !q_load_inflight && !q_prefetch_issued;
         if (q_prefetch_head_or_group_early)
-          q_load_start = !q_load_inflight;
+          q_load_start = !q_load_inflight && !q_prefetch_issued;
       end
       ST_AV_DOT: begin
         mac_phase     = 1'b1;
         kv_tile_first = (kv_tile_idx == 8'd0);
         kv_tile_last  = (kv_tile_idx == kv_tile_limit_idx);
         if (q_prefetch_next_tile)
-          q_load_start = !q_load_inflight;
+          q_load_start = !q_load_inflight && !q_prefetch_issued;
         if (q_prefetch_head_or_group_early)
-          q_load_start = !q_load_inflight;
+          q_load_start = !q_load_inflight && !q_prefetch_issued;
       end
       ST_NORMALIZE: begin
         o_write_start = 1'b1;

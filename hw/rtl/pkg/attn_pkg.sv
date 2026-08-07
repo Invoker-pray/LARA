@@ -45,19 +45,91 @@ package attn_pkg;
   // Higher = better timing closure, lower throughput per column.
   //
   // SPLIT_FACTOR=1: single-cycle 16-wide multiply → relaxed at ≤60 MHz
-  // SPLIT_FACTOR=2: two-cycle 8+8 split → target 100-125 MHz (DEFAULT)
-  // SPLIT_FACTOR=4: four-cycle 4+4+4+4 → 100+ MHz with margin
+  // SPLIT_FACTOR=2: two-cycle 8+8 split → compatibility / rollback
+  // SPLIT_FACTOR=4: four-cycle 4+4+4+4 → intermediate option
+  // SPLIT_FACTOR=8: eight-cycle 2+...+2 split → intermediate closure option
+  // SPLIT_FACTOR=16: sixteen-cycle 1+...+1 split → current default closure-first option
   //
   // Rollback path: set SPLIT_FACTOR=1 → all generate blocks fall back to
   // the safe single-cycle path. No RTL changes needed.
 
-  localparam int  TILE_SPLIT_FACTOR = 2;      // Column split factor {1, 2, 4}
+`ifdef LARA_TILE_SPLIT_FACTOR_16
+  localparam int  TILE_SPLIT_FACTOR = 16;     // Column split factor {1, 2, 4, 8, 16}
+`elsif LARA_TILE_SPLIT_FACTOR_8
+  localparam int  TILE_SPLIT_FACTOR = 8;      // Column split factor {1, 2, 4, 8}
+`elsif LARA_TILE_SPLIT_FACTOR_4
+  localparam int  TILE_SPLIT_FACTOR = 4;      // Column split factor {1, 2, 4}
+`elsif LARA_TILE_SPLIT_FACTOR_2
+  localparam int  TILE_SPLIT_FACTOR = 2;      // Column split factor {1, 2}
+`else
+  localparam int  TILE_SPLIT_FACTOR = 16;     // Column split factor {1, 2, 4, 8, 16}
+`endif
+  localparam int  TILE_SPLIT_INDEX_W = (TILE_SPLIT_FACTOR <= 1)
+                                     ? 1 : $clog2(TILE_SPLIT_FACTOR);
   localparam bit  TILE_MAC_REUSE    = 1'b1;   // Time-multiplex MAC for Phase A+B
   localparam bit  C4_MUL_PIPE       = 1'b1;   // DSP48E2 M-register: 1=registered (≥100MHz), 0=combinational (≤60MHz)
 
   // Pipeline depth parameters (higher = better timing, more latency)
   localparam int  MAC_PIPE_STAGES    = 2;       // MAC array pipeline: {1=comb, 2=reg products+reduction}
   localparam int  SOFTMAX_PIPE_STAGES = 2;      // Softmax pipeline: {2, 3} stages
+  // Register the scaled score before the row-max update.  Set to 0 to restore
+  // the v2.5 Phase 1 single-cycle scale+max path without changing interfaces.
+  localparam bit  SOFTMAX_SCALE_PIPE = 1'b1;
+  // Pipeline P shift/EXP/row-sum at one element issued per cycle.  Set to 0
+  // to restore the v2.5 Phase 2 three-cycles-per-element state sequence.
+`ifdef LARA_SOFTMAX_P_PIPE_ROLLBACK
+  localparam bit  SOFTMAX_P_PIPE     = 1'b0;
+`else
+  localparam bit  SOFTMAX_P_PIPE     = 1'b1;
+`endif
+  // P3 scratch reuse: once an element has issued its P subtract, its
+  // scaled-score scratch entry is dead and can hold the committed P value.
+  // The candidate path enables this reuse; ROLLBACK preserves the P2 split-sm_p
+  // organization for the signed-off default and comparison.
+`ifdef LARA_SOFTMAX_P_INPLACE_ROLLBACK
+  localparam bit  SOFTMAX_P_INPLACE  = 1'b0;
+`elsif LARA_SOFTMAX_P_INPLACE_ENABLE
+  localparam bit  SOFTMAX_P_INPLACE  = 1'b1;
+`else
+  localparam bit  SOFTMAX_P_INPLACE  = 1'b0;
+`endif
+  // P3 direct-output reuse: when P is committed in-place, expose that scratch
+  // directly to P-store instead of clocking a second 16x16 fp32 output matrix.
+`ifdef LARA_SOFTMAX_P_OUTPUT_DIRECT_ROLLBACK
+  localparam bit  SOFTMAX_P_OUTPUT_DIRECT = 1'b0;
+`elsif LARA_SOFTMAX_P_OUTPUT_DIRECT_ENABLE
+  localparam bit  SOFTMAX_P_OUTPUT_DIRECT = 1'b1;
+`else
+  localparam bit  SOFTMAX_P_OUTPUT_DIRECT = 1'b0;
+`endif
+  // Rejected P3 DSE knob: store each scaled value back into the captured score
+  // matrix so scale and P reuse one 16x16 fp32 scratch.  It met the FF target
+  // but failed matching default and Explore route timing at 99.17% CLB use.
+`ifdef LARA_SOFTMAX_SCORE_INPLACE_ROLLBACK
+  localparam bit  SOFTMAX_SCORE_INPLACE = 1'b0;
+`elsif LARA_SOFTMAX_SCORE_INPLACE_ENABLE
+  localparam bit  SOFTMAX_SCORE_INPLACE = 1'b1;
+`else
+  localparam bit  SOFTMAX_SCORE_INPLACE = 1'b0;
+`endif
+  // Allow the Phase-A MAC producer to compute and hold block N+1 while the
+  // softmax consumer owns block N.  Rollback retains the corrected handshake
+  // and tag semantics while restoring serial MAC/softmax scheduling.
+`ifdef LARA_PHASEA_SOFTMAX_OVERLAP_ROLLBACK
+  localparam bit  PHASEA_SOFTMAX_OVERLAP = 1'b0;
+`else
+  localparam bit  PHASEA_SOFTMAX_OVERLAP = 1'b1;
+`endif
+  // P4 accepted path: retire P blocks into the existing P-store, then use idle
+  // shared-MAC windows to execute complete PV blocks while later softmax/QK
+  // work is in flight.  Rollback preserves the signed-off P2 schedule.
+`ifdef LARA_STREAMING_PV_ROLLBACK
+  localparam bit  STREAMING_PV = 1'b0;
+`elsif LARA_STREAMING_PV_ENABLE
+  localparam bit  STREAMING_PV = 1'b1;
+`else
+  localparam bit  STREAMING_PV = 1'b1;
+`endif
 
   // ==================================================================
   // 3. Data Widths — Data Type Bit Widths
@@ -295,16 +367,56 @@ package attn_pkg;
     return fp32_gt(a, b) ? a : b;
   endfunction
 
+  // Hierarchical leading-zero detector for the normalized FP32 mantissa.
+  // The old fp32_add implementation shifted one bit at a time in a loop,
+  // which created a long priority/shift chain in synthesis.  The result is
+  // identical, but the detector depth is bounded by three 8-bit groups.
+  function automatic logic [3:0] fp32_lzd8(input logic [7:0] value);
+    begin
+      if      (value[7]) fp32_lzd8 = 4'd0;
+      else if (value[6]) fp32_lzd8 = 4'd1;
+      else if (value[5]) fp32_lzd8 = 4'd2;
+      else if (value[4]) fp32_lzd8 = 4'd3;
+      else if (value[3]) fp32_lzd8 = 4'd4;
+      else if (value[2]) fp32_lzd8 = 4'd5;
+      else if (value[1]) fp32_lzd8 = 4'd6;
+      else if (value[0]) fp32_lzd8 = 4'd7;
+      else               fp32_lzd8 = 4'd8;
+    end
+  endfunction
+
+  function automatic logic [4:0] fp32_lzd24(input logic [55:0] value);
+    begin
+      if (|value[55:48])
+        fp32_lzd24 = {1'b0, fp32_lzd8(value[55:48])};
+      else if (|value[47:40])
+        fp32_lzd24 = 5'd8 + {1'b0, fp32_lzd8(value[47:40])};
+      else if (|value[39:32])
+        fp32_lzd24 = 5'd16 + {1'b0, fp32_lzd8(value[39:32])};
+      else
+        // fp32_add only normalizes across the 24-bit significand window
+        // [55:32].  A nonzero value below that window has the same lz=24
+        // result as the original bounded loop.
+        fp32_lzd24 = 5'd24;
+    end
+  endfunction
+
   function automatic logic [31:0] fp32_add(input logic [31:0] a, input logic [31:0] b);
     logic        sign_a, sign_b, sign_large, sign_res;
     logic [7:0]  exp_a, exp_b, exp_large;
-    logic [23:0] mant_a, mant_b;
+    logic [23:0] mant_a, mant_b, mant_large24, mant_small24;
     logic        a_larger, effective_sub;
-    logic [24:0] mant_large, mant_small, mant_small_shifted, mant_sum;
+    logic [55:0] mant_large_ext, mant_small_ext, mant_small_shifted;
+    logic [56:0] mant_sum_ext;
+    logic [55:0] mant_norm_ext;
+    logic [55:0] sticky_mask;
+    logic [23:0] mant_keep;
+    logic [24:0] mant_round;
     logic [7:0]  exp_res;
     logic [22:0] frac_res;
-    integer      shift;
-    integer      lz;
+    integer      shift, lz;
+    logic        shifted_sticky;
+    logic        guard_bit, round_bit, sticky_bit, round_up;
     begin
       if (fp32_is_nan(a) || fp32_is_nan(b)) return 32'h7FC0_0000;
       if (fp32_is_zero(a)) return b;
@@ -318,28 +430,66 @@ package attn_pkg;
 
       a_larger = (exp_a > exp_b) || ((exp_a == exp_b) && (mant_a >= mant_b));
       exp_large = a_larger ? exp_a : exp_b;
-      mant_large = {1'b0, (a_larger ? mant_a : mant_b)};
-      mant_small = {1'b0, (a_larger ? mant_b : mant_a)};
+      mant_large24 = a_larger ? mant_a : mant_b;
+      mant_small24 = a_larger ? mant_b : mant_a;
       sign_large = a_larger ? sign_a : sign_b;
       effective_sub = sign_a ^ sign_b;
 
       shift = a_larger ? (integer'(exp_a) - integer'(exp_b))
                        : (integer'(exp_b) - integer'(exp_a));
-      mant_small_shifted = (shift >= 25) ? 25'd0 : (mant_small >> shift);
-      mant_sum = effective_sub ? (mant_large - mant_small_shifted)
-                               : (mant_large + mant_small_shifted);
+      // Keep substantially more than the three G/R/S bits while aligning.
+      // This matters for opposite-sign operands: an early sticky-bit OR can
+      // otherwise bias a cancellation by one or more ulps.
+      mant_large_ext = {mant_large24, 32'd0};
+      mant_small_ext = {mant_small24, 32'd0};
+      // Use a barrel-generated low-bit mask plus a balanced reduction instead
+      // of a 56-iteration serial OR chain.
+      if (shift <= 0)
+        sticky_mask = 56'd0;
+      else if (shift >= 56)
+        sticky_mask = {56{1'b1}};
+      else
+        sticky_mask = ({56{1'b1}} >> (56 - shift));
+      shifted_sticky = |(mant_small_ext & sticky_mask);
+      if (shift >= 56)
+        mant_small_shifted = shifted_sticky ? 56'd1 : 56'd0;
+      else begin
+        mant_small_shifted = mant_small_ext >> shift;
+        if (shifted_sticky)
+          mant_small_shifted[0] = 1'b1;
+      end
+      mant_sum_ext = effective_sub
+                   ? ({1'b0, mant_large_ext} - {1'b0, mant_small_shifted})
+                   : ({1'b0, mant_large_ext} + {1'b0, mant_small_shifted});
 
-      if (mant_sum == 25'd0) return 32'd0;
+      if (mant_sum_ext == 57'd0) return 32'd0;
 
       sign_res = sign_large;
-      if (mant_sum[24]) begin
+      exp_res = exp_large;
+      if (mant_sum_ext[56]) begin
         exp_res = exp_large + 8'd1;
-        frac_res = mant_sum[23:1];
+        mant_norm_ext = mant_sum_ext[56:1];
+        if (mant_sum_ext[0])
+          mant_norm_ext[0] = 1'b1;
       end else begin
-        lz = 0;
-        while ((lz < 24) && !mant_sum[23-lz]) lz++;
+        lz = integer'(fp32_lzd24(mant_sum_ext[55:0]));
+        mant_norm_ext = mant_sum_ext[55:0] << lz;
         exp_res = exp_large - lz[7:0];
-        frac_res = (mant_sum[22:0] << lz);
+      end
+
+      mant_keep = mant_norm_ext[55:32];
+      guard_bit = mant_norm_ext[31];
+      round_bit = mant_norm_ext[30];
+      sticky_bit = |mant_norm_ext[29:0];
+      round_up = guard_bit && (round_bit || sticky_bit || mant_keep[0]);
+      mant_round = {1'b0, mant_keep};
+      if (round_up)
+        mant_round = mant_round + 25'd1;
+      if (mant_round[24]) begin
+        exp_res = exp_res + 8'd1;
+        frac_res = 23'd0;
+      end else begin
+        frac_res = mant_round[22:0];
       end
       return {sign_res, exp_res, frac_res};
     end
@@ -354,7 +504,9 @@ package attn_pkg;
     logic [7:0] exp_a, exp_b, exp_p;
     logic [23:0] mant_a, mant_b;
     logic [47:0] mant_prod;
-    logic [22:0] frac_p;
+    logic [23:0] mant_keep;
+    logic [24:0] mant_round;
+    logic        guard_bit, round_bit, sticky_bit, round_up;
     begin
       if (fp32_is_nan(a) || fp32_is_nan(b)) return 32'h7FC0_0000;
       if (fp32_is_zero(a) || fp32_is_zero(b)) return {a[31]^b[31], 31'd0};
@@ -368,12 +520,26 @@ package attn_pkg;
 
       if (mant_prod[47]) begin
         exp_p = exp_a + exp_b - 8'd126;
-        frac_p = mant_prod[46:24];
+        mant_keep = {1'b1, mant_prod[46:24]};
+        guard_bit = mant_prod[23];
+        round_bit = mant_prod[22];
+        sticky_bit = |mant_prod[21:0];
       end else begin
         exp_p = exp_a + exp_b - 8'd127;
-        frac_p = mant_prod[45:23];
+        mant_keep = {1'b1, mant_prod[45:23]};
+        guard_bit = mant_prod[22];
+        round_bit = mant_prod[21];
+        sticky_bit = |mant_prod[20:0];
       end
-      return {sign_p, exp_p, frac_p};
+      round_up = guard_bit && (round_bit || sticky_bit || mant_keep[0]);
+      mant_round = {1'b0, mant_keep};
+      if (round_up)
+        mant_round = mant_round + 25'd1;
+      if (mant_round[24]) begin
+        exp_p = exp_p + 8'd1;
+        mant_round = {2'b01, 23'd0};
+      end
+      return {sign_p, exp_p, mant_round[22:0]};
     end
   endfunction
 
@@ -387,7 +553,7 @@ package attn_pkg;
     logic [15:0] mant_prod;
     logic [8:0]  exp_prod;
     logic        norm_shift;
-    logic [6:0]  mant_norm;
+    logic [22:0] mant_norm;
     logic        a_zero, b_zero, a_inf, b_inf, a_nan, b_nan;
     begin
       sign_a = a_bf16[15];
@@ -403,7 +569,12 @@ package attn_pkg;
 
       norm_shift = mant_prod[15];
       exp_norm   = norm_shift ? (exp_prod[7:0] + 8'd1) : exp_prod[7:0];
-      mant_norm  = norm_shift ? mant_prod[14:8] : mant_prod[13:7];
+      // BF16 has an 8-bit significand (including the hidden bit).  The
+      // product therefore carries up to 15 useful fraction bits; preserve
+      // them in FP32 instead of reducing the product back to BF16 precision.
+      mant_norm  = norm_shift
+                 ? {mant_prod[14:0], 8'd0}
+                 : {mant_prod[13:0], 9'd0};
 
       a_zero = (a_bf16[14:7] == 8'd0);
       b_zero = (b_bf16[14:7] == 8'd0);
@@ -421,7 +592,7 @@ package attn_pkg;
       else if (a_zero || b_zero)
         return {sign_prod, 8'd0, 23'd0};
       else
-        return {sign_prod, exp_norm, mant_norm, 16'd0};
+        return {sign_prod, exp_norm, mant_norm};
     end
   endfunction
 
