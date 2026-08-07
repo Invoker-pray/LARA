@@ -200,6 +200,11 @@ def main() -> int:
         help="optionally pin the performance process to one Cortex-A53 core",
     )
     parser.add_argument(
+        "--cpu-clock-mhz",
+        type=float,
+        help="stable CPU clock forwarded to per-cycle efficiency reporting",
+    )
+    parser.add_argument(
         "--allow-missing-init-report",
         action="store_true",
         help="do not require board_environment.json from clear_pynq_cache.py",
@@ -224,6 +229,8 @@ def main() -> int:
         parser.error("--cpu-threads values must not contain duplicates")
     if args.cpu_core is not None and args.cpu_core < 0:
         parser.error("--cpu-core must be >= 0")
+    if args.cpu_clock_mhz is not None and args.cpu_clock_mhz <= 0:
+        parser.error("--cpu-clock-mhz must be > 0")
 
     root = Path.cwd().resolve()
     bitstream = Path(args.bitstream).expanduser().resolve()
@@ -290,6 +297,7 @@ def main() -> int:
             "repeats": args.repeats,
             "cpu_threads": args.cpu_threads,
             "cpu_core": args.cpu_core,
+            "cpu_clock_mhz": args.cpu_clock_mhz,
         },
         "initialization_report": init_report,
         "provenance": _copy_provenance(root, output_dir, bitstream),
@@ -337,6 +345,8 @@ def main() -> int:
                 command.append("--causal-only")
             if args.cpu_core is not None:
                 command.extend(["--cpu-core", str(args.cpu_core)])
+            if args.cpu_clock_mhz is not None:
+                command.extend(["--cpu-clock-mhz", str(args.cpu_clock_mhz)])
             environment = os.environ.copy()
             environment["LARA_CPU_THREADS"] = str(threads)
             stage = _run_logged(command, log_path, env=environment)

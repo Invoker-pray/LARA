@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -76,6 +78,8 @@ DMA_MAX_TRANSFER_BYTES = (1 << DMA_LENGTH_WIDTH) - 1
 MAX_KV_HEAD_BYTES = MAX_SEQ_LEN * HEAD_DIM * BF16_BYTES
 Q_TILE_BYTES = TILE_Q * HEAD_DIM * BF16_BYTES
 MAX_OUTPUT_BYTES = N_Q_HEADS * MAX_SEQ_LEN * HEAD_DIM * BF16_BYTES
+DEFAULT_REQUEST_POLL_SLEEP_US = 20.0
+REQUEST_POLL_SLEEP_US_ENV = "LARA_REQUEST_POLL_SLEEP_US"
 
 ERR_NONE = 0x00
 ERR_BAD_CFG = 0x01
@@ -220,6 +224,9 @@ class RunProfile:
     input_pack_ms: float = 0.0
     driver_setup_ms: float = 0.0
     request_service_ms: float = 0.0
+    request_poll_sleep_us: float = 0.0
+    request_poll_sleeps: int = 0
+    request_duplicate_polls: int = 0
     output_dma_setup_ms: float = 0.0
     output_dma_transfer_ms: float = 0.0
     attention_total_ms: float = 0.0
@@ -248,11 +255,32 @@ class RunProfile:
 
 
 class AttentionAccelerator:
-    def __init__(self, bitstream_path: str | None = None, overlay: Any | None = None) -> None:
+    def __init__(
+        self,
+        bitstream_path: str | None = None,
+        overlay: Any | None = None,
+        request_poll_sleep_us: float | None = None,
+    ) -> None:
         self.bitstream_path = str(Path(bitstream_path).resolve()) if bitstream_path else None
         self._git_hash = self._git_commit()
         self._bitstream_hash = self._bitstream_sha256()
         self._pl_clock_mhz = PL_CLOCK_MHZ
+        if request_poll_sleep_us is None:
+            raw_poll_sleep = os.environ.get(
+                REQUEST_POLL_SLEEP_US_ENV,
+                str(DEFAULT_REQUEST_POLL_SLEEP_US),
+            )
+            try:
+                request_poll_sleep_us = float(raw_poll_sleep)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{REQUEST_POLL_SLEEP_US_ENV} must be a non-negative number, "
+                    f"got {raw_poll_sleep!r}"
+                ) from exc
+        if not math.isfinite(request_poll_sleep_us) or request_poll_sleep_us < 0:
+            raise ValueError("request_poll_sleep_us must be a finite non-negative number")
+        self._request_poll_sleep_us = float(request_poll_sleep_us)
+        self._request_poll_sleep_s = self._request_poll_sleep_us / 1.0e6
         if HAS_PYNQ:
             self.overlay = overlay if overlay is not None else Overlay(bitstream_path)
             # Overlay.download applies the HWH divisors but does not reprogram
@@ -441,6 +469,7 @@ class AttentionAccelerator:
 
     def wait_done(self, q_heads: np.ndarray, k_heads: np.ndarray, v_heads: np.ndarray, seq_len: int, timeout_ms: int | None = None) -> None:
         deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000.0
+        last_serviced_req: int | None = None
         while True:
             status = self.status()
             if status & (STATUS_ERROR | STATUS_STREAM_ERROR):
@@ -449,11 +478,23 @@ class AttentionAccelerator:
             if status & STATUS_DONE:
                 return
             if status & (STATUS_KV_LOAD_REQ | STATUS_Q_LOAD_REQ):
-                self._service_request(self.mmio.read(CSR_LOAD_REQ), q_heads, k_heads, v_heads, seq_len)
+                req = self.mmio.read(CSR_LOAD_REQ)
+                if req != last_serviced_req:
+                    self._service_request(req, q_heads, k_heads, v_heads, seq_len)
+                    last_serviced_req = req
+                    # A completed DMA is immediately visible to the RTL. Poll
+                    # again without imposing a fixed delay on every request.
+                    continue
+                if self.last_profile is not None:
+                    self.last_profile.request_duplicate_polls += 1
+            else:
+                last_serviced_req = None
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("attention accelerator timed out while servicing load requests")
-            if self._hw_ready:
-                time.sleep(0.0005)
+            if self._hw_ready and self._request_poll_sleep_s > 0:
+                time.sleep(self._request_poll_sleep_s)
+                if self.last_profile is not None:
+                    self.last_profile.request_poll_sleeps += 1
 
     def readback_o(self, seq_len: int, out_buf: np.ndarray) -> np.ndarray:
         self.dma_recv.wait()
@@ -498,6 +539,7 @@ class AttentionAccelerator:
             causal=causal,
             q_pos_base=q_pos_base,
             kv_pos_base=kv_pos_base,
+            request_poll_sleep_us=self._request_poll_sleep_us,
         )
 
         pack_start = time.perf_counter()

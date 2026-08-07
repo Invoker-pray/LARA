@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -12,12 +13,70 @@ from sw.attn_driver import (
     N_Q_HEADS,
     Q_TILE_BYTES,
     TILE_Q,
+    CSR_LOAD_REQ,
+    CSR_STATUS,
+    STATUS_BUSY,
+    STATUS_DONE,
+    STATUS_KV_LOAD_REQ,
     bf16_u16_to_fp32,
     fp32_to_bf16_u16,
 )
 
 
+class SequencedMMIO:
+    def __init__(self, statuses, request=1):
+        self.statuses = iter(statuses)
+        self.request = request
+
+    def read(self, offset):
+        if offset == CSR_STATUS:
+            return next(self.statuses)
+        if offset == CSR_LOAD_REQ:
+            return self.request
+        return 0
+
+
 class AttentionDriverTest(unittest.TestCase):
+    def test_request_poll_sleep_validation(self):
+        with self.assertRaisesRegex(ValueError, "finite non-negative"):
+            AttentionAccelerator(request_poll_sleep_us=-1)
+        with patch.dict("os.environ", {"LARA_REQUEST_POLL_SLEEP_US": "invalid"}):
+            with self.assertRaisesRegex(ValueError, "must be a non-negative number"):
+                AttentionAccelerator()
+
+    def test_new_request_is_serviced_without_sleep(self):
+        accel = AttentionAccelerator(request_poll_sleep_us=20)
+        accel._hw_ready = True
+        accel.mmio = SequencedMMIO([
+            STATUS_BUSY | STATUS_KV_LOAD_REQ,
+            STATUS_DONE,
+        ])
+        accel._service_request = Mock()
+        tensors = np.zeros((1, 1, 1), dtype=np.uint16)
+
+        with patch("sw.attn_driver.time.sleep") as sleep:
+            accel.wait_done(tensors, tensors, tensors, 1)
+
+        accel._service_request.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_sticky_request_is_not_submitted_twice(self):
+        accel = AttentionAccelerator(request_poll_sleep_us=25)
+        accel._hw_ready = True
+        accel.mmio = SequencedMMIO([
+            STATUS_BUSY | STATUS_KV_LOAD_REQ,
+            STATUS_BUSY | STATUS_KV_LOAD_REQ,
+            STATUS_DONE,
+        ])
+        accel._service_request = Mock()
+        tensors = np.zeros((1, 1, 1), dtype=np.uint16)
+
+        with patch("sw.attn_driver.time.sleep") as sleep:
+            accel.wait_done(tensors, tensors, tensors, 1)
+
+        accel._service_request.assert_called_once()
+        sleep.assert_called_once_with(25 / 1.0e6)
+
     def test_bf16_round_trip(self):
         values = np.array([1.0, -2.5, 0.0, np.float32(1.0 / 3.0)], dtype=np.float32)
         words = fp32_to_bf16_u16(values)

@@ -234,6 +234,22 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+def detect_cpu_clock_mhz(cpu_core: int | None) -> float | None:
+    """Read a stable CPU clock snapshot for explicitly labeled cycle estimates."""
+    if cpu_core is None and hasattr(os, "sched_getaffinity"):
+        affinity = sorted(os.sched_getaffinity(0))
+        if len(affinity) == 1:
+            cpu_core = affinity[0]
+    if cpu_core is None:
+        return None
+    freq_dir = Path(f"/sys/devices/system/cpu/cpu{cpu_core}/cpufreq")
+    for name in ("scaling_cur_freq", "cpuinfo_cur_freq"):
+        value = _read_text(freq_dir / name)
+        if value and value.isdigit() and int(value) > 0:
+            return int(value) / 1000.0
+    return None
+
+
 def collect_environment() -> dict[str, Any]:
     cpu: list[dict[str, Any]] = []
     for cpu_dir in sorted(Path("/sys/devices/system/cpu").glob("cpu[0-9]*")):
@@ -285,6 +301,7 @@ def benchmark_case(
     warmup: int,
     repeats: int,
     timeout_ms: int | None,
+    cpu_clock_mhz: float | None = None,
 ) -> dict[str, Any]:
     case_id = _case_id(case)
     if warmup:
@@ -386,6 +403,28 @@ def benchmark_case(
     valid_pairs = _valid_pairs(case)
     macs = 2 * N_Q_HEADS * valid_pairs * HEAD_DIM
     operations = 2 * macs
+    cpu_estimated_cycles = (
+        cpu_stats["median"] * cpu_clock_mhz * 1000.0
+        if cpu_clock_mhz is not None
+        else None
+    )
+    cpu_ops_per_cycle = (
+        operations / cpu_estimated_cycles
+        if cpu_estimated_cycles is not None and cpu_estimated_cycles > 0
+        else None
+    )
+    pl_transaction_cycles = _stats(pl_cycles)["median"] if pl_counter_valid else None
+    pl_active_cycles = _stats(pl_compute_cycles)["median"] if pl_counter_valid else None
+    pl_transaction_ops_per_cycle = (
+        operations / pl_transaction_cycles
+        if pl_transaction_cycles is not None and pl_transaction_cycles > 0
+        else None
+    )
+    pl_active_ops_per_cycle = (
+        operations / pl_active_cycles
+        if pl_active_cycles is not None and pl_active_cycles > 0
+        else None
+    )
     expected_fp32 = bf16_u16_to_fp32(case.expected)
     hardware_fp32 = bf16_u16_to_fp32(hardware_output)
 
@@ -457,6 +496,29 @@ def benchmark_case(
             "wall_ms": cpu_stats,
             "effective_gops_median": operations / (cpu_stats["median"] * 1.0e6),
         },
+        "architecture_per_cycle": {
+            "scope": (
+                "CPU cycles are estimated from measured wall time and the recorded stable CPU clock; "
+                "PL cycles are retained RTL counters. This is a per-cycle architecture metric, not "
+                "a frequency-normalized end-to-end wall-time claim."
+            ),
+            "cpu_clock_mhz": cpu_clock_mhz,
+            "pl_clock_mhz": _stats(pl_clock_mhz)["median"],
+            "cpu_estimated_cycles_median": cpu_estimated_cycles,
+            "cpu_ops_per_cycle": cpu_ops_per_cycle,
+            "pl_transaction_ops_per_cycle": pl_transaction_ops_per_cycle,
+            "pl_active_ops_per_cycle": pl_active_ops_per_cycle,
+            "pl_transaction_efficiency_over_cpu": (
+                pl_transaction_ops_per_cycle / cpu_ops_per_cycle
+                if pl_transaction_ops_per_cycle is not None and cpu_ops_per_cycle is not None
+                else None
+            ),
+            "pl_active_efficiency_over_cpu": (
+                pl_active_ops_per_cycle / cpu_ops_per_cycle
+                if pl_active_ops_per_cycle is not None and cpu_ops_per_cycle is not None
+                else None
+            ),
+        },
         "speedup": {
             "cpu_over_fpga_pl_transaction": (
                 cpu_stats["median"] / pl_transaction_stats["median"]
@@ -484,6 +546,9 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "pl_effective_gops", "pl_core_active_effective_gops",
         "fpga_e2e_effective_gops",
         "cpu_effective_gops", "attention_macs", "algorithmic_ops",
+        "cpu_clock_mhz", "cpu_estimated_cycles", "cpu_ops_per_cycle",
+        "pl_transaction_ops_per_cycle", "pl_active_ops_per_cycle",
+        "pl_transaction_efficiency_over_cpu", "pl_active_efficiency_over_cpu",
     ]
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
@@ -558,6 +623,13 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "cpu_effective_gops": row["cpu_baseline"]["effective_gops_median"],
                 "attention_macs": row["work"]["attention_macs_qk_plus_pv"],
                 "algorithmic_ops": row["work"]["algorithmic_ops_two_per_mac"],
+                "cpu_clock_mhz": row["architecture_per_cycle"]["cpu_clock_mhz"],
+                "cpu_estimated_cycles": row["architecture_per_cycle"]["cpu_estimated_cycles_median"],
+                "cpu_ops_per_cycle": row["architecture_per_cycle"]["cpu_ops_per_cycle"],
+                "pl_transaction_ops_per_cycle": row["architecture_per_cycle"]["pl_transaction_ops_per_cycle"],
+                "pl_active_ops_per_cycle": row["architecture_per_cycle"]["pl_active_ops_per_cycle"],
+                "pl_transaction_efficiency_over_cpu": row["architecture_per_cycle"]["pl_transaction_efficiency_over_cpu"],
+                "pl_active_efficiency_over_cpu": row["architecture_per_cycle"]["pl_active_efficiency_over_cpu"],
             })
 
 
@@ -601,6 +673,14 @@ def main() -> int:
     )
     parser.add_argument("--cpu-core", type=int, help="pin this process to one Cortex-A53 core")
     parser.add_argument(
+        "--cpu-clock-mhz",
+        type=float,
+        help=(
+            "stable CPU clock for estimated cycles/per-cycle efficiency; "
+            "default: read the pinned core's cpufreq sysfs entry"
+        ),
+    )
+    parser.add_argument(
         "--reuse-overlay-within-case",
         action="store_true",
         help=(
@@ -612,6 +692,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.warmup < 0 or args.repeats < 1:
         parser.error("--warmup must be >= 0 and --repeats must be >= 1")
+    if args.cpu_clock_mhz is not None and args.cpu_clock_mhz <= 0:
+        parser.error("--cpu-clock-mhz must be > 0")
 
     case_sets = args.case_set or [
         ("q3kv3", Path("board_cases_rtl_contract_v2.6_fixed")),
@@ -630,6 +712,15 @@ def main() -> int:
         if not hasattr(os, "sched_setaffinity"):
             raise RuntimeError("CPU affinity is unavailable on this platform")
         os.sched_setaffinity(0, {args.cpu_core})
+    cpu_clock_mhz = args.cpu_clock_mhz or detect_cpu_clock_mhz(args.cpu_core)
+    if cpu_clock_mhz is None:
+        print(
+            "WARNING: CPU clock is unavailable; architecture per-cycle CPU metrics will be null. "
+            "Pin a core or pass --cpu-clock-mhz.",
+            flush=True,
+        )
+    else:
+        print(f"CPU clock for per-cycle metrics: {cpu_clock_mhz:.6f} MHz", flush=True)
 
     bitstream = Path(args.bitstream).resolve()
     if not bitstream.is_file():
@@ -658,12 +749,14 @@ def main() -> int:
                     row = benchmark_case(
                         accel, case, warmup=args.warmup,
                         repeats=args.repeats, timeout_ms=args.timeout_ms,
+                        cpu_clock_mhz=cpu_clock_mhz,
                     )
             else:
                 print("  Fresh-Overlay isolation enabled for every FPGA sample", flush=True)
                 row = benchmark_case(
                     FreshOverlayRunner(bitstream), case, warmup=args.warmup,
                     repeats=args.repeats, timeout_ms=args.timeout_ms,
+                    cpu_clock_mhz=cpu_clock_mhz,
                 )
         except Exception as exc:
             benchmark_errors.append({
@@ -695,7 +788,8 @@ def main() -> int:
             f"E2E={row['fpga']['host_to_host_attention_ms']['median']:.6f} ms "
             f"CPU={row['cpu_baseline']['wall_ms']['median']:.6f} ms "
             f"speedup_tx/active/e2e={pl_speedup_text}/{pl_compute_speedup_text}/"
-            f"{row['speedup']['cpu_over_fpga_host_to_host']:.3f}x",
+            f"{row['speedup']['cpu_over_fpga_host_to_host']:.3f}x "
+            f"cycle_eff_active={row['architecture_per_cycle']['pl_active_efficiency_over_cpu'] or float('nan'):.3f}x",
             flush=True,
         )
 
@@ -720,6 +814,11 @@ def main() -> int:
             ),
             "statistics": "one warmup by default; min/median/p95/max over five measured runs",
             "operation_count": "2 operations per MAC; QK and PV; causal count includes only position-valid pairs",
+            "architecture_per_cycle": (
+                "CPU wall time multiplied by the recorded stable CPU MHz estimates CPU cycles; "
+                "PL cycles come from retained RTL counters. E2E is not frequency-normalized because "
+                "the FPGA path also uses the high-frequency PS for request service."
+            ),
             "selected_lengths": args.lengths,
             "selected_modes": ["causal"] if args.causal_only else ["causal", "noncausal"],
         },

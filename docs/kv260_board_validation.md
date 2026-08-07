@@ -38,6 +38,12 @@ bank、32 行 Q tile，单次事务最大序列长度为 512。
 - CPU 主指标：`perf_counter_ns` 的真实 wall time。CPU 与 PL 属于不同 DVFS/clock
   domain，不能直接比较原始周期；PL 用自身周期/PL Hz，CPU 用真实 elapsed time，最后
   比较两者的秒数。脚本同时归档 CPU governor/current frequency 和温度快照。
+- 辅助同频归一化：若需要比较每 MHz 架构效率，可在 CPU 频率稳定时计算
+  `CPU_linear_at_PL_ms = CPU_wall_ms * CPU_MHz / PL_MHz`，再以
+  `CPU_linear_at_PL_ms / FPGA_ms` 得到线性同频比。当前实测频率对应
+  `1333.333 / 71.427857 = 18.6668`。该结果必须标注为 hypothetical linear
+  frequency normalization；CPU/NEON、cache、DRAM 和 DVFS 不会保证随频率严格线性，
+  因而它不能替代真实 wall-time，也不能写成实际同频板测结果。
 - 默认 1 次 warmup、5 次正式测量，报告 min/median/p95/max；speedup 使用 median。
   `LARA_CPU_THREADS=1` 为默认单线程 baseline，也可显式设为 4 并在结果中留痕。
 
@@ -167,15 +173,32 @@ q0/kv0 L512 causal case。此处不会运行它们。旧
 仍在上述 root/PYNQ shell 中执行。脚本在每个 case 前重新加载 Overlay，依次运行
 两套 20 个 case；每个 case 默认预热 1 次、正式运行 5 次：
 
+驱动默认只在没有新请求可服务时休眠 `20 us`。完成一个新的 K/V/Q DMA 请求后会
+立即重新轮询；如果 RTL 的请求位尚未撤销，驱动会识别相同 `CSR_LOAD_REQ`，避免
+重复提交同一 DMA。可用 `LARA_REQUEST_POLL_SLEEP_US` 调整空闲轮询间隔：`0` 表示
+完全忙轮询，建议板测 A/B 使用 `10`、`20` 或 `50`。profile 中的
+`request_poll_sleep_us`、`request_poll_sleeps` 和 `request_duplicate_polls` 会记录
+实际配置和轮询行为。旧驱动每轮固定休眠 `500 us`，不能与新结果混为同一软件版本。
+
 ```bash
-LARA_CPU_THREADS=1 python3 board_performance.py \
+LARA_CPU_THREADS=1 \
+LARA_REQUEST_POLL_SLEEP_US=20 \
+python3 board_performance.py \
   --bitstream ./lara_attention.bit \
   --case-set q3kv3=./board_cases_rtl_contract_v2.6_fixed \
   --case-set q31kv7=./board_cases_rtl_contract_v2.6_q31_kv7 \
   --warmup 1 \
   --repeats 5 \
+  --cpu-core 3 \
+  --cpu-clock-mhz 1333.333 \
   --output-dir ./board_performance_results
 ```
+
+`--cpu-clock-mhz` 用于估算 CPU cycles 和每周期效率；只有 CPU governor/frequency
+在测量前后稳定时才能使用。JSON/CSV 会额外记录 `cpu_ops_per_cycle`、
+`pl_transaction_ops_per_cycle`、`pl_active_ops_per_cycle`、
+`pl_transaction_efficiency_over_cpu` 和 `pl_active_efficiency_over_cpu`。其中 PL active
+每周期效率是主要架构指标；真实 host-to-host E2E 继续使用 wall-time，不做伪同频换算。
 
 板上 attention 默认无超时限制，长 case 不会在 5 分钟时被脚本终止。需要快速收集
 代表性证据时，运行一键脚本的 `--quick-q31kv7` 模式，只测 q31/kv7 L1 causal 和
@@ -187,6 +210,7 @@ python3 run_board_full_validation.py \
   --bitstream ./lara_attention.bit \
   --output-dir ./board_quick_q31kv7_L1_L128 \
   --cpu-threads 1 \
+  --cpu-clock-mhz 1333.333 \
   --warmup 1 \
   --repeats 5
 ```
