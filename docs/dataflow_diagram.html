@@ -27,7 +27,7 @@
 <body>
 
 <h1>图2：数据通路 & 控制流详图</h1>
-<div class="note"><b>当前实现边界：</b>v2.4 为 83.333 MHz、MAX_SEQ_LEN=512 的单序列 prefill。host 完成 QKV/RoPE；一次 start 后由 driver 响应 CSR_LOAD_REQ。片上每次只缓存当前 GQA group 的 KV head，L&gt;512 分页路径尚未实现。</div>
+<div class="note"><b>当前实现边界：</b>v2.5 P4 streaming/fused-PV 为当前默认实现，accepted Explore post-route 为 83.333 MHz、WNS +0.021 ns、WHS +0.010 ns。设计仍是 MAX_SEQ_LEN=512 的单序列 prefill；host 完成 QKV/RoPE，一次 start 后由 driver 响应 CSR_LOAD_REQ。片上每次只缓存当前 GQA group 的 KV head，L&gt;512 分页路径尚未实现。P4 的回退定义为 <code>LARA_STREAMING_PV_ROLLBACK</code>。</div>
 <p>K/V-Stationary 数据流 · FSM 状态机 · FlashAttention 循环 · 设计方向评估</p>
 
 <!-- ==================== 数据流主图 ==================== -->
@@ -152,7 +152,7 @@ stateDiagram-v2
 <tr><th>#</th><th>方向</th><th>原理 & 收益</th></tr>
 <tr><td class="adopt">①</td><td><b>K/V-Stationary</b></td><td>当前 KV head 在 URAM 驻留，4 个 Q heads 共享同一次 K/V DMA。</td></tr>
 <tr><td class="adopt">②</td><td><b>Q 流式加载</b></td><td>Q 只遍历一次，每 tile 从 DDR 加载后立即消费。省 512 KB URAM。</td></tr>
-<tr><td class="adopt">③</td><td><b>MAC 分时复用</b></td><td>同一逻辑阵列做 Q×K^T + A×V；v2.4 post-route 使用 165 DSP。</td></tr>
+<tr><td class="adopt">③</td><td><b>MAC 分时复用</b></td><td>同一逻辑阵列做 Q×K^T + A×V；v2.5 P4 Explore post-route 使用 165 DSP，并在 P4 调度中融合 PV retire。</td></tr>
 <tr><td class="adopt">④</td><td><b>流式数据通路</b></td><td>S_tile 和 P_tile 不写回 SRAM，MAC→Softmax→MAC 全流水直通。</td></tr>
 <tr><td class="adopt">⑤</td><td><b>QKV 投影在主机端</b></td><td>投影计算量大 (1000× Attention)，放在 ARM/软件。FPGA 只做 Attention。</td></tr>
 <tr><td class="adopt">⑥</td><td><b>GQA group 循环</b></td><td>L≤512: 当前 KV head 驻留并被 4 个 Q heads 复用；L>512: 分页/分块尚未实现。</td></tr>

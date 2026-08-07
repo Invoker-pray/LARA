@@ -17,6 +17,15 @@ def main() -> int:
     parser.add_argument("--bitstream", required=True, help="path to lara_attention.bit; matching .hwh must be beside it")
     parser.add_argument("--seq-len", type=int, help="sequence length; inferred from --npz when omitted")
     parser.add_argument("--npz", help="optional NPZ containing q_heads, k_heads and v_heads as bf16 uint16 arrays")
+    parser.add_argument(
+        "--expected-npz",
+        help="optional NPZ containing expected_o or o_heads as raw bf16 uint16 output",
+    )
+    causal_group = parser.add_mutually_exclusive_group()
+    causal_group.add_argument("--causal", dest="causal", action="store_true", default=True)
+    causal_group.add_argument("--non-causal", dest="causal", action="store_false")
+    parser.add_argument("--q-pos-base", type=int, default=0)
+    parser.add_argument("--kv-pos-base", type=int, default=0)
     parser.add_argument("--profile-json", help="optional path for the structured run profile")
     args = parser.parse_args()
 
@@ -43,10 +52,41 @@ def main() -> int:
     if q.shape != expected_q or k.shape != expected_kv or v.shape != expected_kv:
         raise ValueError(f"expected Q={expected_q}, K/V={expected_kv}; got {q.shape}, {k.shape}, {v.shape}")
 
+    expected = None
+    if args.expected_npz:
+        expected_tensors = np.load(args.expected_npz)
+        expected = expected_tensors.get("expected_o", expected_tensors.get("o_heads"))
+        if expected is None:
+            raise ValueError("--expected-npz must contain expected_o or o_heads")
+        expected = np.asarray(expected)
+        if expected.shape != expected_q or expected.dtype != np.uint16:
+            raise ValueError(
+                f"expected output must be uint16 with shape {expected_q}; "
+                f"got {expected.shape} {expected.dtype}"
+            )
+
     accel = AttentionAccelerator(str(Path(args.bitstream).resolve()))
-    out = accel.run_attention(q, k, v, seq_len=args.seq_len)
+    out = accel.run_attention(
+        q,
+        k,
+        v,
+        seq_len=args.seq_len,
+        q_pos_base=args.q_pos_base,
+        kv_pos_base=args.kv_pos_base,
+        causal=args.causal,
+    )
     if not args.npz and np.any(out != 0):
         raise RuntimeError("zero-input smoke test produced a non-zero output")
+    if expected is not None:
+        mismatch = np.argwhere(out != expected)
+        if mismatch.size:
+            first = tuple(int(value) for value in mismatch[0])
+            raise RuntimeError(
+                f"board output mismatch at {first}: "
+                f"got=0x{int(out[first]):04x} expected=0x{int(expected[first]):04x}; "
+                f"mismatches={len(mismatch)}"
+            )
+        print("precomputed Q/K/V output: BIT-EXACT PASS")
     print("LARA KV260 smoke test PASS")
     print(f"  sequence length: {args.seq_len}")
     print(f"  perf: {accel.read_perf()}")

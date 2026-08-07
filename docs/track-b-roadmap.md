@@ -2,7 +2,7 @@
 
 ## FPT'26 Design Competition — 完整准备路线图
 
-> 状态说明（2026-07-18）：本文主体是项目启动阶段的学习/规划材料，不代表当前实现状态。当前部署上限为 `MAX_SEQ_LEN=512`，v2.5 Phase 1 已在 KV260 83.333 MHz 完成 post-route 时序收敛（WNS `+0.062 ns`，WHS `+0.010 ns`），资源为 165 DSP、95267 LUT、57838 FF、50 BRAM、48 URAM。当前 P0 已转为 CSR/DMA 软硬件协同、真实板上数值验证和端到端性能测量；文中的 200 MHz、2048 长度及早期资源数字只能作为探索目标。
+> 状态说明（2026-07-31）：本文主体是项目启动阶段的学习/规划材料，不代表当前实现状态。当前部署上限为 `MAX_SEQ_LEN=512`；v2.5 P0、P1、P2 已依次完成，P2 Phase-A MAC/softmax overlap 将 focused 主循环从 7109 降到 5310 cycles（25.31%）。P3 scratch/P-store 三个候选均已形成证据拒绝结论；P4 candidate 1 streaming/fused PV 以 5809 cycles（相对 8429 降低 31.08%）通过 matching clean-build Explore route，当前默认开启并保留 rollback。Explore post-route 为 95479 LUT、56940 FF、50 BRAM、48 URAM、165 DSP，WNS `+0.021 ns`、WHS `+0.010 ns`。板卡未连接，因此实板数值和端到端性能仍待最终验证；文中的 200 MHz、2048 长度及早期资源数字只能作为探索目标。
 
 ---
 

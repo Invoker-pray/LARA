@@ -7,7 +7,7 @@ module tb_attn_tile;
   import attn_pkg::*;
 
   logic clk, rst_n, phase_sel, accum_en;
-  logic [1:0] split_phase;
+  logic [TILE_SPLIT_INDEX_W-1:0] split_phase;
   logic clear_accum;
   logic [15:0] row_data [TILE_ROWS];
   logic [15:0] col_data [TILE_COLS];
@@ -73,7 +73,7 @@ module tb_attn_tile;
     input string tag,
     input logic do_clear,
     input logic do_accum,
-    input logic [1:0] sp
+    input logic [TILE_SPLIT_INDEX_W-1:0] sp
   );
     shortreal visible_state [TILE_ROWS][TILE_COLS];
     shortreal next_state    [TILE_ROWS][TILE_COLS];
@@ -98,9 +98,9 @@ module tb_attn_tile;
       for (ri = 0; ri < TILE_ROWS; ri = ri + 1) begin
         a = bf16_to_shortreal(row_data[ri]);
         for (ci = 0; ci < TILE_COLS; ci = ci + 1) begin
-          if ((sp == 2'd0 && ci < (TILE_COLS / TILE_SPLIT_FACTOR)) ||
-              (sp == 2'd1 && ci >= (TILE_COLS / TILE_SPLIT_FACTOR)) ||
-              (sp > 2'd1)) begin
+          if ((TILE_SPLIT_FACTOR <= 1) ||
+              ((ci >= (sp * (TILE_COLS / TILE_SPLIT_FACTOR))) &&
+               (ci < ((sp + 1) * (TILE_COLS / TILE_SPLIT_FACTOR))))) begin
             b = bf16_to_shortreal(col_data[ci]);
           end else begin
             b = shortreal'(0.0);

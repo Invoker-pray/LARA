@@ -36,7 +36,7 @@ TILE_COLS  = 16          # MAC array columns (K/V parallelism)
 TILE_ELEMS = TILE_ROWS * TILE_COLS  # = 256 PEs
 
 # Pipeline Split (§2)
-TILE_SPLIT_FACTOR = 2    # 1=safe, 2=balanced, 4=aggressive
+TILE_SPLIT_FACTOR = 16   # 1=safe, 2=rollback, 4/8=intermediate, 16=closure default
 TILE_MAC_REUSE    = True  # Time-multiplex MAC for Phase A + B
 
 # Data Widths (§3)
@@ -358,7 +358,9 @@ class OnlineSoftmaxState:
 
 def attention_head(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
                    exp_lut: np.ndarray,
-                   causal: bool = True) -> np.ndarray:
+                   causal: bool = True,
+                   q_pos_base: int = 0,
+                   kv_pos_base: int = 0) -> np.ndarray:
     """FlashAttention forward pass for a single attention head.
 
     Corresponds to: attn_core.sv (FSM orchestrating the double loop)
@@ -368,7 +370,9 @@ def attention_head(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
         K: [L, head_dim] bf16 — key for the corresponding KV head
         V: [L, head_dim] bf16 — value for the corresponding KV head
         exp_lut: pre-built EXP LUT
-        causal: if True, apply causal mask (positions j > i masked out).
+        causal: if True, apply causal masking using absolute positions.
+        q_pos_base: absolute position of Q[0].
+        kv_pos_base: absolute position of K/V[0].
 
     Returns:
         O: [L, head_dim] bf16 — attention output for this head.
@@ -403,8 +407,8 @@ def attention_head(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
             # Build causal mask for this [q_start:q_end] × [kv_start:kv_end] block
             causal_mask = None
             if causal:
-                q_idx = np.arange(q_start, q_end)[:, np.newaxis]    # [Tq, 1]
-                kv_idx = np.arange(kv_start, kv_end)[np.newaxis, :]  # [1, Tk]
+                q_idx = (q_pos_base + np.arange(q_start, q_end))[:, np.newaxis]
+                kv_idx = (kv_pos_base + np.arange(kv_start, kv_end))[np.newaxis, :]
                 causal_mask = kv_idx <= q_idx                       # [Tq, Tk], True = valid
 
             # Phase B: Online Softmax + accumulate O
@@ -424,7 +428,8 @@ def attention_head(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
 
 
 def attention_gqa(Q_full: np.ndarray, K_full: np.ndarray, V_full: np.ndarray,
-                  exp_lut: np.ndarray, causal: bool = True) -> np.ndarray:
+                  exp_lut: np.ndarray, causal: bool = True,
+                  q_pos_base: int = 0, kv_pos_base: int = 0) -> np.ndarray:
     """Full multi-head GQA attention forward pass.
 
     Args:
@@ -432,7 +437,9 @@ def attention_gqa(Q_full: np.ndarray, K_full: np.ndarray, V_full: np.ndarray,
         K_full: [L, 1024] bf16 — all 8 KV heads concatenated along dim 1
         V_full: [L, 1024] bf16 — all 8 KV heads concatenated along dim 1
         exp_lut: pre-built EXP LUT
-        causal: enable causal masking
+        causal: enable causal masking using absolute positions
+        q_pos_base: absolute position of Q_full[0].
+        kv_pos_base: absolute position of K_full/V_full[0].
 
     Returns:
         O_full: [L, 4096] bf16 — all 32 output heads concatenated.
@@ -457,7 +464,9 @@ def attention_gqa(Q_full: np.ndarray, K_full: np.ndarray, V_full: np.ndarray,
             q_start = q_head * HEAD_DIM
             Q_h = Q_full[:, q_start : q_start + HEAD_DIM]
 
-            O_h = attention_head(Q_h, K_h, V_h, exp_lut, causal)
+            O_h = attention_head(
+                Q_h, K_h, V_h, exp_lut, causal,
+                q_pos_base=q_pos_base, kv_pos_base=kv_pos_base)
 
             o_start = q_head * HEAD_DIM
             O_full[:, o_start : o_start + HEAD_DIM] = O_h

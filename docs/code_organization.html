@@ -125,8 +125,8 @@
   Target: Llama3-8B / Llama3.1-8B Attention Accelerator · bf16 Precision · Kria KV260 (Without AI Cores)<br>
   Competition: FPT'26 Track B — "Llama3-8B or models with consistent parameters"
 </p>
-<div class="note"><strong>Current implementation snapshot (2026-07-15):</strong>
-v2.4 closes post-route timing at 83.333 MHz with WNS +0.049 ns, WHS +0.011 ns, 165 DSP, 88065 LUT, 57718 FF, 50 BRAM and 48 URAM. MAX_SEQ_LEN is 512. The host performs RMSNorm/QKV/RoPE; one FPGA start then uses CSR_LOAD_REQ to load one KV head per GQA group and one padded Q tile per request. Older 200 MHz, 256-DSP and MAX_SEQ_LEN=2048 values below are historical architecture estimates, not signoff results.</div>
+<div class="note"><strong>Current implementation snapshot (2026-08-02):</strong>
+v2.5 P4 streaming/fused-PV is the current default at 83.333 MHz. Accepted Explore post-route is WNS +0.021 ns, WHS +0.010 ns, 165 DSP, 95479 LUT, 56940 FF, 50 BRAM and 48 URAM. MAX_SEQ_LEN is 512. The host performs RMSNorm/QKV/RoPE; one FPGA start then uses CSR_LOAD_REQ to load one KV head per GQA group and one padded Q tile per request. Older 200 MHz, 256-DSP and MAX_SEQ_LEN=2048 values below are historical architecture estimates, not signoff results. The accepted P4 screening artifact is a routed DCP; deployment files must be exported from it.</div>
 
 <!-- ================================================================ -->
 <!-- LEGEND -->
@@ -457,7 +457,7 @@ for accumulating up to 2^(23-7) = 65536 bf16 products without rounding error.<br
 <h4>Interface</h4>
 <table class="iface-table">
 <tr><th>Port</th><th>Direction</th><th>Width</th><th>Description</th></tr>
-<tr><td><code>clk</code></td><td>in</td><td>1</td><td>PS PL0 clock; v2.4 post-route constraint 83.333 MHz</td></tr>
+<tr><td><code>clk</code></td><td>in</td><td>1</td><td>PS PL0 clock; v2.5 P4 post-route constraint 83.333 MHz</td></tr>
 <tr><td><code>rst_n</code></td><td>in</td><td>1</td><td>Asynchronous reset, active-low</td></tr>
 <tr><td><code>a_bf16</code></td><td>in</td><td>16</td><td>Operand A in bf16 format {sign, exp[7:0], mant[6:0]}</td></tr>
 <tr><td><code>b_bf16</code></td><td>in</td><td>16</td><td>Operand B in bf16 format</td></tr>
@@ -553,7 +553,7 @@ Inner (depth) loop: 128 / TILE_SPLIT_FACTOR iterations.
   - 16×16 = 256 parallel bf16 multiplications
   - Column reduction: each column sums 16 PE outputs → 16 fp32 values
 
-Data flow per cycle (TILE_SPLIT_FACTOR=2, 8 elements processed/cycle):
+Data flow per cycle (TILE_SPLIT_FACTOR=16, 1 element processed/cycle):
   Q[0..15][depth]  ──row broadcast──→ PE[row, 0..15]  ←──col broadcast── K[0..15][depth]
                                               │
                                      256 parallel bf16 MACs

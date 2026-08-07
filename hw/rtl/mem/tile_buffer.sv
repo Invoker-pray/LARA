@@ -102,26 +102,33 @@ module tile_buffer
       rd_en_d       <= 1'b0;
       rd_bank_sel_d <= 1'b0;
       rd_lane_idx_d <= 4'd0;
-      rd_data       <= '0;
-      for (int bri = 0; bri < TILE_ROWS; bri++) begin
-        rd_block_data[bri] <= '0;
-      end
     end else begin
       rd_en_d       <= rd_en;
       rd_bank_sel_d <= rd_bank_sel;
       rd_lane_idx_d <= rd_row[3:0];
+    end
+  end
 
-      if (rd_en_d) begin
-        if (!rd_bank_sel_d) begin
-          rd_data <= buf0_block_word[rd_lane_idx_d];
-          for (int bri = 0; bri < TILE_ROWS; bri++) begin
-            rd_block_data[bri] <= buf0_block_word[bri];
-          end
-        end else begin
-          rd_data <= buf1_block_word[rd_lane_idx_d];
-          for (int bri = 0; bri < TILE_ROWS; bri++) begin
-            rd_block_data[bri] <= buf1_block_word[bri];
-          end
+  // XPM already registers the memory output once.  Keep only the request
+  // metadata registered here so Q data has the same one-cycle read latency as
+  // the K cache.  A second output register would pair Q[d] with K[d+1] in
+  // the Phase-A MAC pipeline.
+  always_comb begin
+    rd_data = '0;
+    for (int bri = 0; bri < TILE_ROWS; bri++) begin
+      rd_block_data[bri] = '0;
+    end
+
+    if (rd_en_d) begin
+      if (!rd_bank_sel_d) begin
+        rd_data = buf0_block_word[rd_lane_idx_d];
+        for (int bri = 0; bri < TILE_ROWS; bri++) begin
+          rd_block_data[bri] = buf0_block_word[bri];
+        end
+      end else begin
+        rd_data = buf1_block_word[rd_lane_idx_d];
+        for (int bri = 0; bri < TILE_ROWS; bri++) begin
+          rd_block_data[bri] = buf1_block_word[bri];
         end
       end
     end

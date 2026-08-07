@@ -159,7 +159,8 @@ module tb_attn_top_two_tiles;
     int logical_row;
 
     if (rst_n) begin
-      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 7'd1) && (dut.phasea_kv_blk_idx == 0)) begin
+      if ((dut.phasea_state == 3'd2) && dut.phasea_depth_active &&
+          (dut.depth_cnt == 7'd1) && (dut.phasea_kv_blk_idx == 0)) begin
         if (dut.q_tile_start == 16'd0) begin
           saw_bufsel_tile0 = 1'b1;
           if ((dut.phasea_micro_idx == 0) && !saw_tile0_micro0) begin
@@ -179,9 +180,17 @@ module tb_attn_top_two_tiles;
         end else if (dut.q_tile_start == 16'd32) begin
           saw_bufsel_tile1 = 1'b1;
           if ((dut.phasea_micro_idx == 0) && !saw_tile1_micro0) begin
+            if (dut.q_block_rd[0] !== BF16_THREE) begin
+              $display("FAIL tile1 micro0 q_block_rd[0]=%h exp=%h", dut.q_block_rd[0], BF16_THREE);
+              err++;
+            end
             saw_tile1_micro0 = 1'b1;
           end
           if ((dut.phasea_micro_idx == 1) && !saw_tile1_micro1) begin
+            if (dut.q_block_rd[0] !== BF16_FOUR) begin
+              $display("FAIL tile1 micro1 q_block_rd[0]=%h exp=%h", dut.q_block_rd[0], BF16_FOUR);
+              err++;
+            end
             saw_tile1_micro1 = 1'b1;
           end
         end
@@ -265,6 +274,7 @@ module tb_attn_top_two_tiles;
     tick();
 
     force dut.buf_sel = preload_buf_sel;
+    force dut.q_load_bank_sel_latched = preload_buf_sel;
     force dut.qbuf_wr_en = preload_q_wr_en;
     force dut.k_wr_en = preload_k_wr_en;
     force dut.v_wr_en = preload_v_wr_en;
@@ -277,6 +287,7 @@ module tb_attn_top_two_tiles;
     preload_kv();
 
     release dut.buf_sel;
+    release dut.q_load_bank_sel_latched;
     release dut.qbuf_wr_en;
     release dut.k_wr_en;
     release dut.v_wr_en;

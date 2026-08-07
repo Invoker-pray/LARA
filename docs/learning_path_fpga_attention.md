@@ -65,7 +65,7 @@ KV260 PL:        QK^T -> online softmax -> P*V -> output normalize/writeback
 - **AMD FPGA YouTube**：<https://www.youtube.com/@AMDDevelopers>
   - 搜索 `Vivado Design Analysis`, `AXI4-Stream`, `PYNQ`。
 
-推荐实践：每次改 RTL 后先看 post-synthesis hierarchy 和 critical path，再决定是否长时间 route。LARA 当前 v2.5 Phase 1 的 83.333 MHz post-route WNS 为 `+0.062 ns`（需用 Explore 恢复流程获得），仍然没有“顺便再加一点组合逻辑”的余量。
+推荐实践：每次改 RTL 后先看 post-synthesis hierarchy 和 critical path，再决定是否长时间 route。LARA 当前 v2.5 P4 的 83.333 MHz matching Explore-route WNS 为 `+0.021 ns`、WHS 为 `+0.010 ns`；default route 的 WNS `-0.110 ns` 已拒绝，P4 setup 余量只有约 21 ps，仍然没有“顺便再加一点组合逻辑”的余量。
 
 ## 3. 如何从 critical path 判断是否需要流水线
 
@@ -236,7 +236,7 @@ LARA 当前应遵循“CSR 配置 endpoint，软件显式启动 DMA”的描述�
 
 ## 7. 学习时最容易犯的错误
 
-- 把 `256` 个逻辑 PE 当成 `256` 个实际 DSP；当前 v2.5 Phase 1 routed design 实际使用 165 DSP。
+- 把 `256` 个逻辑 PE 当成 `256` 个实际 DSP；当前 v2.5 P4 routed design 实际使用 165 DSP。
 - 把历史 200 MHz、`MAX_SEQ_LEN=2048` 当成当前签收结果；当前 post-route 基线是 83.333 MHz、`MAX_SEQ_LEN=512`。
 - 看到 LUT/BRAM 余量就直接扩大 MAC；关键路径和布线拥塞可能先失败。
 - 用 false path/multicycle path 掩盖真实 setup violation。

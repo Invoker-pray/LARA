@@ -100,6 +100,30 @@ module tb_kv_cache_ram;
     end
   endtask
 
+  task automatic check_vec_with_gap(input int token_idx, input int dim_base);
+    logic [15:0] exp_val;
+    begin
+      rd_vec_en <= 1'b1;
+      rd_vec_token_idx <= 16'(token_idx);
+      rd_vec_dim_start <= 7'(dim_base);
+      tick();
+      settle();
+
+      for (tok = 0; tok < TILE_COLS; tok++) begin
+        exp_val = 16'(((token_idx << 8) | (dim_base + tok)));
+        if (rd_vec_data_vec[tok] !== exp_val) begin
+          $display("FAIL pulsed vec token=%0d dim=%0d slot=%0d got=0x%04h exp=0x%04h",
+                   token_idx, dim_base, tok, rd_vec_data_vec[tok], exp_val);
+          err++;
+        end
+      end
+
+      rd_vec_en <= 1'b0;
+      tick();
+      settle();
+    end
+  endtask
+
   initial begin
     clk = 1'b0;
     rst_n = 1'b0;
@@ -120,9 +144,10 @@ module tb_kv_cache_ram;
     #20 rst_n = 1'b1;
     tick();
 
-    // Fill two TILE_KV groups across dims 0..31 with easy-to-check patterns.
-    for (int dim_idx = 0; dim_idx < 32; dim_idx++) begin
-      for (int token_idx = 0; token_idx < 128; token_idx++) begin
+    // Fill two TILE_KV groups in the same token-major order used by the
+    // streaming DMA loader on the board.
+    for (int token_idx = 0; token_idx < 128; token_idx++) begin
+      for (int dim_idx = 0; dim_idx < HEAD_DIM; dim_idx++) begin
         write_elem(token_idx, dim_idx, 16'(((token_idx << 8) | dim_idx)));
       end
     end
@@ -133,9 +158,13 @@ module tb_kv_cache_ram;
     check_tile(64, 17);
     check_vec(5, 0);
     check_vec(37, 16);
+    check_vec(0, 112);
+    check_vec(127, 112);
+    check_vec_with_gap(0, 0);
+    check_vec_with_gap(0, 112);
 
     if (err == 0)
-      $display("ALL 288 TESTS PASSED");
+      $display("ALL 320 TESTS PASSED");
     else
       $display("%0d ERRORS", err);
 

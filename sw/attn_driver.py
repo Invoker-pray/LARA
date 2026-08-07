@@ -21,9 +21,10 @@ from typing import Any, Optional
 import numpy as np
 
 try:  # Keep board-only dependencies out of workstation simulation.
-    from pynq import Overlay, allocate  # type: ignore
+    from pynq import Clocks, Overlay, allocate  # type: ignore
     HAS_PYNQ = True
 except ImportError:  # pragma: no cover
+    Clocks = None
     Overlay = None
     allocate = None
     HAS_PYNQ = False
@@ -65,8 +66,11 @@ N_Q_HEADS = 32
 N_KV_HEADS = 8
 GQA_GROUP_SIZE = N_Q_HEADS // N_KV_HEADS
 MAX_SEQ_LEN = 512
+ABSOLUTE_POSITION_LIMIT = 1 << 16
 BF16_BYTES = 2
-PL_CLOCK_MHZ = 83.333
+# 76.922310 MHz missed post-route setup timing; retain it for rollback evidence.
+# PL_CLOCK_MHZ = 76.922310
+PL_CLOCK_MHZ = 71.427856
 DMA_LENGTH_WIDTH = 26
 DMA_MAX_TRANSFER_BYTES = (1 << DMA_LENGTH_WIDTH) - 1
 MAX_KV_HEAD_BYTES = MAX_SEQ_LEN * HEAD_DIM * BF16_BYTES
@@ -233,9 +237,11 @@ class RunProfile:
     pl_total_cycles: int = 0
     pl_mac_cycles: int = 0
     pl_stall_cycles: int = 0
+    pl_core_active_cycles_excluding_stalls: int = 0
     pl_total_ms: float = 0.0
     pl_mac_ms: float = 0.0
     pl_stall_ms: float = 0.0
+    pl_core_active_ms_excluding_stalls: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -246,8 +252,22 @@ class AttentionAccelerator:
         self.bitstream_path = str(Path(bitstream_path).resolve()) if bitstream_path else None
         self._git_hash = self._git_commit()
         self._bitstream_hash = self._bitstream_sha256()
+        self._pl_clock_mhz = PL_CLOCK_MHZ
         if HAS_PYNQ:
             self.overlay = overlay if overlay is not None else Overlay(bitstream_path)
+            # Overlay.download applies the HWH divisors but does not reprogram
+            # the board image's source PLL.  On KV260 that can turn the design
+            # time 14:1 divisor into roughly 107 MHz.  Request the signed-off
+            # frequency against the live PLL, then use the hardware readback
+            # for all cycle-to-time conversion.
+            Clocks.fclk0_mhz = PL_CLOCK_MHZ
+            self._pl_clock_mhz = float(Clocks.fclk0_mhz)
+            if abs(self._pl_clock_mhz - PL_CLOCK_MHZ) > 0.05:
+                raise RuntimeError(
+                    "unable to set PL FCLK0 to the signed-off frequency: "
+                    f"requested={PL_CLOCK_MHZ:.6f} MHz, "
+                    f"actual={self._pl_clock_mhz:.6f} MHz"
+                )
             dma = getattr(self.overlay, "axi_dma", None) or getattr(self.overlay, "axi_dma_0")
             accel = getattr(self.overlay, "accel", None) or getattr(self.overlay, "attn_accel_0")
             self.dma_send = dma.sendchannel
@@ -343,8 +363,13 @@ class AttentionAccelerator:
 
     def configure(self, seq_len: int, *, q_pos_base: int = 0, kv_pos_base: int = 0, causal: bool = True) -> None:
         self._validate_seq_len(seq_len)
-        if q_pos_base < 0 or kv_pos_base < 0 or q_pos_base + seq_len > MAX_SEQ_LEN or kv_pos_base + seq_len > MAX_SEQ_LEN:
-            raise ValueError("position base + seq_len exceeds MAX_SEQ_LEN")
+        if (
+            q_pos_base < 0
+            or kv_pos_base < 0
+            or q_pos_base + seq_len > ABSOLUTE_POSITION_LIMIT
+            or kv_pos_base + seq_len > ABSOLUTE_POSITION_LIMIT
+        ):
+            raise ValueError("absolute position base + seq_len exceeds 16-bit range")
         self.mmio.write(CSR_SEQ_LEN, seq_len)
         self.mmio.write(CSR_Q_POS_BASE, q_pos_base)
         self.mmio.write(CSR_KV_POS_BASE, kv_pos_base)
@@ -414,8 +439,8 @@ class AttentionAccelerator:
     def status(self) -> int:
         return self.mmio.read(CSR_STATUS)
 
-    def wait_done(self, q_heads: np.ndarray, k_heads: np.ndarray, v_heads: np.ndarray, seq_len: int, timeout_ms: int = 30000) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000.0
+    def wait_done(self, q_heads: np.ndarray, k_heads: np.ndarray, v_heads: np.ndarray, seq_len: int, timeout_ms: int | None = None) -> None:
+        deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000.0
         while True:
             status = self.status()
             if status & (STATUS_ERROR | STATUS_STREAM_ERROR):
@@ -425,7 +450,7 @@ class AttentionAccelerator:
                 return
             if status & (STATUS_KV_LOAD_REQ | STATUS_Q_LOAD_REQ):
                 self._service_request(self.mmio.read(CSR_LOAD_REQ), q_heads, k_heads, v_heads, seq_len)
-            if time.monotonic() > deadline:
+            if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("attention accelerator timed out while servicing load requests")
             if self._hw_ready:
                 time.sleep(0.0005)
@@ -451,7 +476,7 @@ class AttentionAccelerator:
         q_pos_base: int = 0,
         kv_pos_base: int = 0,
         causal: bool = True,
-        timeout_ms: int = 30000,
+        timeout_ms: int | None = None,
     ) -> np.ndarray:
         """Run one full transaction; returns raw head-major bf16 words."""
         if self._closed:
@@ -468,7 +493,7 @@ class AttentionAccelerator:
             timestamp_utc=datetime.now(timezone.utc).isoformat(),
             git_commit=self._git_hash,
             bitstream_sha256=self._bitstream_hash,
-            clock_mhz=PL_CLOCK_MHZ,
+            clock_mhz=self._pl_clock_mhz,
             seq_len=L,
             causal=causal,
             q_pos_base=q_pos_base,
@@ -511,16 +536,22 @@ class AttentionAccelerator:
         self.last_profile.pl_total_cycles = perf["cycles"]
         self.last_profile.pl_mac_cycles = perf["mac_cycles"]
         self.last_profile.pl_stall_cycles = perf["stall_cycles"]
-        cycles_per_ms = PL_CLOCK_MHZ * 1000.0
+        self.last_profile.pl_core_active_cycles_excluding_stalls = max(
+            perf["cycles"] - perf["stall_cycles"], 0,
+        )
+        cycles_per_ms = self._pl_clock_mhz * 1000.0
         self.last_profile.pl_total_ms = perf["cycles"] / cycles_per_ms
         self.last_profile.pl_mac_ms = perf["mac_cycles"] / cycles_per_ms
         self.last_profile.pl_stall_ms = perf["stall_cycles"] / cycles_per_ms
+        self.last_profile.pl_core_active_ms_excluding_stalls = (
+            self.last_profile.pl_core_active_cycles_excluding_stalls / cycles_per_ms
+        )
         self.last_profile.attention_total_ms = (time.perf_counter() - attention_start) * 1000.0
         return result
 
     def run_layer(self, hidden_states: np.ndarray, wq: np.ndarray, wk: np.ndarray, wv: np.ndarray,
                   rms_weight: np.ndarray | None = None, *, q_pos_base: int = 0,
-                  kv_pos_base: int = 0, causal: bool = True, timeout_ms: int = 30000) -> np.ndarray:
+                  kv_pos_base: int = 0, causal: bool = True, timeout_ms: int | None = None) -> np.ndarray:
         """Host QKV projection + optional RoPE, followed by FPGA attention."""
         try:
             from .host_attention import apply_rope_host, qkv_project, reshape_to_heads, rms_norm

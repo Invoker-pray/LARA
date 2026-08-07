@@ -41,8 +41,8 @@
 
 <h1>Attention Accelerator Architecture — Track B</h1>
 <p>Target: Llama3-8B Attention Layer · bf16 Precision · Kria KV260 Platform (without AI Cores)</p>
-<div class="notes"><h3>当前实现状态（2026-07-15）</h3>
-  <p>当前可签收基线是 v2.4：PL 时钟 83.333 MHz，post-route WNS +0.049 ns、WHS +0.011 ns，资源为 165 DSP、88065 LUT、57718 FF、50 BRAM、48 URAM。设计是单序列 prefill，MAX_SEQ_LEN=512。宿主机完成 RMSNorm/QKV/RoPE，driver 在一次 start 后按 CSR_LOAD_REQ 服务 K/V/Q DMA；片上 K/V cache 每次保存一个 GQA group 的当前 KV head，不能描述为 8 个 KV head 同时全量驻留。</p>
+<div class="notes"><h3>当前实现状态（2026-08-02）</h3>
+  <p>当前 accepted 基线是 v2.5 P4 streaming/fused-PV：PL 时钟 83.333 MHz，Explore post-route WNS +0.021 ns、WHS +0.010 ns，资源为 165 DSP、95479 LUT、56940 FF、50 BRAM、48 URAM。设计是单序列 prefill，MAX_SEQ_LEN=512。宿主机完成 RMSNorm/QKV/RoPE，driver 在一次 start 后按 CSR_LOAD_REQ 服务 K/V/Q DMA；片上 K/V cache 每次保存一个 GQA group 的当前 KV head，不能描述为 8 个 KV head 同时全量驻留。accepted screening 当前只有 routed DCP，部署导出需运行 P4 export 脚本。</p>
 </div>
 
 <!-- ================================================================ -->
@@ -192,7 +192,7 @@ Track B 中，<b>K/V stationary</b> — 每个 GQA group 的 K/V 请求后驻留
   <td><span class="tag tag-compute">core</span> <b>attn_tile</b></td>
   <td><code>hw/rtl/core/attn_tile.sv</code></td>
   <td>16×16 bf16 MAC 阵列<br/>K/V-Stationary 数据流<br/>支持 SPLIT_FACTOR 流水拆分</td>
-  <td><span class="highlight">分时复用</span>：Phase A (Q×K^T) + Phase B (A×V)。<br/>当前 post-route 使用 165 DSP48E2。<br/>QKV 投影由 host_attention.py 完成，再由 driver 自动 DMA 到 FPGA。</td>
+  <td><span class="highlight">分时复用</span>：Phase A (Q×K^T) + Phase B (A×V)。<br/>当前 P4 Explore post-route 使用 165 DSP48E2，并融合 PV retire。<br/>QKV 投影由 host_attention.py 完成，再由 driver 自动 DMA 到 FPGA。</td>
 </tr>
 <tr>
   <td><span class="tag tag-compute">core</span> <b>softmax_engine</b></td>

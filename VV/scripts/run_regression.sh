@@ -2,9 +2,9 @@
 # run_regression.sh — Full LARA regression suite
 # Usage: cd LARA && bash VV/scripts/run_regression.sh
 set -e
-TESTS="bf16_mac psum_accum attn_tile softmax stream kv_cache_ram output_buffer attn_top attn_top_partial attn_top_loop_control attn_top_loop_control_delayed attn_top_two_tiles attn_top_full_traversal"
-SYNTH_TESTS="attn_tile_synth psum_accum_synth softmax_synth"
-XPM_TESTS="output_buffer_xpm"
+TESTS="bf16_mac psum_accum attn_tile softmax stream kv_cache_ram output_buffer attn_core_causal_skip attn_top attn_top_partial attn_top_loop_control attn_top_loop_control_delayed attn_top_two_tiles attn_top_full_traversal"
+SYNTH_TESTS="attn_tile_synth psum_accum_synth softmax_synth softmax_ab softmax_p_inplace_ab softmax_p_output_direct_ab softmax_score_inplace_ab attn_top_phasea_overlap_ab attn_top_profile attn_top_streaming_pv_ab"
+XPM_TESTS="output_buffer_xpm attn_top_xpm attn_top_real_request attn_top_real_request_full"
 PASS=0; FAIL=0
 run_one() {
   local tb="$1"

@@ -38,6 +38,13 @@ export PATH="${WRAPPER_DIR}:${PATH}"
 
 cd "${SIM_DIR}"
 
+# VCS can preserve an incremental timestamp after a failed link and then
+# incorrectly skip regeneration while the executable is missing.  Force a
+# fresh elaboration in that case without disturbing a valid incremental build.
+if [ ! -x simv ] && [ -f simv.daidir/.vcs.timestamp ]; then
+    rm -f simv.daidir/.vcs.timestamp
+fi
+
 vcs -full64 -sverilog \
     -timescale=1ns/1ps \
     +lint=all \
@@ -52,7 +59,7 @@ vcs -full64 -sverilog \
     -o simv
 
 cat > run.tcl << 'TCL'
-run 100000ns
+run 400000ns
 quit
 TCL
 ./simv -no_save -ucli -i run.tcl -l sim.log

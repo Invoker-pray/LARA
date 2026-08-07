@@ -38,6 +38,7 @@ module tb_attn_top_loop_control_delayed;
   bit saw_head_switch_prefetch_norm;
   bit saw_group_switch_prefetch_norm;
   bit seen_all_groups;
+  bit saw_qk_authorization;
   logic kv_load_start_d, q_load_start_d, group_advance_d;
   logic tick_marker;
 
@@ -86,6 +87,11 @@ module tb_attn_top_loop_control_delayed;
       q_pending <= 1'b0;
       o_pending <= 1'b0;
     end else begin
+      // Completion indications model one-cycle acknowledgements.  Holding
+      // either level high would let every later group/tile complete without a
+      // new request and would hide the delayed-handshake behavior under test.
+      kv_done_drv <= 1'b0;
+      o_done_drv <= 1'b0;
       axis_done_drv <= 1'b0;
 
       if (dut.kv_load_start && !kv_load_start_d) begin
@@ -136,6 +142,12 @@ module tb_attn_top_loop_control_delayed;
 
   always @(negedge clk) begin
     if (rst_n) begin
+      if (dut.mac_start && !dut.mac_phase)
+        saw_qk_authorization = 1'b1;
+      if (!saw_qk_authorization && dut.phasea_window) begin
+        $display("FAIL Phase-A started before the first QK authorization");
+        err++;
+      end
       if (dut.kv_load_start && !kv_load_start_d)
         kv_load_pulses++;
       if (dut.q_load_start && !q_load_start_d)
@@ -220,6 +232,7 @@ module tb_attn_top_loop_control_delayed;
     saw_head_switch_prefetch_norm = 1'b0;
     saw_group_switch_prefetch_norm = 1'b0;
     seen_all_groups = 1'b0;
+    saw_qk_authorization = 1'b0;
     tick_marker = 1'b0;
 
     #20 rst_n = 1'b1;

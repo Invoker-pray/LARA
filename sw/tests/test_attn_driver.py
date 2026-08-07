@@ -78,6 +78,12 @@ class AttentionDriverTest(unittest.TestCase):
         self.assertEqual(profile.seq_len, seq_len)
         self.assertTrue(profile.git_commit)
 
+    def test_max_length_allows_nonzero_absolute_position_bases(self):
+        accel = AttentionAccelerator()
+        accel.configure(512, q_pos_base=31, kv_pos_base=7, causal=True)
+        with self.assertRaisesRegex(ValueError, "16-bit range"):
+            accel.configure(2, q_pos_base=65535, kv_pos_base=0, causal=True)
+
     def test_context_manager_releases_buffers(self):
         with AttentionAccelerator() as accel:
             self.assertFalse(accel._closed)

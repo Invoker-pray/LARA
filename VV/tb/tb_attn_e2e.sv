@@ -47,7 +47,7 @@ module tb_attn_e2e;
   logic mac_clear_accum;
   logic mac_accum_en;
 
-  logic s_valid, p_valid, softmax_done;
+  logic s_valid, sm_s_ready, p_valid, softmax_done;
   logic kv_tile_first, kv_tile_last;
   logic [31:0] s_block [TILE_ROWS][TILE_COLS];
   logic [31:0] p_block [TILE_ROWS][TILE_COLS];
@@ -77,7 +77,7 @@ module tb_attn_e2e;
   // DUT Instances
   // ==================================================================
   attn_tile u_mac (.clk,.rst_n,.phase_sel(1'b0),.row_data(mac_row),.col_data(mac_col),.split_phase(2'd2),.clear_accum(mac_clear_accum),.accum_en(mac_accum_en),.block_out(mac_block_out),.col_out());
-  softmax_engine u_sm(.clk,.rst_n,.s_valid,.s_data(s_block),.kv_tile_first,.kv_tile_last,.causal_mask_en(1'b1),.q_tile_start(16'd0),.kv_tile_start(16'd0),.active_rows(TILE_ROWS_U5),.active_cols(TILE_COLS_U5),.state_load(sm_state_load),.state_m_in(sm_state_m_in),.state_l_in(sm_state_l_in),.m_state,.l_state,.p_valid,.p_data(p_block),.correction,.done(softmax_done));
+  softmax_engine u_sm(.clk,.rst_n,.s_valid,.s_ready(sm_s_ready),.s_data(s_block),.kv_tile_first,.kv_tile_last,.causal_mask_en(1'b1),.q_tile_start(16'd0),.kv_tile_start(16'd0),.active_rows(TILE_ROWS_U5),.active_cols(TILE_COLS_U5),.state_load(sm_state_load),.state_m_in(sm_state_m_in),.state_l_in(sm_state_l_in),.m_state,.l_state,.p_valid,.p_data(p_block),.correction,.done(softmax_done));
   output_buffer u_obuf(.clk,.rst_n,.clear_bank(obuf_clear_bank),.clear_bank_sel(obuf_clear_bank_sel),.acc_update(obuf_update),.acc_ready(obuf_acc_ready),.acc_row(obuf_row),.acc_dim_blk(obuf_dim_blk),.acc_data(obuf_data),.acc_correction(correction[obuf_row]),.bank_sel(obuf_bank_sel),.normalize(obuf_norm),.active_rows(TILE_ROWS_U5),.l_state(l_state),.o_ready(obuf_ready),.o_valid(obuf_valid),.o_row(obuf_o_row),.o_dim(obuf_o_dim),.o_data(obuf_out));
 
   // ==================================================================

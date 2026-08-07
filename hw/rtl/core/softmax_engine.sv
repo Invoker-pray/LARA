@@ -33,6 +33,7 @@ module softmax_engine
 
     // --- S_tile Input (from MAC Phase A) ---
     input  logic                           s_valid,
+    output logic                           s_ready,
     input  logic [FP32_W-1:0]              s_data [TILE_ROWS][TILE_COLS],
 
     // --- Control ---
@@ -57,7 +58,7 @@ module softmax_engine
 
     // --- P_tile Output (to MAC Phase B) ---
     output logic                           p_valid,
-    output logic [FP32_W-1:0]              p_data [TILE_ROWS][TILE_COLS],
+    output wire [FP32_W-1:0]               p_data [TILE_ROWS][TILE_COLS],
 
     // --- Correction factors (to psum_accum for O_acc update) ---
     output logic [FP32_W-1:0]              correction [TILE_ROWS],
@@ -83,7 +84,6 @@ module softmax_engine
   localparam logic [31:0] FP32_ZERO_BITS    = 32'h0000_0000;
   localparam logic [31:0] FP32_ONE_BITS     = 32'h3F80_0000;
   localparam logic [31:0] FP32_NEG_EIGHT_BITS = 32'hC100_0000;
-  localparam logic [15:0] BF16_INV_SQRT_D_BITS = INV_SQRT_D_FP32[31:16];
   localparam shortreal NEG_INF_SR    = -1.0e30;
   localparam shortreal NEG_EIGHT_SR  = -8.0;
   localparam shortreal ZERO_SR       = 0.0;
@@ -92,6 +92,9 @@ module softmax_engine
   (* rom_style = "block" *) logic [FP32_W-1:0] exp_lut [0:LUT_DEPTH-1];
 
 `ifndef SYNTHESIS
+  // The behavioral model is a two-stage pipeline and can accept a new block
+  // whenever a context load is not taking priority.
+  assign s_ready = !state_load;
   // LUT initialization for simulation. Try the local TB path first, then the
   // repo-relative path used by direct module compiles.
   initial begin
@@ -157,6 +160,7 @@ module softmax_engine
 
   logic                           s_valid_r;
   logic [FP32_W-1:0]              s_data_r [TILE_ROWS][TILE_COLS];
+  logic [FP32_W-1:0]              p_data_reg [TILE_ROWS][TILE_COLS];
   logic                           kv_tile_first_r;
   logic                           causal_mask_en_r;
   logic [15:0]                    q_tile_start_r, kv_tile_start_r;
@@ -181,6 +185,12 @@ module softmax_engine
   // sqrt(128) ≈ 11.3137, 1/sqrt(128) ≈ 0.088388 (from pkg: INV_SQRT_D_FP32)
 
 `ifndef SYNTHESIS
+  for (genvar pgr = 0; pgr < TILE_ROWS; pgr++) begin : g_beh_p_data_row
+    for (genvar pgc = 0; pgc < TILE_COLS; pgc++) begin : g_beh_p_data_col
+      assign p_data[pgr][pgc] = p_data_reg[pgr][pgc];
+    end
+  end
+
   /* verilator lint_off SHORTREAL */
   /* verilator lint_off WIDTHEXPAND */
   /* verilator lint_off WIDTHTRUNC */
@@ -230,7 +240,7 @@ module softmax_engine
           s_data_r[ri][ci] <= 32'd0;
       end
     end else begin
-      s_valid_r <= s_valid;
+      s_valid_r <= s_valid && s_ready;
       kv_tile_first_r <= kv_tile_first;
       causal_mask_en_r <= causal_mask_en;
       q_tile_start_r   <= q_tile_start;
@@ -351,7 +361,7 @@ module softmax_engine
         l_state[ri]   <= 32'd0;
         correction[ri] <= 32'd0;
         for (ci = 0; ci < TILE_COLS; ci++)
-          p_data[ri][ci] <= 32'd0;
+          p_data_reg[ri][ci] <= 32'd0;
       end
     end else begin
       p_valid <= s_valid_r;  // 2-cycle pipeline delay from s_valid
@@ -371,7 +381,7 @@ module softmax_engine
           l_state[ri]   <= $shortrealtobits(l_new[ri]);
           correction[ri] <= $shortrealtobits(correction_s[ri]);
           for (ci = 0; ci < TILE_COLS; ci++)
-            p_data[ri][ci] <= $shortrealtobits(P_shortreal[ri][ci]);
+            p_data_reg[ri][ci] <= $shortrealtobits(P_shortreal[ri][ci]);
         end
       end
     end
@@ -382,21 +392,29 @@ module softmax_engine
   /* verilator lint_on WIDTHEXPAND */
   /* verilator lint_on SHORTREAL */
 `else
-  typedef enum logic [3:0] {
-    SM_IDLE        = 4'd0,
-    SM_SCALE_MAX   = 4'd1,
-    SM_MAX_UPDATE  = 4'd2,
-    SM_CORR_SHIFT  = 4'd3,
-    SM_CORR_LOOKUP = 4'd4,
-    SM_P_SHIFT     = 4'd5,
-    SM_P_LOOKUP    = 4'd6,
-    SM_P_ACCUM     = 4'd7,
-    SM_L_MUL       = 4'd8,
-    SM_L_ADD       = 4'd9,
-    SM_WRITE       = 4'd10
+  typedef enum logic [4:0] {
+    SM_IDLE        = 5'd0,
+    SM_SCALE_MAX   = 5'd1,
+    SM_MAX_UPDATE  = 5'd2,
+    SM_CORR_SHIFT  = 5'd3,
+    SM_CORR_LOOKUP = 5'd4,
+    SM_P_SHIFT     = 5'd5,
+    SM_P_LOOKUP    = 5'd6,
+    SM_P_ACCUM     = 5'd7,
+    SM_L_MUL       = 5'd8,
+    SM_L_ADD       = 5'd9,
+    SM_WRITE       = 5'd10,
+    SM_SCALE_DRAIN = 5'd11,
+    SM_P_PIPE      = 5'd12,
+    SM_CORR_INDEX  = 5'd13,
+    SM_CORR_LUT    = 5'd14,
+    SM_CORR_DELTA  = 5'd15,
+    SM_CORR_MUL    = 5'd16,
+    SM_CORR_ADD    = 5'd17
   } sm_state_t;
 
   sm_state_t sm_state;
+  assign s_ready = (sm_state == SM_IDLE) && !state_load;
   logic [4:0] sm_row_idx;
   logic [4:0] sm_col_idx;
   logic [31:0] sm_row_sum_acc;
@@ -406,6 +424,54 @@ module softmax_engine
   logic [31:0] sm_corr_shift_pipe;
   logic [31:0] sm_l_corr_product;
   logic        sm_masked_pipe;
+  logic        sm_scale_valid;
+  logic [4:0]  sm_scale_row_pipe;
+  logic [4:0]  sm_scale_col_pipe;
+  logic [31:0] sm_scale_value_pipe;
+  logic        sm_scale_masked_pipe;
+  localparam integer EXP_PREP_W = 38;  // mode[1:0] + index[9:0] + rem[25:0]
+  localparam integer EXP_QUANT_W = 30; // mode[1:0] + signed Q8.23[27:0]
+  logic        sm_p_shift_valid;
+  logic [4:0]  sm_p_shift_row;
+  logic [4:0]  sm_p_shift_col;
+  logic        sm_exp_quant_valid;
+  logic [4:0]  sm_exp_quant_row;
+  logic [4:0]  sm_exp_quant_col;
+  logic [EXP_QUANT_W-1:0] sm_exp_quant;
+  logic        sm_exp_req_valid;
+  logic [4:0]  sm_exp_req_row;
+  logic [4:0]  sm_exp_req_col;
+  logic [EXP_PREP_W-1:0] sm_exp_req;
+  logic        sm_exp_lut_valid;
+  logic [4:0]  sm_exp_lut_row;
+  logic [4:0]  sm_exp_lut_col;
+  logic [1:0]  sm_exp_lut_mode;
+  logic [9:0]  sm_exp_lut_idx;
+  logic [25:0] sm_exp_lut_rem;
+  logic        sm_exp_frac_valid;
+  logic [4:0]  sm_exp_frac_row;
+  logic [4:0]  sm_exp_frac_col;
+  logic [1:0]  sm_exp_frac_mode;
+  logic [31:0] sm_exp_frac_fp;
+  logic [31:0] sm_exp_frac_lut_lo;
+  logic [31:0] sm_exp_frac_lut_hi;
+  logic        sm_exp_delta_valid;
+  logic [4:0]  sm_exp_delta_row;
+  logic [4:0]  sm_exp_delta_col;
+  logic [1:0]  sm_exp_delta_mode;
+  logic [31:0] sm_exp_delta_frac_fp;
+  logic [31:0] sm_exp_delta_lut_lo;
+  logic [31:0] sm_exp_delta;
+  logic        sm_exp_mul_valid;
+  logic [4:0]  sm_exp_mul_row;
+  logic [4:0]  sm_exp_mul_col;
+  logic [1:0]  sm_exp_mul_mode;
+  logic [31:0] sm_exp_mul_lut_lo;
+  logic [31:0] sm_exp_mul_product;
+  logic        sm_p_lookup_valid;
+  logic [4:0]  sm_p_lookup_row;
+  logic [4:0]  sm_p_lookup_col;
+  logic        sm_p_issue_done;
   localparam logic [4:0] SM_TILE_ROWS_LAST = 5'(TILE_ROWS - 1);
   localparam logic [4:0] SM_TILE_COLS_LAST = 5'(TILE_COLS - 1);
   logic [31:0] sm_m_old [TILE_ROWS];
@@ -418,24 +484,224 @@ module softmax_engine
   logic [31:0] sm_scaled [TILE_ROWS][TILE_COLS];
   logic        sm_masked [TILE_ROWS][TILE_COLS];
 
+  for (genvar pgr = 0; pgr < TILE_ROWS; pgr++) begin : g_synth_p_data_row
+    for (genvar pgc = 0; pgc < TILE_COLS; pgc++) begin : g_synth_p_data_col
+      if (SOFTMAX_P_OUTPUT_DIRECT && SOFTMAX_P_INPLACE) begin : g_direct
+        if (SOFTMAX_SCORE_INPLACE) begin : g_score_scratch
+          assign p_data[pgr][pgc] = s_data_r[pgr][pgc];
+        end else begin : g_scaled_scratch
+          assign p_data[pgr][pgc] = sm_scaled[pgr][pgc];
+        end
+      end else begin : g_registered
+        assign p_data[pgr][pgc] = p_data_reg[pgr][pgc];
+      end
+    end
+  end
+
+  function automatic logic [31:0] q23_to_fp32(input integer value);
+    integer bit_idx;
+    integer exponent_value;
+    logic [22:0] mantissa_value;
+    integer residual;
+    begin
+      if (value <= 0) begin
+        q23_to_fp32 = 32'd0;
+      end else begin
+        bit_idx = 22;
+        while ((bit_idx > 0) && !value[bit_idx])
+          bit_idx = bit_idx - 1;
+        residual = value - (1 <<< bit_idx);
+        mantissa_value = 23'd0;
+        if (bit_idx < 23)
+          mantissa_value = residual <<< (23 - bit_idx);
+        exponent_value = 127 + bit_idx - 23;
+        q23_to_fp32 = {1'b0, exponent_value[7:0], mantissa_value};
+      end
+    end
+  endfunction
+
+  function automatic longint signed fp32_to_q8_23(input logic [31:0] value_bits);
+    logic        sign_value;
+    logic [7:0]  exponent_value;
+    logic [23:0] mantissa_value;
+    integer      shift_value;
+    longint signed scaled_value;
+    begin
+      if (fp32_is_zero(value_bits)) begin
+        fp32_to_q8_23 = 0;
+      end else begin
+        sign_value = value_bits[31];
+        exponent_value = value_bits[30:23];
+        mantissa_value = {1'b1, value_bits[22:0]};
+        shift_value = integer'(exponent_value) - 127;
+        scaled_value = longint'({24'd0, mantissa_value});
+        if (shift_value >= 0)
+          scaled_value = scaled_value <<< shift_value;
+        else
+          scaled_value = scaled_value >>> (-shift_value);
+        fp32_to_q8_23 = sign_value ? -scaled_value : scaled_value;
+      end
+    end
+  endfunction
+
+  function automatic logic [31:0] q26_to_fp32(input longint signed value);
+    integer bit_idx;
+    integer exponent_value;
+    longint signed residual;
+    logic [22:0] mantissa_value;
+    begin
+      if (value <= 0) begin
+        q26_to_fp32 = 32'd0;
+      end else begin
+        bit_idx = 25;
+        while ((bit_idx > 0) && !value[bit_idx])
+          bit_idx = bit_idx - 1;
+        residual = value - (64'sd1 <<< bit_idx);
+        if (bit_idx < 23)
+          mantissa_value = residual <<< (23 - bit_idx);
+        else
+          mantissa_value = residual >>> (bit_idx - 23);
+        exponent_value = 127 + bit_idx - 26;
+        q26_to_fp32 = {1'b0, exponent_value[7:0], mantissa_value};
+      end
+    end
+  endfunction
+
   function automatic logic [31:0] exp_lookup_bits(input logic [31:0] x);
-    logic signed [23:0] x_q;
-    integer idx_num;
+    longint signed x_q;
+    logic [63:0] idx_num;
+    logic [22:0] frac_num;
+    logic [31:0] frac_fp;
+    logic [31:0] lut_lo;
+    logic [31:0] lut_hi;
+    logic [31:0] lut_delta;
+    logic [31:0] lut_interp;
+    longint signed idx_num_signed;
     integer idx;
+    longint signed rem;
+
     begin
       if (fp32_gt(FP32_NEG_EIGHT_BITS, x)) begin
         exp_lookup_bits = FP32_ZERO_BITS;
       end else if (fp32_gt(x, FP32_ZERO_BITS)) begin
         exp_lookup_bits = FP32_ONE_BITS;
       end else begin
-        x_q = fp32_to_q8_15(x);
-        idx_num = integer'(x_q) + 262144;
-        // floor(idx_num * 1023 / 262144), without a constant multiplier.
-        idx = (idx_num == 0) ? 0 : ((idx_num - 1) >>> 8);
+        x_q = fp32_to_q8_23(x);
+        idx_num_signed = x_q + 67108864;
+        if (idx_num_signed < 0)
+          idx_num_signed = 0;
+        else if (idx_num_signed > 67108864)
+          idx_num_signed = 67108864;
+        idx_num = (idx_num_signed <<< 10) - idx_num_signed;
+        // x_q is Q8.23 and the LUT spans eight units.  The interpolation
+        // coordinate therefore uses Q8.26: idx = ((x + 8) * 1023) / 2^26.
+        idx = integer'(idx_num >>> 26);
+        rem = longint'(idx_num - (longint'(idx) <<< 26));
+`ifdef LARA_SOFTMAX_FUNC_DEBUG
+        if ((x == 32'hbc315c62) || (x == 32'hbc822a40) ||
+            (x == 32'h00000000))
+          $display("EXP_DEBUG x=%h xq=%0d idxnum=%0d idx=%0d rem=%0d",
+                   x, x_q, idx_num_signed, idx, rem);
+`endif
         if (idx < 0) idx = 0;
         else if (idx >= LUT_DEPTH) idx = LUT_DEPTH - 1;
-        exp_lookup_bits = exp_lut[idx];
+        if (idx == LUT_DEPTH - 1) begin
+          exp_lookup_bits = exp_lut[idx];
+        end else begin
+          frac_num = rem[25:3];
+          frac_fp = q26_to_fp32(rem);
+          lut_lo = exp_lut[idx];
+          lut_hi = exp_lut[idx + 1];
+          lut_delta = fp32_sub(lut_hi, lut_lo);
+          lut_interp = fp32_add(lut_lo, fp32_mul(lut_delta, frac_fp));
+          exp_lookup_bits = lut_interp;
+        end
       end
+    end
+  endfunction
+
+  // Timing-optimized equivalent of exp_lookup_bits.  The lookup is split into
+  // quantization, index calculation, and interpolation pipeline stages.
+  function automatic logic [EXP_QUANT_W-1:0] exp_lookup_quantize(
+      input logic [31:0] x
+  );
+    longint signed x_q;
+    logic [1:0] mode;
+    logic signed [27:0] x_q_bits;
+    begin
+      mode = 2'd2;
+      x_q_bits = 28'sd0;
+      if (fp32_gt(FP32_NEG_EIGHT_BITS, x)) begin
+        mode = 2'd0;  // below LUT range
+      end else if (fp32_gt(x, FP32_ZERO_BITS)) begin
+        mode = 2'd1;  // positive input saturates to one
+      end else begin
+        x_q = fp32_to_q8_23(x);
+        x_q_bits = x_q;
+      end
+      exp_lookup_quantize = {mode, x_q_bits};
+    end
+  endfunction
+
+  function automatic logic [EXP_PREP_W-1:0] exp_lookup_index(
+      input logic [EXP_QUANT_W-1:0] quantized
+  );
+    longint signed x_q;
+    longint signed idx_num_signed;
+    longint signed rem;
+    logic [63:0] idx_num;
+    logic [1:0] mode;
+    logic [9:0] idx_bits;
+    logic [25:0] rem_bits;
+    begin
+      mode = quantized[29:28];
+      x_q = $signed(quantized[27:0]);
+      idx_bits = 10'd0;
+      rem_bits = 26'd0;
+      if (mode == 2'd2) begin
+        idx_num_signed = x_q + 67108864;
+        if (idx_num_signed < 0)
+          idx_num_signed = 0;
+        else if (idx_num_signed > 67108864)
+          idx_num_signed = 67108864;
+        idx_num = (idx_num_signed <<< 10) - idx_num_signed;
+        idx_bits = integer'(idx_num >>> 26);
+        rem = longint'(idx_num - (longint'(idx_bits) <<< 26));
+        if (idx_bits >= LUT_DEPTH)
+          idx_bits = 10'(LUT_DEPTH - 1);
+        rem_bits = rem[25:0];
+      end
+      exp_lookup_index = {mode, idx_bits, rem_bits};
+    end
+  endfunction
+
+  function automatic logic [31:0] exp_lookup_finish(
+      input logic [1:0] mode,
+      input logic [9:0] idx,
+      input logic [25:0] rem
+  );
+    logic [31:0] frac_fp;
+    logic [31:0] lut_lo;
+    logic [31:0] lut_hi;
+    logic [31:0] lut_delta;
+    begin
+      case (mode)
+        2'd0: exp_lookup_finish = FP32_ZERO_BITS;
+        2'd1: exp_lookup_finish = FP32_ONE_BITS;
+        default: begin
+          if (idx == LUT_DEPTH - 1) begin
+            exp_lookup_finish = exp_lut[idx];
+          end else begin
+            frac_fp = q26_to_fp32(longint'(rem));
+            lut_lo = exp_lut[idx];
+            lut_hi = exp_lut[idx + 1'b1];
+            lut_delta = fp32_sub(lut_hi, lut_lo);
+            exp_lookup_finish = fp32_add(
+                lut_lo, fp32_mul(lut_delta, frac_fp)
+            );
+          end
+        end
+      endcase
     end
   endfunction
 
@@ -459,6 +725,52 @@ module softmax_engine
       sm_corr_shift_pipe <= FP32_ZERO_BITS;
       sm_l_corr_product <= FP32_ZERO_BITS;
       sm_masked_pipe   <= 1'b1;
+      sm_scale_valid   <= 1'b0;
+      sm_scale_row_pipe <= 5'd0;
+      sm_scale_col_pipe <= 5'd0;
+      sm_scale_value_pipe <= FP32_NEG_INF_BITS;
+      sm_scale_masked_pipe <= 1'b1;
+      sm_p_shift_valid <= 1'b0;
+      sm_p_shift_row <= 5'd0;
+      sm_p_shift_col <= 5'd0;
+      sm_exp_quant_valid <= 1'b0;
+      sm_exp_quant_row <= 5'd0;
+      sm_exp_quant_col <= 5'd0;
+      sm_exp_quant <= '0;
+      sm_exp_req_valid <= 1'b0;
+      sm_exp_req_row <= 5'd0;
+      sm_exp_req_col <= 5'd0;
+      sm_exp_req <= '0;
+      sm_exp_lut_valid <= 1'b0;
+      sm_exp_lut_row <= 5'd0;
+      sm_exp_lut_col <= 5'd0;
+      sm_exp_lut_mode <= 2'd0;
+      sm_exp_lut_idx <= 10'd0;
+      sm_exp_lut_rem <= 26'd0;
+      sm_exp_frac_valid <= 1'b0;
+      sm_exp_frac_row <= 5'd0;
+      sm_exp_frac_col <= 5'd0;
+      sm_exp_frac_mode <= 2'd0;
+      sm_exp_frac_fp <= FP32_ZERO_BITS;
+      sm_exp_frac_lut_lo <= FP32_ZERO_BITS;
+      sm_exp_frac_lut_hi <= FP32_ZERO_BITS;
+      sm_exp_delta_valid <= 1'b0;
+      sm_exp_delta_row <= 5'd0;
+      sm_exp_delta_col <= 5'd0;
+      sm_exp_delta_mode <= 2'd0;
+      sm_exp_delta_frac_fp <= FP32_ZERO_BITS;
+      sm_exp_delta_lut_lo <= FP32_ZERO_BITS;
+      sm_exp_delta <= FP32_ZERO_BITS;
+      sm_exp_mul_valid <= 1'b0;
+      sm_exp_mul_row <= 5'd0;
+      sm_exp_mul_col <= 5'd0;
+      sm_exp_mul_mode <= 2'd0;
+      sm_exp_mul_lut_lo <= FP32_ZERO_BITS;
+      sm_exp_mul_product <= FP32_ZERO_BITS;
+      sm_p_lookup_valid <= 1'b0;
+      sm_p_lookup_row <= 5'd0;
+      sm_p_lookup_col <= 5'd0;
+      sm_p_issue_done <= 1'b0;
       s_valid_r        <= 1'b0;
       kv_tile_first_r  <= 1'b0;
       causal_mask_en_r <= 1'b0;
@@ -481,10 +793,11 @@ module softmax_engine
         correction[ri]  <= 32'd0;
         for (ci = 0; ci < TILE_COLS; ci++) begin
           s_data_r[ri][ci] <= 32'd0;
-          sm_scaled[ri][ci] <= 32'd0;
+          if (!SOFTMAX_SCORE_INPLACE)
+            sm_scaled[ri][ci] <= 32'd0;
           sm_masked[ri][ci] <= 1'b1;
           sm_p[ri][ci]      <= 32'd0;
-          p_data[ri][ci]    <= 32'd0;
+          p_data_reg[ri][ci] <= 32'd0;
         end
       end
     end else begin
@@ -494,6 +807,16 @@ module softmax_engine
       if (state_load) begin
         sm_state   <= SM_IDLE;
         s_valid_r <= 1'b0;
+        sm_scale_valid <= 1'b0;
+        sm_p_shift_valid <= 1'b0;
+        sm_exp_quant_valid <= 1'b0;
+        sm_exp_req_valid <= 1'b0;
+        sm_exp_lut_valid <= 1'b0;
+        sm_exp_frac_valid <= 1'b0;
+        sm_exp_delta_valid <= 1'b0;
+        sm_exp_mul_valid <= 1'b0;
+        sm_p_lookup_valid <= 1'b0;
+        sm_p_issue_done <= 1'b0;
         for (ri = 0; ri < TILE_ROWS; ri++) begin
           m_state[ri]    <= state_m_in[ri];
           l_state[ri]    <= state_l_in[ri];
@@ -502,7 +825,7 @@ module softmax_engine
       end else begin
         unique case (sm_state)
           SM_IDLE: begin
-            if (s_valid) begin
+            if (s_valid && s_ready) begin
               s_valid_r        <= 1'b1;
               kv_tile_first_r  <= kv_tile_first;
               causal_mask_en_r <= causal_mask_en;
@@ -513,6 +836,7 @@ module softmax_engine
               sm_row_idx       <= 5'd0;
               sm_col_idx       <= 5'd0;
               sm_row_sum_acc   <= 32'd0;
+              sm_scale_valid   <= 1'b0;
               sm_state         <= SM_SCALE_MAX;
               for (ri = 0; ri < TILE_ROWS; ri++) begin
                 sm_m_old[ri]   <= kv_tile_first ? FP32_NEG_INF_BITS : m_state[ri];
@@ -537,7 +861,7 @@ module softmax_engine
             masked    = !row_valid || !col_valid;
             scaled_val = FP32_NEG_INF_BITS;
             if (row_valid && col_valid)
-              scaled_val = bf16_mul_to_fp32(fp32_to_bf16(s_data_r[sm_row_idx][sm_col_idx]), BF16_INV_SQRT_D_BITS);
+              scaled_val = fp32_mul(s_data_r[sm_row_idx][sm_col_idx], INV_SQRT_D_FP32);
             if (row_valid && col_valid && causal_mask_en_r) begin
               q_pos = integer'(q_tile_start_r) + integer'(sm_row_idx);
               kv_pos = integer'(kv_tile_start_r) + integer'(sm_col_idx);
@@ -547,16 +871,41 @@ module softmax_engine
               end
             end
 
-            sm_scaled[sm_row_idx][sm_col_idx] <= scaled_val;
-            sm_masked[sm_row_idx][sm_col_idx] <= masked;
-            row_max_next = fp32_max(sm_row_max[sm_row_idx], scaled_val);
-            sm_row_max[sm_row_idx] <= row_max_next;
+            if (SOFTMAX_SCALE_PIPE) begin
+              // Issue one scale operation per cycle and commit the previous
+              // result to the row maximum.  This removes the dynamic score
+              // mux + DSP multiply + fp32 compare chain from one cycle while
+              // preserving one-element-per-cycle throughput.
+              if (sm_scale_valid) begin
+                if (SOFTMAX_SCORE_INPLACE)
+                  s_data_r[sm_scale_row_pipe][sm_scale_col_pipe] <= sm_scale_value_pipe;
+                else
+                  sm_scaled[sm_scale_row_pipe][sm_scale_col_pipe] <= sm_scale_value_pipe;
+                sm_masked[sm_scale_row_pipe][sm_scale_col_pipe] <= sm_scale_masked_pipe;
+                row_max_next = fp32_max(sm_row_max[sm_scale_row_pipe], sm_scale_value_pipe);
+                sm_row_max[sm_scale_row_pipe] <= row_max_next;
+              end
+              sm_scale_valid       <= 1'b1;
+              sm_scale_row_pipe    <= sm_row_idx;
+              sm_scale_col_pipe    <= sm_col_idx;
+              sm_scale_value_pipe  <= scaled_val;
+              sm_scale_masked_pipe <= masked;
+            end else begin
+              // One-click rollback to the signed-off v2.5 Phase 1 schedule.
+              if (SOFTMAX_SCORE_INPLACE)
+                s_data_r[sm_row_idx][sm_col_idx] <= scaled_val;
+              else
+                sm_scaled[sm_row_idx][sm_col_idx] <= scaled_val;
+              sm_masked[sm_row_idx][sm_col_idx] <= masked;
+              row_max_next = fp32_max(sm_row_max[sm_row_idx], scaled_val);
+              sm_row_max[sm_row_idx] <= row_max_next;
+            end
 
             if (sm_col_idx == SM_TILE_COLS_LAST) begin
               if (sm_row_idx == SM_TILE_ROWS_LAST) begin
                 sm_row_idx <= 5'd0;
                 sm_col_idx <= 5'd0;
-                sm_state <= SM_MAX_UPDATE;
+                sm_state <= SOFTMAX_SCALE_PIPE ? SM_SCALE_DRAIN : SM_MAX_UPDATE;
               end else begin
                 sm_row_idx <= sm_row_idx + 5'd1;
                 sm_col_idx <= 5'd0;
@@ -564,6 +913,23 @@ module softmax_engine
             end else begin
               sm_col_idx <= sm_col_idx + 5'd1;
             end
+          end
+
+          SM_SCALE_DRAIN: begin
+            // Commit the final issued element before the max-update pass.
+            if (sm_scale_valid) begin
+              if (SOFTMAX_SCORE_INPLACE)
+                s_data_r[sm_scale_row_pipe][sm_scale_col_pipe] <= sm_scale_value_pipe;
+              else
+                sm_scaled[sm_scale_row_pipe][sm_scale_col_pipe] <= sm_scale_value_pipe;
+              sm_masked[sm_scale_row_pipe][sm_scale_col_pipe] <= sm_scale_masked_pipe;
+              row_max_next = fp32_max(sm_row_max[sm_scale_row_pipe], sm_scale_value_pipe);
+              sm_row_max[sm_scale_row_pipe] <= row_max_next;
+            end
+            sm_scale_valid <= 1'b0;
+            sm_row_idx <= 5'd0;
+            sm_col_idx <= 5'd0;
+            sm_state <= SM_MAX_UPDATE;
           end
 
           SM_MAX_UPDATE: begin
@@ -583,28 +949,301 @@ module softmax_engine
           end
 
           SM_CORR_LOOKUP: begin
-            if (kv_tile_first_r || (sm_row_idx >= active_rows_r))
+            if (kv_tile_first_r || (sm_row_idx >= active_rows_r)) begin
               sm_corr[sm_row_idx] <= FP32_ZERO_BITS;
+              if (sm_row_idx == SM_TILE_ROWS_LAST) begin
+                sm_row_idx <= 5'd0;
+                sm_col_idx <= 5'd0;
+                sm_row_sum_acc <= FP32_ZERO_BITS;
+                sm_p_shift_valid <= 1'b0;
+                sm_exp_quant_valid <= 1'b0;
+                sm_exp_req_valid <= 1'b0;
+                sm_exp_lut_valid <= 1'b0;
+                sm_exp_frac_valid <= 1'b0;
+                sm_exp_delta_valid <= 1'b0;
+                sm_exp_mul_valid <= 1'b0;
+                sm_p_lookup_valid <= 1'b0;
+                sm_p_issue_done <= 1'b0;
+`ifdef LARA_SOFTMAX_P_PIPE_ROLLBACK
+                sm_state <= SM_P_SHIFT;
+`else
+                sm_state <= SM_P_PIPE;
+`endif
+              end else begin
+                sm_row_idx <= sm_row_idx + 5'd1;
+                sm_state <= SM_MAX_UPDATE;
+              end
+            end else begin
+              sm_exp_quant <= exp_lookup_quantize(sm_corr_shift_pipe);
+              sm_state <= SM_CORR_INDEX;
+            end
+          end
+
+          // Correction EXP follows the same exact contract as the P EXP
+          // pipeline, but is serialized per row and therefore uses explicit
+          // FSM stages instead of valid-tag streaming.
+          SM_CORR_INDEX: begin
+            sm_exp_req <= exp_lookup_index(sm_exp_quant);
+            sm_state <= SM_CORR_LUT;
+          end
+
+          SM_CORR_LUT: begin
+            sm_exp_lut_mode <= sm_exp_req[37:36];
+            sm_exp_lut_idx <= sm_exp_req[35:26];
+            sm_exp_lut_rem <= sm_exp_req[25:0];
+            if (sm_exp_req[37:36] == 2'd2) begin
+              if (sm_exp_req[35:26] == LUT_DEPTH - 1)
+                sm_exp_frac_mode <= 2'd3;
+              else
+                sm_exp_frac_mode <= 2'd2;
+              sm_exp_frac_fp <= q26_to_fp32(
+                  longint'(sm_exp_req[25:0])
+              );
+              sm_exp_frac_lut_lo <= exp_lut[sm_exp_req[35:26]];
+              if (sm_exp_req[35:26] == LUT_DEPTH - 1)
+                sm_exp_frac_lut_hi <= exp_lut[sm_exp_req[35:26]];
+              else
+                sm_exp_frac_lut_hi <= exp_lut[sm_exp_req[35:26] + 1'b1];
+            end else begin
+              sm_exp_frac_mode <= sm_exp_req[37:36];
+              sm_exp_frac_fp <= FP32_ZERO_BITS;
+              sm_exp_frac_lut_lo <= FP32_ZERO_BITS;
+              sm_exp_frac_lut_hi <= FP32_ZERO_BITS;
+            end
+            sm_state <= SM_CORR_DELTA;
+          end
+
+          SM_CORR_DELTA: begin
+            sm_exp_delta_mode <= sm_exp_frac_mode;
+            sm_exp_delta_frac_fp <= sm_exp_frac_fp;
+            sm_exp_delta_lut_lo <= sm_exp_frac_lut_lo;
+            if (sm_exp_frac_mode == 2'd2)
+              sm_exp_delta <= fp32_sub(
+                  sm_exp_frac_lut_hi, sm_exp_frac_lut_lo
+              );
             else
-              sm_corr[sm_row_idx] <= exp_lookup_bits(sm_corr_shift_pipe);
+              sm_exp_delta <= FP32_ZERO_BITS;
+            sm_state <= SM_CORR_MUL;
+          end
+
+          SM_CORR_MUL: begin
+            sm_exp_mul_mode <= sm_exp_delta_mode;
+            sm_exp_mul_lut_lo <= sm_exp_delta_lut_lo;
+            if (sm_exp_delta_mode == 2'd2)
+              sm_exp_mul_product <= fp32_mul(
+                  sm_exp_delta, sm_exp_delta_frac_fp
+              );
+            else
+              sm_exp_mul_product <= FP32_ZERO_BITS;
+            sm_state <= SM_CORR_ADD;
+          end
+
+          SM_CORR_ADD: begin
+            case (sm_exp_mul_mode)
+              2'd0: sm_corr[sm_row_idx] <= FP32_ZERO_BITS;
+              2'd1: sm_corr[sm_row_idx] <= FP32_ONE_BITS;
+              2'd3: sm_corr[sm_row_idx] <= sm_exp_mul_lut_lo;
+              default: sm_corr[sm_row_idx] <= fp32_add(
+                  sm_exp_mul_lut_lo, sm_exp_mul_product
+              );
+            endcase
 
             if (sm_row_idx == SM_TILE_ROWS_LAST) begin
               sm_row_idx <= 5'd0;
               sm_col_idx <= 5'd0;
               sm_row_sum_acc <= FP32_ZERO_BITS;
+              sm_p_shift_valid <= 1'b0;
+              sm_exp_quant_valid <= 1'b0;
+              sm_exp_req_valid <= 1'b0;
+              sm_exp_lut_valid <= 1'b0;
+              sm_exp_frac_valid <= 1'b0;
+              sm_exp_delta_valid <= 1'b0;
+              sm_exp_mul_valid <= 1'b0;
+              sm_p_lookup_valid <= 1'b0;
+              sm_p_issue_done <= 1'b0;
+`ifdef LARA_SOFTMAX_P_PIPE_ROLLBACK
               sm_state <= SM_P_SHIFT;
+`else
+              sm_state <= SM_P_PIPE;
+`endif
             end else begin
               sm_row_idx <= sm_row_idx + 5'd1;
               sm_state <= SM_MAX_UPDATE;
             end
           end
 
+          SM_P_PIPE: begin
+            // Commit EXP output and preserve the legacy left-to-right
+            // fp32 row-sum recurrence.  Draining at every row boundary avoids
+            // a cross-row dependency while still issuing one element/cycle.
+            if (sm_p_lookup_valid) begin
+              if (SOFTMAX_P_INPLACE) begin
+                if (SOFTMAX_SCORE_INPLACE)
+                  s_data_r[sm_p_lookup_row][sm_p_lookup_col] <= sm_p_pipe;
+                else
+                  sm_scaled[sm_p_lookup_row][sm_p_lookup_col] <= sm_p_pipe;
+              end else begin
+                sm_p[sm_p_lookup_row][sm_p_lookup_col] <= sm_p_pipe;
+              end
+              row_sum_next = fp32_add(sm_row_sum_acc, sm_p_pipe);
+              sm_row_sum_acc <= row_sum_next;
+              if (sm_p_lookup_col == SM_TILE_COLS_LAST) begin
+                sm_row_sum[sm_p_lookup_row] <= row_sum_next;
+                sm_row_sum_acc <= FP32_ZERO_BITS;
+                sm_p_lookup_valid <= 1'b0;
+                sm_p_issue_done <= 1'b0;
+                sm_col_idx <= 5'd0;
+                if (sm_p_lookup_row == SM_TILE_ROWS_LAST) begin
+                  sm_row_idx <= 5'd0;
+                  sm_state <= SM_L_MUL;
+                end else begin
+                  sm_row_idx <= sm_p_lookup_row + 5'd1;
+                end
+              end
+            end
+
+            // Stage 7: retire the final interpolation result.  The row/column
+            // tags keep the left-to-right row-sum recurrence unchanged.
+            sm_p_lookup_valid <= sm_exp_mul_valid;
+            if (sm_exp_mul_valid) begin
+              sm_p_lookup_row <= sm_exp_mul_row;
+              sm_p_lookup_col <= sm_exp_mul_col;
+              case (sm_exp_mul_mode)
+                2'd0: sm_p_pipe <= FP32_ZERO_BITS;
+                2'd1: sm_p_pipe <= FP32_ONE_BITS;
+                2'd3: sm_p_pipe <= sm_exp_mul_lut_lo;
+                default: sm_p_pipe <= fp32_add(
+                    sm_exp_mul_lut_lo, sm_exp_mul_product
+                );
+              endcase
+            end
+
+            // Stage 6: multiply the exact LUT delta by the exact Q8.26
+            // fraction.  This is deliberately separate from FP32 add.
+            sm_exp_mul_valid <= sm_exp_delta_valid;
+            if (sm_exp_delta_valid) begin
+              sm_exp_mul_row <= sm_exp_delta_row;
+              sm_exp_mul_col <= sm_exp_delta_col;
+              sm_exp_mul_mode <= sm_exp_delta_mode;
+              sm_exp_mul_lut_lo <= sm_exp_delta_lut_lo;
+              if (sm_exp_delta_mode == 2'd2)
+                sm_exp_mul_product <= fp32_mul(
+                    sm_exp_delta, sm_exp_delta_frac_fp
+                );
+              else
+                sm_exp_mul_product <= FP32_ZERO_BITS;
+            end
+
+            // Stage 5: calculate the exact LUT delta.  The original LUT
+            // ordering and FP32 subtraction are preserved.
+            sm_exp_delta_valid <= sm_exp_frac_valid;
+            if (sm_exp_frac_valid) begin
+              sm_exp_delta_row <= sm_exp_frac_row;
+              sm_exp_delta_col <= sm_exp_frac_col;
+              sm_exp_delta_mode <= sm_exp_frac_mode;
+              sm_exp_delta_frac_fp <= sm_exp_frac_fp;
+              sm_exp_delta_lut_lo <= sm_exp_frac_lut_lo;
+              if (sm_exp_frac_mode == 2'd2)
+                sm_exp_delta <= fp32_sub(
+                    sm_exp_frac_lut_hi, sm_exp_frac_lut_lo
+                );
+              else
+                sm_exp_delta <= FP32_ZERO_BITS;
+            end
+
+            // Stage 4: convert the Q8.26 remainder to FP32 and read the
+            // adjacent LUT entries.  These values feed the delta stage.
+            sm_exp_frac_valid <= sm_exp_lut_valid;
+            if (sm_exp_lut_valid) begin
+              sm_exp_frac_row <= sm_exp_lut_row;
+              sm_exp_frac_col <= sm_exp_lut_col;
+              if (sm_exp_lut_mode == 2'd2) begin
+                // Preserve the original idx==1023 fast path exactly:
+                // exp_lookup_bits returns the last ROM word directly,
+                // without an FP32 add with zero.
+                if (sm_exp_lut_idx == LUT_DEPTH - 1)
+                  sm_exp_frac_mode <= 2'd3;
+                else
+                  sm_exp_frac_mode <= 2'd2;
+                sm_exp_frac_fp <= q26_to_fp32(
+                    longint'(sm_exp_lut_rem)
+                );
+                sm_exp_frac_lut_lo <= exp_lut[sm_exp_lut_idx];
+                if (sm_exp_lut_idx == LUT_DEPTH - 1)
+                  sm_exp_frac_lut_hi <= exp_lut[sm_exp_lut_idx];
+                else
+                  sm_exp_frac_lut_hi <= exp_lut[sm_exp_lut_idx + 1'b1];
+              end else begin
+                sm_exp_frac_mode <= sm_exp_lut_mode;
+                sm_exp_frac_fp <= FP32_ZERO_BITS;
+                sm_exp_frac_lut_lo <= FP32_ZERO_BITS;
+                sm_exp_frac_lut_hi <= FP32_ZERO_BITS;
+              end
+            end
+
+            // Stage 3: register the exact LUT request before any LUT read or
+            // interpolation arithmetic.
+            sm_exp_lut_valid <= sm_exp_req_valid;
+            if (sm_exp_req_valid) begin
+              sm_exp_lut_row <= sm_exp_req_row;
+              sm_exp_lut_col <= sm_exp_req_col;
+              sm_exp_lut_mode <= sm_exp_req[37:36];
+              sm_exp_lut_idx <= sm_exp_req[35:26];
+              sm_exp_lut_rem <= sm_exp_req[25:0];
+            end
+
+            // Stage 2: calculate the exact LUT index and Q8.26 remainder.
+            sm_exp_req_valid <= sm_exp_quant_valid;
+            if (sm_exp_quant_valid) begin
+              sm_exp_req_row <= sm_exp_quant_row;
+              sm_exp_req_col <= sm_exp_quant_col;
+              sm_exp_req <= exp_lookup_index(sm_exp_quant);
+            end
+
+            // Stage 1: quantize the shifted FP32 value and preserve its mode.
+            sm_exp_quant_valid <= sm_p_shift_valid;
+            if (sm_p_shift_valid) begin
+              sm_exp_quant_row <= sm_p_shift_row;
+              sm_exp_quant_col <= sm_p_shift_col;
+              if (sm_masked_pipe)
+                sm_exp_quant <= {2'd0, 28'd0};
+              else
+                sm_exp_quant <= exp_lookup_quantize(sm_shifted_pipe);
+            end
+
+            // Stage 0: subtract the new row max and register its row/column tag.
+            if (!sm_p_issue_done) begin
+              sm_p_shift_valid <= 1'b1;
+              sm_p_shift_row <= sm_row_idx;
+              sm_p_shift_col <= sm_col_idx;
+              sm_masked_pipe <= sm_masked[sm_row_idx][sm_col_idx];
+              if (sm_masked[sm_row_idx][sm_col_idx])
+                sm_shifted_pipe <= FP32_ZERO_BITS;
+              else
+                sm_shifted_pipe <= fp32_sub(
+                    SOFTMAX_SCORE_INPLACE ? s_data_r[sm_row_idx][sm_col_idx]
+                                          : sm_scaled[sm_row_idx][sm_col_idx],
+                    sm_m_new[sm_row_idx]);
+
+              if (sm_col_idx == SM_TILE_COLS_LAST)
+                sm_p_issue_done <= 1'b1;
+              else
+                sm_col_idx <= sm_col_idx + 5'd1;
+            end else begin
+              sm_p_shift_valid <= 1'b0;
+            end
+          end
+
+`ifdef LARA_SOFTMAX_P_PIPE_ROLLBACK
           SM_P_SHIFT: begin
             sm_masked_pipe <= sm_masked[sm_row_idx][sm_col_idx];
             if (sm_masked[sm_row_idx][sm_col_idx])
               sm_shifted_pipe <= FP32_ZERO_BITS;
             else
-              sm_shifted_pipe <= fp32_sub(sm_scaled[sm_row_idx][sm_col_idx], sm_m_new[sm_row_idx]);
+              sm_shifted_pipe <= fp32_sub(
+                  SOFTMAX_SCORE_INPLACE ? s_data_r[sm_row_idx][sm_col_idx]
+                                        : sm_scaled[sm_row_idx][sm_col_idx],
+                  sm_m_new[sm_row_idx]);
             sm_state <= SM_P_LOOKUP;
           end
 
@@ -617,7 +1256,14 @@ module softmax_engine
           end
 
           SM_P_ACCUM: begin
-            sm_p[sm_row_idx][sm_col_idx] <= sm_p_pipe;
+            if (SOFTMAX_P_INPLACE) begin
+              if (SOFTMAX_SCORE_INPLACE)
+                s_data_r[sm_row_idx][sm_col_idx] <= sm_p_pipe;
+              else
+                sm_scaled[sm_row_idx][sm_col_idx] <= sm_p_pipe;
+            end else begin
+              sm_p[sm_row_idx][sm_col_idx] <= sm_p_pipe;
+            end
             row_sum_next = fp32_add(sm_row_sum_acc, sm_p_pipe);
 
             if (sm_col_idx == SM_TILE_COLS_LAST) begin
@@ -639,6 +1285,7 @@ module softmax_engine
               sm_state <= SM_P_SHIFT;
             end
           end
+`endif
 
           SM_L_MUL: begin
             if (kv_tile_first_r || (sm_row_idx >= active_rows_r))
@@ -672,8 +1319,16 @@ module softmax_engine
               m_state[ri]    <= sm_m_new[ri];
               l_state[ri]    <= sm_l_new[ri];
               correction[ri] <= sm_corr[ri];
-              for (ci = 0; ci < TILE_COLS; ci++)
-                p_data[ri][ci] <= sm_p[ri][ci];
+              for (ci = 0; ci < TILE_COLS; ci++) begin
+                if (SOFTMAX_P_INPLACE) begin
+                  if (SOFTMAX_SCORE_INPLACE)
+                    p_data_reg[ri][ci] <= s_data_r[ri][ci];
+                  else
+                    p_data_reg[ri][ci] <= sm_scaled[ri][ci];
+                end else begin
+                  p_data_reg[ri][ci] <= sm_p[ri][ci];
+                end
+              end
             end
             sm_state <= SM_IDLE;
           end

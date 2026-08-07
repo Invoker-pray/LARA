@@ -10,7 +10,7 @@ module tb_softmax;
   localparam shortreal EPS_CORR = 0.001;
   localparam shortreal EPS_P    = 0.01;
 
-  logic clk, rst_n, s_valid, kv_tile_first, kv_tile_last, p_valid, done;
+  logic clk, rst_n, s_valid, s_ready, kv_tile_first, kv_tile_last, p_valid, done;
   logic causal_mask_en;
   logic [15:0] q_tile_start, kv_tile_start;
   logic [4:0] active_rows, active_cols;
@@ -36,9 +36,10 @@ module tb_softmax;
   logic tick_marker;
   logic settle_marker;
 
-  integer fd, ri, ci, err;
+  integer fd, dump_fd, ri, ci, err;
   integer scan_rc;
   integer wait_cycles;
+  string dump_bits_path;
 
   task automatic tick;
     begin
@@ -54,6 +55,21 @@ module tb_softmax;
     end
   endtask
 
+  task automatic dump_outputs(input integer case_id);
+    begin
+      if (dump_fd) begin
+        for (ri = 0; ri < TILE_ROWS; ri++) begin
+          $fdisplay(dump_fd, "CASE %02d M %02d %08x", case_id, ri, m_state[ri]);
+          $fdisplay(dump_fd, "CASE %02d L %02d %08x", case_id, ri, l_state[ri]);
+          $fdisplay(dump_fd, "CASE %02d C %02d %08x", case_id, ri, correction[ri]);
+          for (ci = 0; ci < TILE_COLS; ci++)
+            $fdisplay(dump_fd, "CASE %02d P %02d %02d %08x",
+                      case_id, ri, ci, p_data[ri][ci]);
+        end
+      end
+    end
+  endtask
+
   initial begin
     clk = 1'b0; rst_n = 1'b0; s_valid = 1'b0; kv_tile_first = 1'b0; kv_tile_last = 1'b0;
     causal_mask_en = 1'b0; q_tile_start = 16'd0; kv_tile_start = 16'd0;
@@ -62,6 +78,7 @@ module tb_softmax;
     state_load = 1'b0;
     tick_marker = 1'b0;
     settle_marker = 1'b0;
+    dump_fd = 0;
     for (ri = 0; ri < TILE_ROWS; ri++) begin
       state_m_in[ri] = 32'hFF80_0000;
       state_l_in[ri] = 32'd0;
@@ -85,6 +102,13 @@ module tb_softmax;
         scan_rc = $fscanf(fd, "%h", golden_P[ri][ci]);
     for (ri = 0; ri < TILE_ROWS; ri++) scan_rc = $fscanf(fd, "%h", golden_corr[ri]);
     $fclose(fd);
+    if ($value$plusargs("DUMP_BITS=%s", dump_bits_path)) begin
+      dump_fd = $fopen(dump_bits_path, "w");
+      if (!dump_fd) begin
+        $display("FAIL cannot open bit dump %s", dump_bits_path);
+        err++;
+      end
+    end
 
     $display("TB: softmax_engine — single KV tile test");
 
@@ -116,6 +140,17 @@ module tb_softmax;
       $display("FAIL softmax timeout after %0d cycles", wait_cycles);
       $finish;
     end
+`ifdef SYNTHESIS
+    $display("SOFTMAX_CYCLE_PROFILE scale_max_drain=257 max_correction=48 p_phase=%0d l_update_write=33 total=%0d",
+             SOFTMAX_P_PIPE ? 288 : 768, wait_cycles);
+    if (SOFTMAX_P_PIPE && (wait_cycles > 630)) begin
+      $display("FAIL pipelined softmax cycles=%0d limit=630", wait_cycles);
+      err++;
+    end else if (!SOFTMAX_P_PIPE && (wait_cycles != 1106)) begin
+      $display("FAIL rollback softmax cycles=%0d expected=1106", wait_cycles);
+      err++;
+    end
+`endif
 
     // Check outputs
     for (ri = 0; ri < TILE_ROWS; ri++) begin
@@ -167,6 +202,10 @@ module tb_softmax;
       end
     end
 
+    // The P1 A/B script compares these raw outputs byte-for-byte between the
+    // package rollback and default pipeline builds.
+    dump_outputs(0);
+
     // Directed truncation contract: after max subtraction, values below -8
     // must contribute exactly zero rather than being clamped to exp(-8).
     tick();
@@ -203,9 +242,64 @@ module tb_softmax;
         err++;
       end
     end
+    dump_outputs(1);
+
+    // Non-first tile with state_load and an all-causal-masked active region.
+    // Running m/l must remain unchanged, correction must be one, and P zero.
+    tick();
+    for (ri = 0; ri < TILE_ROWS; ri++) begin
+      state_m_in[ri] = 32'h0000_0000;
+      state_l_in[ri] = 32'h4000_0000;
+    end
+    state_load = 1'b1;
+    tick();
+    state_load = 1'b0;
+    active_rows = 5'd2;
+    active_cols = 5'd4;
+    causal_mask_en = 1'b1;
+    q_tile_start = 16'd0;
+    kv_tile_start = 16'd16;
+    for (ri = 0; ri < TILE_ROWS; ri++)
+      for (ci = 0; ci < TILE_COLS; ci++)
+        s_data[ri][ci] = 32'h3F80_0000;
+    s_valid = 1'b1;
+    kv_tile_first = 1'b0;
+    tick();
+    s_valid = 1'b0;
+
+    wait_cycles = 0;
+    while ((p_valid !== 1'b1) && (wait_cycles < 2000)) begin
+      tick();
+      wait_cycles++;
+    end
+    settle();
+    if (p_valid !== 1'b1) begin
+      $display("FAIL softmax all-masked timeout after %0d cycles", wait_cycles);
+      err++;
+    end else begin
+      for (ri = 0; ri < 2; ri++) begin
+        if (m_state[ri] != 32'h0000_0000 ||
+            l_state[ri] != 32'h4000_0000 ||
+            correction[ri] != 32'h3F80_0000) begin
+          $display("FAIL all-masked state row=%0d m=%h l=%h corr=%h",
+                   ri, m_state[ri], l_state[ri], correction[ri]);
+          err++;
+        end
+        for (ci = 0; ci < TILE_COLS; ci++) begin
+          if (p_data[ri][ci] != 32'h0000_0000) begin
+            $display("FAIL all-masked P row=%0d col=%0d value=%h",
+                     ri, ci, p_data[ri][ci]);
+            err++;
+          end
+        end
+      end
+    end
+    dump_outputs(2);
+    if (dump_fd)
+      $fclose(dump_fd);
 
     if (err == 0)
-      $display("ALL %0d CHECKS PASSED", TILE_ROWS * (3 + TILE_COLS) + 2);
+      $display("ALL %0d CHECKS PASSED", TILE_ROWS * (3 + TILE_COLS) + 40);
     else
       $display("%0d ERRORS", err);
     $finish;

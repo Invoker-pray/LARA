@@ -43,5 +43,5 @@ cat > run.tcl << 'TCL'
 run
 quit
 TCL
-./simv -no_save -ucli -i run.tcl -l sim.log
+./simv -no_save ${SIM_ARGS:-} -ucli -i run.tcl -l sim.log
 echo "${TB_NAME}: DONE"

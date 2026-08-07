@@ -45,6 +45,8 @@ module tb_attn_top_partial;
   bit saw_micro1_fresh;
   bit saw_tlast;
   bit saw_writeback_overlap;
+  int profile_dump_fd;
+  string profile_dump_path;
 
   attn_top dut (
     .clk, .rst_n,
@@ -156,8 +158,8 @@ module tb_attn_top_partial;
     int logical_row;
 
     if (rst_n) begin
-      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 0) && !saw_micro0_reload &&
-          (dut.phasea_micro_idx == 0) && (dut.phasea_kv_blk_idx == 1)) begin
+      if ((dut.phasea_state == 3'd5) && !saw_micro0_reload &&
+          (dut.phasea_held_micro == 0) && (dut.phasea_held_kv_blk == 1)) begin
         if ((dut.sm_state_l_in[0] == 32'd0) || (dut.sm_state_m_in[0] == FP32_NEG_INF)) begin
           $display("FAIL partial micro0 reload context was not preserved");
           err++;
@@ -165,8 +167,8 @@ module tb_attn_top_partial;
         saw_micro0_reload = 1'b1;
       end
 
-      if ((dut.phasea_state == 3'd2) && (dut.depth_cnt == 0) && !saw_micro1_fresh &&
-          (dut.phasea_micro_idx == 1) && (dut.phasea_kv_blk_idx == 0)) begin
+      if ((dut.phasea_state == 3'd5) && !saw_micro1_fresh &&
+          (dut.phasea_held_micro == 1) && (dut.phasea_held_kv_blk == 0)) begin
         for (int ri = 0; ri < TILE_ROWS; ri++) begin
           if ((dut.sm_state_m_in[ri] !== FP32_NEG_INF) || (dut.sm_state_l_in[ri] !== 32'd0)) begin
             $display("FAIL partial micro1 fresh context mismatch row=%0d m=%h l=%h",
@@ -194,7 +196,7 @@ module tb_attn_top_partial;
       end
 
       if (dut.src_valid) begin
-        if (dut.mac_phase)
+        if (dut.phaseb_datapath_select)
           saw_writeback_overlap = 1'b1;
         logical_row = (dut.phaseb_norm_micro_idx * TILE_ROWS) + int'(dut.obuf_o_row);
         if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
@@ -216,6 +218,8 @@ module tb_attn_top_partial;
       end
 
       if (m_axis_tvalid && m_axis_tready) begin
+        if (profile_dump_fd)
+          $fdisplay(profile_dump_fd, "%08x %0d", m_axis_tdata, m_axis_tlast);
         out_beats++;
         if (m_axis_tlast) begin
           if (saw_tlast) begin
@@ -268,6 +272,15 @@ module tb_attn_top_partial;
     saw_micro1_fresh = 1'b0;
     saw_tlast = 1'b0;
     saw_writeback_overlap = 1'b0;
+    profile_dump_fd = 0;
+
+    if ($value$plusargs("DUMP_BITS=%s", profile_dump_path)) begin
+      profile_dump_fd = $fopen(profile_dump_path, "w");
+      if (!profile_dump_fd) begin
+        $display("FAIL cannot open partial output dump %s", profile_dump_path);
+        err++;
+      end
+    end
 
     #20 rst_n = 1'b1;
     tick();
@@ -327,9 +340,12 @@ module tb_attn_top_partial;
       err++;
     end
     if (Q_MICROTILES > 1 && !saw_writeback_overlap) begin
-      $display("FAIL partial did not observe writeback overlap during mac_phase");
+      $display("FAIL partial did not observe writeback overlap during Phase-B MAC ownership");
       err++;
     end
+
+    if (profile_dump_fd)
+      $fclose(profile_dump_fd);
 
     if (err == 0)
       $display("ALL ATTN_TOP PARTIAL CHECKS PASSED");

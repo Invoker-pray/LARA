@@ -393,7 +393,7 @@
 | bf16 | 符合 | bf16 MAC、host bf16 packing、AXIS 两个 bf16/beat |
 | Attention 在 FPGA | 符合 | QK、online softmax、AV、O accumulation 在 PL |
 | QKV projection 是否必须上板 | 不要求 | 架构文档将其定义为 host-side boundary；本轮补齐自动化 host→DMA→FPGA 流程 |
-| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.5 Phase 1 post-route 165 DSP、95267 LUT、57838 FF |
+| 无 AI Core 资源约束 | 符合 | KV260 PL-only，v2.5 P4 Explore post-route 165 DSP、95479 LUT、56940 FF |
 | performance/scalability | 部分完成 | 83.333 MHz 已收敛；当前单序列 prefill、`MAX_SEQ_LEN=512`，decode/batching 尚未承诺 |
 
 早期 HTML 文档中的“≥200 MHz”“256 DSP”等是架构估算或历史目标，不是当前签收结果。论文和演示应使用 Vivado post-route 报告中的 83.333 MHz、资源和实测板上数据。
@@ -420,3 +420,209 @@
 3. **P1：提高 softmax/psum 的真实综合效率**：先以 post-route critical path 为依据，再评估 base-2 Softermax；近似方案必须增加 bf16 误差回归，不能只看 LUT/频率。
 4. **P2：长上下文扩展**：将 512 上限拆成 chunked prefill 或分页 KV cache；这属于 scalability 加分项，不应破坏当前 Llama3.1 bf16 基线。
 5. **P2：性能模型和板上 benchmark**：分离 host projection、DMA K/V、DMA Q、PL compute、DMA O 时间，报告 tokens/s、有效 MAC 利用率和 bytes/token。
+
+---
+
+## 11. 2026-07-26 softmax 吞吐、阶段融合与物理收敛补充调研
+
+本节记录 v2.5 Phase 2 签核后新增的外部资料结论。当前板卡未连接，因此本轮优先级以可在 Python、Verilator、VCS 和 Vivado 中闭环的 exact-bf16 优化为主，不把板上测量作为开始 RTL 工作的前置条件。
+
+### 11.1 FlashAttention-2 的算法优化与 LARA 现状对应
+
+- **来源**：[FlashAttention-2 paper](https://arxiv.org/abs/2307.08691)
+- **论文结论**：前向计算通过保持未归一化的输出状态，只在最后使用 softmax 分母归一化，减少每个 block 的 non-matmul 缩放；同时通过更好的 work partition 和阶段并行提高硬件利用率。
+- **LARA 对应状态**：
+  - `output_buffer.sv` 已实现 `O_acc_new = O_acc_old * correction + delta`，在最终输出时再除以 `l_state`，因此“保持未归一化 O”已经吸收，不应重复重构。
+  - 当前尚未吸收的是 work partition：`attn_top.sv` 的 `PA_WAIT_P` 会等待 softmax 完整结束后才开始下一个 score block，MAC 与 softmax 没有重叠。
+  - 当前 softmax 的 P 计算仍按 `P_SHIFT -> P_LOOKUP -> P_ACCUM` 三状态逐元素串行执行。把三步改成带 `valid/row/col/masked` 标签的流水线，是“减少 non-matmul 调度开销”在 LARA 上最直接的 exact 实现。
+
+### 11.2 Exact streaming softmax：先提高 initiation interval，再增加 lane
+
+当前综合 RTL 对每个 16x16 subblock 的周期组成是：
+
+| 阶段 | 当前周期 |
+|---|---:|
+| scale/max + drain | 257 |
+| max/correction | 48 |
+| P shift/lookup/accum | 768 |
+| l update + write | 33 |
+| 合计 | 1106 |
+
+可借鉴的 streaming pipeline 映射为：
+
+```text
+cycle N:   issue fp32_sub，登记 row/col/masked tag
+cycle N+1: EXP lookup
+cycle N+2: fp32 row-sum commit + P scratch write
+```
+
+- 保守实现可以在每行末尾 drain，P 阶段约 288 cycles，softmax 约 626 cycles。
+- 连续 tagged 实现可以跨行保持 II=1，P 阶段约 258 cycles，softmax 约 596 cycles。
+- 该优化不复制 EXP、FP32 add 或主要 DSP，只增加流水寄存器和 drain/valid 控制；应以 `SOFTMAX_P_PIPE` 参数保留 v2.5 调度回退路径。
+- 在单 lane 达到 II=1 之前，不应先复制双 softmax lane。当前 `u_softmax` 已使用 9305 LUT、23024 FF，直接复制会使总 LUT 接近 90%，显著增加 KV260 拥塞和 route 风险。
+
+### 11.3 ME-ViT：融合非线性阶段以减少矩阵单元等待
+
+- **来源**：[ME-ViT paper](https://arxiv.org/abs/2402.09709)
+- **论文结论**：通过 single-load memory policy、复用片上 buffer，并把 Softmax/LayerNorm 集成到计算 PE 周围，减少矩阵乘阶段之间的 memory traffic 和 stall；论文报告最高 2.16x throughput/DSP 提升。
+- **对 LARA 的启发**：
+  - 不照搬其 ViT/HLS PE，而是减少 `QK -> softmax -> PV` 之间的整块等待。
+  - softmax 已将输入复制到内部 `s_data_r`；MAC accumulator 可以保存下一个完成的 score block。因此第一版 overlap 应优先增加 producer/consumer ready-valid、分离 issue/retire index，只有现有两个 holding location 不够时才增加独立 score ping-pong RAM。
+  - 更长期可以研究 P 产生后利用 MAC 空闲窗口执行 PV，但这需要重新调度共享 MAC、correction 和 output-buffer hazard，属于 P4 而不是首个实验。
+
+### 11.4 TeLLMe：KV260 prefill 的调度经验可借鉴，数值路径不可照搬
+
+- **来源**：[TeLLMe paper](https://arxiv.org/abs/2504.16266)
+- **论文结论**：在 KV260 级别边缘 FPGA 上同时考虑 prefill、decode、memory hierarchy 和算子融合；其 attention 使用 bandwidth-efficient fusion 和 reordering 降低 prefill 开销。
+- **适用边界**：TeLLMe 使用 1.58-bit ternary weight 和 INT8 activation，不能作为 LARA bf16 MAC、EXP 或数值误差的依据。当前只借鉴“prefill-first、减少中间搬运、让阶段重叠”的调度原则。
+
+### 11.5 AMD UG906/UG579：routing-dominated 路径的处置顺序
+
+- **来源**：[Vivado Design Analysis and Closure Techniques, UG906](https://docs.amd.com/r/en-US/ug906-vivado-design-analysis)、[UltraScale Architecture DSP Slice, UG579](https://docs.amd.com/r/en-US/ug579-ultrascale-dsp)
+- **当前证据**：v2.5 Phase 2 最差路径 `sm_row_idx -> sm_scale_value_pipe` 的 data path delay 为 11.635 ns，其中 route 8.096 ns（69.6%），`sm_row_idx` 相关复制网 fanout 为 126。
+- **UG906 对应建议**：
+  1. net delay 主导时先检查 high/cumulative fanout、hold detour、bounding box 和跨资源列情况；
+  2. 优先通过局部 RTL 流水和 post-placement `phys_opt_design` 处理，不要默认依赖 synthesis `MAX_FANOUT`；
+  3. 只有多个实现轮次都显示同一物理跨区问题时才使用最小 Pblock，过度 floorplan 会限制 placer；
+  4. 使用 congestion report 和 `report_design_analysis` 证明拥塞来源，再选择 Explore、SpreadLogic 或 targeted physical optimization。
+- **LARA 落地顺序**：
+  - P pipeline 若不改变当前最差 scale 路径但仍能 route 通过，可以先接受吞吐收益。
+  - 若新增逻辑导致 WNS 失败，优先增加 `selected_score_reg`，把动态 score mux 与 bf16 scale/DSP 拆开；或评估 DSP48E2 输入/M/P 寄存器。
+  - 不增加全局 `MAX_FANOUT`，不使用 false path/multicycle 掩盖真实同步路径。
+
+### 11.6 Softmax scratch/store 复用：先回收布线和寄存器，再评估双 lane
+
+当前 softmax 同时维护 `s_data_r`、`sm_scaled`、`sm_p` 和完整 `p_data` 输出，并通过 256x32-bit 宽接口写入顶层 P-store。可以在保持 exact 语义的前提下评估：
+
+1. P 计算完成后原址覆盖不再使用的 `sm_scaled[row][col]`；
+2. 让 P-store 直接读取该 scratch，避免 `sm_p -> p_data -> p_store` 的完整矩阵复制；
+3. 或按行 commit 到 P-store，降低宽总线 fanout，但必须保持 whole-word write，避免浅深度 RAM 的 read-modify-write LUT 化。
+
+这项工作主要目标是降低 softmax 的 23024 FF 和跨层级布线压力，不应和 P pipeline 在同一个首轮实验中混做。
+
+### 11.7 更新后的 P0-P4 顺序
+
+| 阶段 | 工作 | 量化目标 |
+|---|---|---|
+| P0 | 恢复 causal KV early-exit 直接回归；补 Phase A/softmax/Phase B/OBUF wait 周期分解；修正静态 benchmark | L=512 每 Q head 的 causal/non-causal 分别为 72/128 tile pairs，完整 32-head 事务为 2304/4096；基线 softmax 1106 cycles/block |
+| P1 | `SOFTMAX_P_PIPE` exact 三段流水，保留旧路径 | `s_valid -> p_valid <= 630 cycles`；bit-exact；DSP/BRAM/URAM 不增加 |
+| P2 | MAC/softmax producer-consumer 解耦，优先复用现有 holding register | 相比 P1 的完整主循环仿真周期再降低至少 15%，无 deadlock/backpressure 丢块 |
+| P3 | softmax scratch/P-store 复用，降低完整矩阵复制 | softmax FF 或跨层级矩阵寄存器显著下降，功能和周期不回退 |
+| P4 | softmax->PV streaming/fusion、双 lane 和 16x32 参数 sweep | 仅在 P1-P3 post-route 通过后 DSE；每个配置分别记录周期、WNS/WHS、LUT/FF/BRAM/URAM/DSP |
+
+所有 RTL 阶段都必须依次通过 Python golden、driver unittest、Verilator lint、VCS behavioral/synthesis/XPM 回归，再运行 clean Vivado synthesis、place、route、DRC。当前无板卡连接，板上性能测试保留为最终签收项，不阻塞 P0-P4 的仿真和实现探索。
+
+### 11.8 P0 实测关闭结果（2026-07-26）
+
+- 选择 core 级 direct regression，而不是依赖顶层长数据通路：前者可以在一次测试中
+  完整遍历 32 heads，并对每次 Q/head/group 切换做 `kv_tile_idx` 连续性断言。
+- 被拒绝的旧模型是把 `mac_done/softmax_done/o_write_done` 长期拉高；新模型对三者只
+  产生单周期 ack，Q/KV 则按顶层实际语义使用 bank-ready 状态。
+- VCS 结果：L=512 causal/non-causal 分别为 2304/4096 pairs；L=70 partial 为 128；
+  L=70、`q_pos_base=64` 为 192。synthesis-path softmax 独立保持 1106 cycles/block。
+- benchmark 的设计选择是只发布可证明的合同与 scoped model。由于当前 P0 没有真实
+  MAC/PV/OBUF/DMA 完整周期数据，拒绝继续输出旧的 200 MHz、256 DSP、260 cycles/KV
+  推导出的 latency、tokens/s 和 GOPS。
+
+### 11.9 P1 exact P-pipeline 实测关闭结果（2026-07-26）
+
+- 采用逐行 drain 的保守 II=1 流水，而没有先做跨行 tag 或双 lane：这使 row-sum
+  recurrence 与 Phase 2 保持完全相同的 FP32 运算次序，rollback/default 的 P、m、l、
+  correction 原始 bits 可直接字节级比较。
+- 实测 P 阶段 `768 -> 288 cycles`，softmax subblock `1106 -> 626 cycles`，减少 43.4%；
+  full/partial、`x<-8`、state load、后续 KV tile 和 causal all-masked 全部通过。
+- matching clean default route 已通过 WNS `+0.003 ns`、WHS `0.000 ns`、TNS/THS `0`、
+  144612/144612 fully routed、DRC 0；95077 LUT、57956 FF、50 BRAM、48 URAM、165 DSP。
+  资源与时序说明先提高单 lane initiation interval 是合适选择，无需为 P1 复制 EXP lane。
+- 最差 setup 已转移到 MAC clear accumulator 到 output-buffer accumulator，data delay
+  11.895 ns、route 占 64.8%。P2 应继续把 MAC/softmax overlap 作为单一变量，而不是在
+  这一轮顺便做 scratch 重构或 wider MAC。
+
+### 11.10 P2 Phase-A producer/consumer 协议与仿真结果（2026-07-27）
+
+P2 保持 MAC、softmax、P-store 和公开 CSR 接口的数值合同不变，只重排 Phase-A
+内部调度。producer、holding location 和 consumer 的所有权定义如下：
+
+| 位置 | 有效位/标签 | 所有权与更新条件 |
+|---|---|---|
+| MAC accumulator | `phasea_micro_idx/phasea_kv_blk_idx` | 当前正在计算的 issue tag；只在一个 held block 被 softmax 接受后推进 |
+| `s_block` holding register | `phasea_held_valid`、`phasea_held_*` | `PA_FLUSH` 原子捕获 score 和 tag；backpressure 期间 score、active rows/cols、Q/KV position 全部保持 |
+| softmax in-flight | `phasea_sm_inflight`、`phasea_pending_*` | 只在 `s_valid && s_ready` 时登记 retire tag；只在真实 `p_valid` 时释放并写 P-store/context |
+
+`PA_LOAD_CTX` 与 `PA_LAUNCH` 被明确拆开：前者让 `sm_m_ctx/sm_l_ctx` 以 held microtile
+tag 稳定一个完整周期并由 `state_load` 采样，后者保持 `s_valid` 到 `s_ready`。因此不再
+用固定延时猜测 softmax 完成，也不会在 nonblocking assignment 的同一个边沿加载上一份
+context。controller 的 `kv_tile_first` 是 64-column KV tile 级标签；送入 softmax 的
+标签收窄为 `kv_tile_first && held_kv_block==0`，所以每个 Q microtile 只有 subblock 0
+初始化 online-softmax，subblock 1–3 正确延续 m/l。
+
+默认 `PHASEA_SOFTMAX_OVERLAP=1` 在 block N 握手进入 softmax 后立即让 MAC 计算
+block N+1，并复用 `s_block` 保存完成结果；没有增加 score ping-pong RAM。
+`LARA_PHASEA_SOFTMAX_OVERLAP_ROLLBACK` 将参数置 0，恢复“retire N 后再计算 N+1”的
+串行调度，但保留上述 context、first-tag 和 ready/valid 正确性修复。
+
+测试先在旧 RTL 上复现了两类错误：首个 64-token tile 的后续 subblock 仍收到
+`kv_tile_first=1`，且 softmax 内部 m/l 与目标 microtile context 不一致。修复后的 focused
+synthesis-path A/B 覆盖连续四个 subblock、两个 Q microtiles、后续 partial KV tile、
+causal/all-masked 和确定性 1–4 cycle `s_ready` backpressure；launch/retire 数量和顺序均
+正确，rollback/default 的 P、m、l、correction 原始 bits 字节级相同。完整 8-block
+Phase-A 从 `7109` 降到 `5310 cycles`，减少 `1799 cycles`（`25.31%`），超过 P2 的
+15% 门限；partial/all-masked 轮次为 `1777 -> 1520 cycles`。
+
+当前软件/仿真门禁为 Python golden `7/7`、driver `5/5`、deterministic benchmark
+matrix、Verilator behavioral/synthesis lint 无错误、VCS behavioral/synthesis/A-B/XPM
+`20/20`。
+
+matching clean Vivado 默认 route 也已关闭 P2 实现门禁：WNS `+0.001 ns`、TNS `0`、
+WHS `+0.010 ns`、THS `0`，184857 个 timing endpoints，144472/144472 routable nets
+fully routed，routing errors 和 DRC errors 均为 `0`。router 中间一度报告 WNS
+`-0.251 ns`，但同一轮 post-route physical synthesis 最终转正，不需要 Explore。
+
+post-route 资源为 95356 LUT、56938 FF、50 BRAM、48 URAM、165 DSP；相对 P1 为
+`+279 LUT / -1018 FF`，scarce memory/DSP 不变。最差 setup 仍是 MAC clear-accumulator
+replica 到 output-buffer accumulator，data path 11.590 ns，其中 route 7.557 ns（65.2%），
+不是新增 overlap 控制路径。softmax hierarchy 为 10086 LUT、23000 FF、3 DSP，是 P3
+scratch/P-store 复用的量化起点。
+
+bit/HWH/XSA、post-synth/post-route 报告、matching physopt/routed DCP 和实现日志保存在
+被忽略的 `checkpoint/v2.5-phasea-softmax-overlap/`，`SHA256SUMS` 已逐项校验。因此 P2
+满足周期、bit-exact、完整回归、资源和 implementation 验收；板上性能仍因 KV260 未连接
+而明确留待最终验证。
+
+### 11.11 P3 scratch/P-store DSE 关闭结果（2026-07-31）
+
+P3 保持 exact bf16、P1 的 626-cycle softmax subblock 和 P2 的 ready/valid 调度，只改变
+softmax scratch 与 P-store 的存储组织。三个候选均通过 focused A/B 和完整 Python、
+Verilator、VCS `25/25`，但实现证据不支持接受任何一个：
+
+- `P_INPLACE=1, P_OUTPUT_DIRECT=0`：clean post-synth 的 softmax 为
+  `11751 LUT / 25182 FF / 3 DSP`，高于 P2 约 `23004 FF`，说明保留注册输出时同时
+  保留两份矩阵，不能作为优化。
+- `P_INPLACE=1, P_OUTPUT_DIRECT=1`：softmax 为 `11545 LUT / 20922 FF / 3 DSP`，
+  只减少约 `9.1%` FF，未达到 `20%`；matching post-route 为 WNS `-1.245 ns`、
+  TNS `-882.633 ns`，所以不能接受。
+- `SCORE_INPLACE=1`：softmax FF 降至约 `12812`，但 Explore route 的 CLB 使用率
+  达到 `99.17%`，WNS `-0.121 ns`、TNS `-8.624 ns`；失败来自 routing pressure，
+  不是功能或周期回退。
+
+结论是 P3 全部有证据拒绝，默认恢复 P2 存储组织；对应报告、DCP、日志和哈希保存在
+`checkpoint/v2.5-p3-softmax-scratch-dse/`。后续优化必须先以 P2 为基线，不能把任一
+P3 候选当作新的默认硬件签核。
+
+### 11.12 P4 streaming/fused PV 关闭结果（2026-07-31）
+
+candidate 1 将 softmax P retire 与共享 MAC 的 PV 任务连接起来，但保持每个 PV
+block 的原子 ownership、P/m/l/correction 顺序和 output-buffer RAW 保护。实测
+32x32 主循环由 `4345` 降至 `3209`，32x64 由 `8429` 降至 `5809`，分别降低
+`26.14%` 和 `31.08%`；partial case A/B 输出 bit-exact。Python、Verilator 和
+VCS 全部通过，资源没有增加 BRAM/URAM/DSP。
+
+matching clean build 的默认 route fully routed 但 WNS `-0.110 ns`，因此按门禁
+拒绝默认 route；从同一轮 physopt checkpoint 进行 Explore route 后，正式报告为
+WNS `+0.021 ns`、WHS `+0.010 ns`、TNS/THS `0`，144158/144158 routable nets
+fully routed，routing errors `0`，DRC Error severity `0`。Explore 资源为
+95479 LUT、56940 FF、50 BRAM、48 URAM、165 DSP。
+
+P4 candidate 1 满足超过 10% 的周期收益和 matching post-route 门禁，设为新的
+默认实现；`LARA_STREAMING_PV_ROLLBACK` 保留 P2 回退。这里的性能仍是仿真周期
+证据，不是 KV260 实测吞吐；板卡未连接。
