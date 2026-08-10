@@ -60,7 +60,26 @@ bash sw/package_kv260_board.sh \
   /home/jiao/Downloads/kv260-pynq-offline/sd-bundle
 ```
 
-payload 内包含：
+打包脚本不会自动包含生成的 NPZ 测试用例。payload 生成后，在项目根目录手动加入
+两套正式用例，并刷新总哈希清单：
+
+```bash
+PAYLOAD_DIR=/home/jiao/git/LARA/board_payload_v4_71p428MHz
+
+cp -a board_cases_rtl_contract_v2.6_fixed "$PAYLOAD_DIR/"
+cp -a board_cases_rtl_contract_v2.6_q31_kv7 "$PAYLOAD_DIR/"
+
+(
+  cd "$PAYLOAD_DIR"
+  find . -type f ! -name LARA_SHA256SUMS -print0 \
+    | LC_ALL=C sort -z \
+    | xargs -0 sha256sum > LARA_SHA256SUMS
+)
+
+(cd "$PAYLOAD_DIR" && sha256sum -c LARA_SHA256SUMS)
+```
+
+手动补齐后的 payload 包含：
 
 ```text
 lara_attention.bit
@@ -187,6 +206,7 @@ python3 board_performance.py \
   --bitstream ./lara_attention.bit \
   --case-set q3kv3=./board_cases_rtl_contract_v2.6_fixed \
   --case-set q31kv7=./board_cases_rtl_contract_v2.6_q31_kv7 \
+  --lengths 1 16 32 64 128 \
   --warmup 1 \
   --repeats 5 \
   --cpu-core 3 \
@@ -208,6 +228,7 @@ L128 causal 两个 case：
 python3 run_board_full_validation.py \
   --quick-q31kv7 \
   --bitstream ./lara_attention.bit \
+  --case-set q31kv7=./board_cases_rtl_contract_v2.6_q31_kv7 \
   --output-dir ./board_quick_q31kv7_L1_L128 \
   --cpu-threads 1 \
   --cpu-clock-mhz 1333.333 \
@@ -224,6 +245,7 @@ python3 run_board_full_validation.py \
 python3 board_performance.py \
   --case-set q3kv3=./board_cases_rtl_contract_v2.6_fixed \
   --case-set q31kv7=./board_cases_rtl_contract_v2.6_q31_kv7 \
+  --lengths 1 16 32 64 128 \
   --list-only
 ```
 
@@ -232,6 +254,9 @@ python3 board_performance.py \
 ```bash
 LARA_CPU_THREADS=4 python3 board_performance.py \
   --bitstream ./lara_attention.bit \
+  --case-set q3kv3=./board_cases_rtl_contract_v2.6_fixed \
+  --case-set q31kv7=./board_cases_rtl_contract_v2.6_q31_kv7 \
+  --lengths 1 16 32 64 128 \
   --output-dir ./board_performance_results_cpu4
 ```
 
@@ -284,6 +309,7 @@ L512 causal 模式；绝对位置 base 仍为 16-bit，不受 512 的 tensor 长
 python3 run_board_full_validation.py \
   --extended-q31kv7-l512 \
   --bitstream ./lara_attention.bit \
+  --case-set q31kv7=./board_cases_rtl_contract_v2.6_q31_kv7 \
   --output-dir ./board_extended_q31kv7_L512 \
   --cpu-threads 1 \
   --cpu-core 3 \
@@ -800,8 +826,9 @@ SD 卡挂载点，也不是板上 PYNQ 虚拟环境目录。输出目录可以�
 6. 生成并验证 `OFFLINE_SHA256SUMS`。
 
 该目录只包含 PYNQ runtime 离线安装资源，不绑定任何一版 LARA RTL。应再通过
-`sw/package_kv260_board.sh` 将它与当前签核 build、正式 case 和测试脚本组成统一
-payload。runtime bundle 通常约 220 MB；为解压和文件
+`sw/package_kv260_board.sh` 将它与当前签核 build 和测试脚本组成基础 payload；
+正式 case 由用户在打包后手动加入，并重新生成 `LARA_SHA256SUMS`。runtime bundle
+通常约 220 MB；为解压和文件
 系统开销，建议 SD 卡第二分区至少预留 300 MB。宿主机需要
 `git`、`wget`、`python3-pip`、`tar`、`sha256sum`；若没有 `dtc`，脚本会尝试
 使用 Docker 编译 device-tree overlay。脚本不会读取或修改 `~/.zshrc`，不会

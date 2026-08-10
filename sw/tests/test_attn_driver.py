@@ -5,10 +5,18 @@ import numpy as np
 
 from sw.attn_driver import (
     AttentionAccelerator,
+    CSR_DESC_CTRL,
+    CSR_DESC_PUSH,
+    CSR_DESC_STATUS,
     DMA_MAX_TRANSFER_BYTES,
     HEAD_DIM,
     MAX_KV_HEAD_BYTES,
+    MAX_BATCH_INPUT_BYTES,
     MAX_OUTPUT_BYTES,
+    DESC_CTRL_CLEAR,
+    DESC_CTRL_ENABLE,
+    DESC_CTRL_INBAND,
+    DESC_STATUS_EMPTY,
     N_KV_HEADS,
     N_Q_HEADS,
     Q_TILE_BYTES,
@@ -94,10 +102,45 @@ class AttentionDriverTest(unittest.TestCase):
         out = accel.run_attention(q, k, v, seq_len=seq_len)
         self.assertEqual(out.shape, (N_Q_HEADS, seq_len, HEAD_DIM))
         transfers = [entry for entry in accel.dma_send.trace if entry[0] == "transfer"]
-        expected = N_KV_HEADS * 2 + N_Q_HEADS * ((seq_len + TILE_Q - 1) // TILE_Q)
+        q_descriptors = N_Q_HEADS * ((seq_len + TILE_Q - 1) // TILE_Q)
+        expected = N_KV_HEADS + q_descriptors - N_KV_HEADS
         self.assertEqual(len(transfers), expected)
-        self.assertEqual(transfers[0][2], N_KV_HEADS * 0 + seq_len * HEAD_DIM * 2)
-        self.assertEqual(transfers[1][2], seq_len * HEAD_DIM * 2)
+        self.assertEqual(
+            transfers[0][2],
+            2 * seq_len * HEAD_DIM * 2 + Q_TILE_BYTES,
+        )
+        profile = accel.last_profile
+        assert profile is not None
+        self.assertTrue(profile.descriptor_queue_enabled)
+        self.assertEqual(profile.input_dma_transfers, expected)
+        self.assertEqual(profile.input_dma_descriptors, N_KV_HEADS * 2 + q_descriptors)
+        self.assertEqual(profile.input_dma_batched_transfers, N_KV_HEADS)
+        self.assertEqual(profile.input_dma_max_segments, 3)
+
+    def test_legacy_hardware_falls_back_to_single_destination_dma(self):
+        seq_len = 1
+        q = np.zeros((N_Q_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+        k = np.zeros((N_KV_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+        v = np.zeros_like(k)
+        accel = AttentionAccelerator()
+        accel._descriptor_queue_supported = False
+
+        accel.run_attention(q, k, v, seq_len=seq_len)
+
+        transfers = [entry for entry in accel.dma_send.trace if entry[0] == "transfer"]
+        self.assertEqual(len(transfers), N_KV_HEADS * 2 + N_Q_HEADS)
+        profile = accel.last_profile
+        assert profile is not None
+        self.assertFalse(profile.descriptor_queue_enabled)
+        self.assertEqual(profile.input_dma_descriptors, len(transfers))
+
+    def test_descriptor_push_is_ignored_without_descriptor_mode(self):
+        with AttentionAccelerator() as accel:
+            accel.mmio.write(CSR_DESC_PUSH, 4)
+            self.assertTrue(accel.mmio.read(CSR_DESC_STATUS) & DESC_STATUS_EMPTY)
+            accel.mmio.write(CSR_DESC_CTRL, DESC_CTRL_CLEAR | DESC_CTRL_ENABLE | DESC_CTRL_INBAND)
+            accel.mmio.write(CSR_DESC_PUSH, 4)
+            self.assertTrue(accel.mmio.read(CSR_DESC_STATUS) & DESC_STATUS_EMPTY)
 
     def test_rejects_wrong_layout(self):
         accel = AttentionAccelerator()
@@ -115,7 +158,10 @@ class AttentionDriverTest(unittest.TestCase):
         k = np.zeros((N_KV_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
         v = np.zeros_like(k)
         accel = AttentionAccelerator()
-        buffer_ids = (id(accel._kv_send_buf), id(accel._q_send_buf), id(accel._out_buf))
+        buffer_ids = (
+            id(accel._kv_send_buf), id(accel._q_send_buf),
+            id(accel._batch_send_buf), id(accel._out_buf),
+        )
 
         out = accel.run_attention(q, k, v, seq_len=seq_len)
 
@@ -123,9 +169,16 @@ class AttentionDriverTest(unittest.TestCase):
         self.assertLessEqual(MAX_OUTPUT_BYTES, DMA_MAX_TRANSFER_BYTES)
         self.assertEqual(accel._kv_send_buf.nbytes, MAX_KV_HEAD_BYTES)
         self.assertEqual(accel._q_send_buf.nbytes, Q_TILE_BYTES)
+        self.assertEqual(accel._batch_send_buf.nbytes, MAX_BATCH_INPUT_BYTES)
         self.assertEqual(accel._out_buf.nbytes, MAX_OUTPUT_BYTES)
-        self.assertEqual(buffer_ids, (id(accel._kv_send_buf), id(accel._q_send_buf), id(accel._out_buf)))
-        self.assertEqual(accel.dma_send.trace[0][2], MAX_KV_HEAD_BYTES)
+        self.assertEqual(
+            buffer_ids,
+            (
+                id(accel._kv_send_buf), id(accel._q_send_buf),
+                id(accel._batch_send_buf), id(accel._out_buf),
+            ),
+        )
+        self.assertEqual(accel.dma_send.trace[0][2], MAX_BATCH_INPUT_BYTES)
         self.assertEqual(accel.dma_recv.trace[0][2], MAX_OUTPUT_BYTES)
 
         profile = accel.last_profile
@@ -133,6 +186,12 @@ class AttentionDriverTest(unittest.TestCase):
         assert profile is not None
         self.assertEqual(profile.kv_dma_transfers, N_KV_HEADS * 2)
         self.assertEqual(profile.q_dma_transfers, N_Q_HEADS * (seq_len // TILE_Q))
+        self.assertEqual(profile.input_dma_transfers, N_Q_HEADS * (seq_len // TILE_Q))
+        self.assertEqual(
+            profile.input_dma_descriptors,
+            N_KV_HEADS * 2 + N_Q_HEADS * (seq_len // TILE_Q),
+        )
+        self.assertEqual(profile.input_dma_batched_transfers, N_KV_HEADS)
         self.assertEqual(profile.output_dma_bytes, MAX_OUTPUT_BYTES)
         self.assertEqual(profile.seq_len, seq_len)
         self.assertTrue(profile.git_commit)

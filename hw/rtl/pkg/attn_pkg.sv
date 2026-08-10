@@ -264,6 +264,12 @@ package attn_pkg;
   localparam logic [13:0] CSR_STREAM_SRC_HI   = 14'h024;  // DDR source address [63:32] (reserved for 64-bit)
   localparam logic [13:0] CSR_STREAM_LEN      = 14'h028;  // Endpoint length in bytes; software starts AXI DMA separately
   localparam logic [13:0] CSR_STREAM_DEST     = 14'h02C;  // Stream destination select: 0=K_CACHE, 1=V_CACHE, 2=Q_BUF
+  // Descriptor format: [31:2] AXIS word count, [1:0] destination.  Writing
+  // DESC_PUSH appends one segment; one MM2S packet may contain many segments.
+  localparam logic [13:0] CSR_DESC_PUSH       = 14'h030;
+  localparam logic [13:0] CSR_DESC_STATUS     = 14'h034;  // [31] supported, [10] enabled, [9] full, [8] empty, [5:0] count
+  localparam logic [13:0] CSR_DESC_CTRL       = 14'h038;  // [0] enable, [1] clear queue W1P
+  localparam int STREAM_DESC_FIFO_DEPTH       = 16;
 
   // --- Result Stream Control (0x050–0x07F) ---
   localparam logic [13:0] CSR_RESULT_DST      = 14'h050;  // DDR destination address [31:0] for results
@@ -282,7 +288,9 @@ package attn_pkg;
     ERR_BUSY_START  = 8'h02,
     ERR_STREAM_LEN  = 8'h10,
     ERR_STREAM_DEST = 8'h11,
-    ERR_RESULT_LEN  = 8'h12
+    ERR_RESULT_LEN  = 8'h12,
+    ERR_DESC_FORMAT = 8'h13,
+    ERR_DESC_FULL   = 8'h14
   } error_code_t;
 
   // ==================================================================

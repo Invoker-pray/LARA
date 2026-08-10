@@ -26,6 +26,10 @@ module tb_stream;
   logic [ 1:0] dest_sel;
   logic [31:0] bytes_received;
   logic        overflow, underflow, sink_done;
+  logic        desc_queue_enabled, inband_command_enabled, desc_valid, desc_ready;
+  logic        kv_load_req, q_load_req;
+  logic [1:0]  desc_dest;
+  logic [31:0] desc_len;
 
   // ==================================================================
   // Source Signals
@@ -51,6 +55,8 @@ module tb_stream;
     .s_axis_tdata, .s_axis_tvalid, .s_axis_tready, .s_axis_tlast,
     .data_valid, .data_out, .data_last,
     .cfg_dest, .cfg_len, .cfg_burst,
+    .desc_queue_enabled, .inband_command_enabled,
+    .desc_valid, .desc_dest, .desc_len, .desc_ready, .kv_load_req, .q_load_req,
     .dest_sel, .bytes_received, .overflow, .underflow, .done(sink_done)
   );
 
@@ -151,6 +157,13 @@ module tb_stream;
     cfg_len  <= 32'd0;
     cfg_dest <= 2'd0;
     cfg_burst <= 4'd0;
+    desc_queue_enabled <= 1'b0;
+    inband_command_enabled <= 1'b0;
+    desc_valid <= 1'b0;
+    desc_dest <= STREAM_TO_K_CACHE;
+    desc_len <= 32'd0;
+    kv_load_req <= 1'b0;
+    q_load_req <= 1'b0;
     src_data_valid <= 1'b0;
     m_axis_tready <= 1'b1;
     wait_cycles(3);

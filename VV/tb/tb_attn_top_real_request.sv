@@ -41,7 +41,7 @@ module tb_attn_top_real_request;
   integer last_debug_head;
   integer last_debug_group;
   logic saw_k_request, saw_v_request, saw_q_request;
-  logic full_real;
+  logic full_real, desc_queue_mode, inband_mode;
 
   localparam logic [13:0] CSR_CTRL        = 14'h000;
   localparam logic [13:0] CSR_SEQ_LEN     = 14'h008;
@@ -50,6 +50,8 @@ module tb_attn_top_real_request;
   localparam logic [13:0] CSR_CFG         = 14'h014;
   localparam logic [13:0] CSR_STREAM_LEN  = 14'h028;
   localparam logic [13:0] CSR_STREAM_DEST = 14'h02c;
+  localparam logic [13:0] CSR_DESC_PUSH   = 14'h030;
+  localparam logic [13:0] CSR_DESC_CTRL   = 14'h038;
   localparam logic [13:0] CSR_RESULT_LEN  = 14'h058;
   localparam logic [31:0] CTRL_START      = 32'h1;
 
@@ -84,6 +86,121 @@ module tb_attn_top_real_request;
       @(posedge clk);
       @(negedge clk);
       s_axi_bready  = 1'b0;
+    end
+  endtask
+
+  task automatic send_batch_segment(
+    input integer beats,
+    input logic [15:0] active_word,
+    input logic zero_after_first,
+    input logic packet_last
+  );
+    integer beat;
+    logic [15:0] lo_word;
+    logic [15:0] hi_word;
+    begin
+      for (beat = 0; beat < beats; beat = beat + 1) begin
+        if (zero_after_first && beat >= 64) begin
+          lo_word = 16'd0;
+          hi_word = 16'd0;
+        end else begin
+          lo_word = active_word;
+          hi_word = active_word;
+        end
+        @(negedge clk);
+        s_axis_tdata = {hi_word, lo_word};
+        s_axis_tlast = packet_last && (beat == beats - 1);
+        s_axis_tvalid = 1'b1;
+        do @(posedge clk); while (!s_axis_tready);
+        @(negedge clk);
+        s_axis_tvalid = 1'b0;
+        s_axis_tlast = 1'b0;
+      end
+      while (!dut.axis_done)
+        @(posedge clk);
+      repeat (2) @(posedge clk);
+    end
+  endtask
+
+  task automatic service_kvq_batch;
+    begin
+      request_count = request_count + 2;
+      kv_request_count = kv_request_count + 1;
+      q_request_count = q_request_count + 1;
+      saw_k_request = 1'b1;
+      saw_v_request = 1'b1;
+      saw_q_request = 1'b1;
+      axi_write(CSR_DESC_PUSH, (K_V_BEATS << 2) | STREAM_TO_K_CACHE);
+      axi_write(CSR_DESC_PUSH, (K_V_BEATS << 2) | STREAM_TO_V_CACHE);
+      axi_write(CSR_DESC_PUSH, (Q_BEATS << 2) | STREAM_TO_Q_BUF);
+      send_batch_segment(K_V_BEATS, BF16_ONE, 1'b0, 1'b0);
+      send_batch_segment(K_V_BEATS, BF16_TWO, 1'b0, 1'b0);
+      send_batch_segment(Q_BEATS, BF16_ONE, 1'b1, 1'b1);
+    end
+  endtask
+
+  task automatic send_inband_word(
+    input logic [31:0] word,
+    input logic packet_last
+  );
+    begin
+      @(negedge clk);
+      s_axis_tdata = word;
+      s_axis_tlast = packet_last;
+      s_axis_tvalid = 1'b1;
+      do @(posedge clk); while (!s_axis_tready);
+      @(negedge clk);
+      s_axis_tvalid = 1'b0;
+      s_axis_tlast = 1'b0;
+    end
+  endtask
+
+  task automatic send_inband_segment(
+    input logic [1:0] dest,
+    input integer beats,
+    input logic [15:0] active_word,
+    input logic zero_after_first,
+    input logic packet_last
+  );
+    integer beat;
+    logic [15:0] data_word;
+    begin
+      send_inband_word((beats << 2) | dest, 1'b0);
+      for (beat = 0; beat < beats; beat = beat + 1) begin
+        data_word = (zero_after_first && beat >= 64) ? 16'd0 : active_word;
+        send_inband_word(
+          {data_word, data_word},
+          packet_last && (beat == beats - 1)
+        );
+      end
+    end
+  endtask
+
+  task automatic service_inband_transaction;
+    integer group_idx;
+    integer head_idx;
+    integer group_limit;
+    integer head_limit;
+    begin
+      group_limit = full_real ? N_KV_HEADS : 1;
+      head_limit = full_real ? GQA_GROUP_SIZE : 1;
+      for (group_idx = 0; group_idx < group_limit; group_idx = group_idx + 1) begin
+        request_count = request_count + 1;
+        kv_request_count = kv_request_count + 1;
+        saw_k_request = 1'b1;
+        saw_v_request = 1'b1;
+        send_inband_segment(STREAM_TO_K_CACHE, K_V_BEATS, BF16_ONE, 1'b0, 1'b0);
+        send_inband_segment(STREAM_TO_V_CACHE, K_V_BEATS, BF16_TWO, 1'b0, 1'b0);
+        for (head_idx = 0; head_idx < head_limit; head_idx = head_idx + 1) begin
+          request_count = request_count + 1;
+          q_request_count = q_request_count + 1;
+          saw_q_request = 1'b1;
+          send_inband_segment(
+            STREAM_TO_Q_BUF, Q_BEATS, BF16_ONE, 1'b1,
+            (group_idx == group_limit - 1) && (head_idx == head_limit - 1)
+          );
+        end
+      end
     end
   endtask
 
@@ -268,6 +385,8 @@ module tb_attn_top_real_request;
     saw_v_request = 1'b0;
     saw_q_request = 1'b0;
     full_real = $test$plusargs("FULL_REAL");
+    desc_queue_mode = $test$plusargs("DESC_QUEUE");
+    inband_mode = $test$plusargs("INBAND_COMMAND");
 
     repeat (4) @(posedge clk);
     rst_n = 1'b1;
@@ -277,6 +396,10 @@ module tb_attn_top_real_request;
     axi_write(CSR_Q_POS_BASE, 32'd3);
     axi_write(CSR_KV_POS_BASE, 32'd3);
     axi_write(CSR_CFG, 32'd1);
+    if (inband_mode)
+      axi_write(CSR_DESC_CTRL, 32'h7);
+    else if (desc_queue_mode)
+      axi_write(CSR_DESC_CTRL, 32'h3);
     if (full_real) begin
       // Match board_test.py for L=1: 32 Q heads x 128 BF16 values.
       axi_write(CSR_RESULT_LEN, 32'd8192);
@@ -288,8 +411,14 @@ module tb_attn_top_real_request;
     end
     axi_write(CSR_CTRL, CTRL_START);
 
+    if (inband_mode)
+      service_inband_transaction();
     while (!dut.done) begin
-      if (dut.kv_load_req)
+      if (inband_mode)
+        @(posedge clk);
+      else if (desc_queue_mode && dut.kv_load_req && dut.q_load_req)
+        service_kvq_batch();
+      else if (dut.kv_load_req)
         service_kv_request();
       else if (dut.q_load_req)
         service_q_request();
@@ -341,8 +470,11 @@ module tb_attn_top_real_request;
       errors = errors + 1;
     end
     if (errors == 0) begin
-      $display("REAL REQUEST PATH PASS mode=%s requests=%0d q_requests=%0d kv_requests=%0d output_beats=%0d nonzero_beats=%0d x_beats=%0d",
-               full_real ? "full" : "focused", request_count, q_request_count,
+      $display("REAL REQUEST PATH PASS mode=%s transport=%s requests=%0d q_requests=%0d kv_requests=%0d output_beats=%0d nonzero_beats=%0d x_beats=%0d",
+               full_real ? "full" : "focused",
+               inband_mode ? "inband-stream" :
+               (desc_queue_mode ? "descriptor-batch" : "legacy"),
+               request_count, q_request_count,
                kv_request_count, output_beats, output_nonzero_beats,
                output_x_beats);
       $finish(0);

@@ -84,6 +84,7 @@ checkpoint/
 
 # SD-card payloads, offline bundles, and collected board evidence stay local.
 /SD_BUNDLE_OUTDIR/
+/test_data/
 /board_payload*/
 /board_full*/
 /board_quick*/
@@ -102,6 +103,7 @@ checkpoint/
 # Local hand-off prompts and explicitly temporary operating notes.
 /ss.md
 /docs/TEMP_*
+/docs/handle.md
 
 
 # ============================================================================

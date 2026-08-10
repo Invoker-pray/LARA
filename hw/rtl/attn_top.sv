@@ -136,6 +136,9 @@ module attn_top
   assign phasea_split_last = (phasea_split_idx == (TILE_SPLIT_FACTOR - 1));
   assign phaseb_split_last = (phaseb_split_idx == (TILE_SPLIT_FACTOR - 1));
   logic axis_valid; logic [15:0] axis_data; logic axis_last; logic [1:0] axis_dest; logic axis_done;
+  logic desc_queue_enabled, inband_command_enabled, desc_valid, desc_ready;
+  logic [1:0] desc_dest;
+  logic [31:0] desc_len;
   logic src_valid, src_ready, src_last; logic [15:0] src_data; logic src_done;
   logic buf_sel, o_bank_sel; logic [15:0] q_buf_rd;
   logic [15:0] q_block_rd [TILE_ROWS];
@@ -961,8 +964,8 @@ module attn_top
   assign q_load_req  = q_load_req_pending;
   assign q_load_bank = q_req_bank_r;
 
-  attn_axi_lite_slave u_csr(.clk,.rst_n,.s_axi_awaddr,.s_axi_awvalid,.s_axi_awready,.s_axi_wdata,.s_axi_wstrb,.s_axi_wvalid,.s_axi_wready,.s_axi_bresp,.s_axi_bvalid,.s_axi_bready,.s_axi_araddr,.s_axi_arvalid,.s_axi_arready,.s_axi_rdata,.s_axi_rresp,.s_axi_rvalid,.s_axi_rready,.start,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.stream_dest(stream_dest_cfg),.stream_len(stream_len_cfg),.result_len(result_len_cfg),.start_ready,.busy,.done,.core_error,.stream_error,.kv_load_req,.q_load_req,.q_load_bank,.kv_req_group(kv_req_group_r),.q_req_group(q_req_group_r),.q_req_head(q_req_head_r),.q_req_tile(q_req_tile_r),.cycle_cnt,.mac_cycles,.stall_cycles);
-  attn_axi_stream_sink u_sink(.clk,.rst_n,.s_axis_tdata,.s_axis_tvalid,.s_axis_tready,.s_axis_tlast,.data_valid(axis_valid),.data_out(axis_data),.data_last(axis_last),.cfg_dest(stream_dest_cfg),.cfg_len(stream_len_cfg),.cfg_burst(4'd0),.dest_sel(axis_dest),.bytes_received(sink_bytes_received),.overflow(sink_overflow),.underflow(sink_underflow),.done(axis_done));
+  attn_axi_lite_slave u_csr(.clk,.rst_n,.s_axi_awaddr,.s_axi_awvalid,.s_axi_awready,.s_axi_wdata,.s_axi_wstrb,.s_axi_wvalid,.s_axi_wready,.s_axi_bresp,.s_axi_bvalid,.s_axi_bready,.s_axi_araddr,.s_axi_arvalid,.s_axi_arready,.s_axi_rdata,.s_axi_rresp,.s_axi_rvalid,.s_axi_rready,.start,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.stream_dest(stream_dest_cfg),.stream_len(stream_len_cfg),.result_len(result_len_cfg),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.start_ready,.busy,.done,.core_error,.stream_error,.kv_load_req,.q_load_req,.q_load_bank,.kv_req_group(kv_req_group_r),.q_req_group(q_req_group_r),.q_req_head(q_req_head_r),.q_req_tile(q_req_tile_r),.cycle_cnt,.mac_cycles,.stall_cycles);
+  attn_axi_stream_sink u_sink(.clk,.rst_n,.s_axis_tdata,.s_axis_tvalid,.s_axis_tready,.s_axis_tlast,.data_valid(axis_valid),.data_out(axis_data),.data_last(axis_last),.cfg_dest(stream_dest_cfg),.cfg_len(stream_len_cfg),.cfg_burst(4'd0),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.kv_load_req,.q_load_req,.dest_sel(axis_dest),.bytes_received(sink_bytes_received),.overflow(sink_overflow),.underflow(sink_underflow),.done(axis_done));
   attn_axi_stream_source u_src(.clk,.rst_n,.data_valid(src_valid),.data_in(src_data),.data_last(src_last),.data_ready(src_ready),.cfg_len(result_len_cfg),.m_axis_tdata,.m_axis_tvalid,.m_axis_tready,.m_axis_tlast,.bytes_sent(src_bytes_sent),.done(src_done));
   attn_core u_fsm(.clk,.rst_n,.start,.start_ready,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.done,.busy,.kv_load_start,.kv_load_done,.q_load_start,.q_load_done,.o_write_start,.o_write_done,.buf_sel,.q_load_bank_sel,.q_ready_bank_sel,.o_bank_sel,.group_advance,.mac_phase,.mac_start,.mac_done,.softmax_start,.softmax_done,.kv_tile_first,.kv_tile_last,.q_tile_start,.kv_tile_start,.active_q_rows,.active_kv_cols,.causal_en,.current_group(gqa_group),.current_head(q_head),.current_q_tile,.current_kv_tile,.q_req_group,.q_req_head,.q_req_tile,.error(core_error),.cycle_cnt,.mac_cycles,.stall_cycles,.perf_valid(perf_valid_unused));
   kv_cache_ram u_kcache(.clk,.rst_n,.wr_en(k_wr_en),.wr_addr(k_wr_addr),.wr_data(axis_data),.rd_en(k_rd_en),.rd_token_start(k_rd_start),.rd_dim(k_rd_dim),.rd_data(k_rd),.rd_vec_en(1'b0),.rd_vec_token_idx(16'd0),.rd_vec_dim_start(7'd0),.rd_vec_data(k_rd_vec_unused));

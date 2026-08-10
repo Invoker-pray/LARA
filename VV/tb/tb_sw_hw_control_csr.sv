@@ -11,6 +11,9 @@ module tb_sw_hw_control_csr;
   logic [1:0] stream_dest; logic [31:0] stream_len, result_len;
   logic kv_req, q_req, q_bank; logic [2:0] kv_group, q_group; logic [1:0] q_head; logic [7:0] q_tile;
   logic [31:0] cycle_cnt, mac_cycles, stall_cycles; int errors = 0;
+  logic desc_queue_enabled, inband_command_enabled, desc_valid, desc_ready;
+  logic [1:0] desc_dest;
+  logic [31:0] desc_len;
   localparam logic [31:0] CTRL_START = 32'h1;
   localparam logic [31:0] CTRL_CLEAR_STATUS = 32'h2;
 
@@ -22,7 +25,10 @@ module tb_sw_hw_control_csr;
     .s_axi_araddr(araddr), .s_axi_arvalid(arvalid), .s_axi_arready(arready),
     .s_axi_rdata(rdata), .s_axi_rresp(rresp), .s_axi_rvalid(rvalid), .s_axi_rready(rready),
     .start, .seq_len, .cfg_q_pos_base(q_pos), .cfg_kv_pos_base(kv_pos), .cfg_causal,
-    .stream_dest, .stream_len, .result_len, .start_ready, .busy, .done,
+    .stream_dest, .stream_len, .result_len,
+    .desc_queue_enabled, .inband_command_enabled,
+    .desc_valid, .desc_dest, .desc_len, .desc_ready,
+    .start_ready, .busy, .done,
     .core_error, .stream_error, .kv_load_req(kv_req), .q_load_req(q_req),
     .q_load_bank(q_bank), .kv_req_group(kv_group), .q_req_group(q_group),
     .q_req_head(q_head), .q_req_tile(q_tile), .cycle_cnt, .mac_cycles, .stall_cycles
@@ -49,7 +55,7 @@ module tb_sw_hw_control_csr;
     awaddr=0; araddr=0; awvalid=0; wvalid=0; arvalid=0; wdata=0; wstrb=4'hf;
     bready=0; rready=0; start_ready=1; busy=0; done=0; core_error=0; stream_error=0;
     kv_req=0; q_req=0; q_bank=0; kv_group=3; q_group=2; q_head=1; q_tile=7;
-    cycle_cnt=32'h1234; mac_cycles=32'h55; stall_cycles=32'h66;
+    cycle_cnt=32'h1234; mac_cycles=32'h55; stall_cycles=32'h66; desc_ready=0;
     repeat (3) @(posedge clk); rst_n=1; repeat (2) @(posedge clk);
     axi_read(CSR_STATUS, rd); if (rd[0] !== 1'b1) fail("ready after reset");
     axi_write(CSR_SEQ_LEN, 32'd33); axi_write(CSR_Q_POS_BASE, 32'd4); axi_write(CSR_KV_POS_BASE, 32'd8);
@@ -59,6 +65,18 @@ module tb_sw_hw_control_csr;
     done=1; @(posedge clk); done=0; axi_read(CSR_STATUS, rd); if (!rd[2]) fail("done sticky");
     kv_req=1; q_req=1; q_bank=1; @(posedge clk); axi_read(CSR_LOAD_REQ, rd);
     if (!rd[0] || !rd[1] || !rd[2] || rd[6:4] != 3 || rd[10:8] != 2 || rd[13:12] != 1 || rd[23:16] != 7) fail("load request descriptor");
+    axi_read(CSR_DESC_STATUS, rd); if (!rd[31] || !rd[8] || rd[10]) fail("descriptor reset status");
+    axi_write(CSR_DESC_CTRL, 32'h1);
+    axi_write(CSR_DESC_PUSH, {30'd2, STREAM_TO_K_CACHE});
+    axi_write(CSR_DESC_PUSH, {30'd3, STREAM_TO_V_CACHE});
+    axi_read(CSR_DESC_STATUS, rd); if (!rd[31] || rd[8] || !rd[10] || rd[5:0] != 2) fail("descriptor queued status");
+    if (!desc_valid || desc_dest != STREAM_TO_K_CACHE || desc_len != 8) fail("descriptor FIFO head");
+    desc_ready=1; @(posedge clk); @(negedge clk); desc_ready=0;
+    if (!desc_valid || desc_dest != STREAM_TO_V_CACHE || desc_len != 12) fail("descriptor FIFO pop");
+    axi_write(CSR_DESC_CTRL, 32'h3);
+    axi_read(CSR_DESC_STATUS, rd); if (!rd[8] || rd[5:0] != 0) fail("descriptor FIFO clear");
+    axi_write(CSR_DESC_CTRL, 32'h5);
+    axi_read(CSR_DESC_STATUS, rd); if (!rd[30] || !rd[11]) fail("in-band command capability");
     axi_read(CSR_PERF_CYCLES, rd); if (rd != cycle_cnt) fail("perf CSR must not alias CTRL");
     axi_write(CSR_CTRL, CTRL_CLEAR_STATUS); axi_read(CSR_STATUS, rd); if (rd[4:2] != 0) fail("clear status");
     if (errors == 0) begin $display("TB_SW_HW_CONTROL_CSR PASS"); $finish(0); end

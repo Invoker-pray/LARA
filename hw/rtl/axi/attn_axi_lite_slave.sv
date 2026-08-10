@@ -35,6 +35,12 @@ module attn_axi_lite_slave
     output logic [1:0]             stream_dest,
     output logic [31:0]            stream_len,
     output logic [31:0]            result_len,
+    output logic                   desc_queue_enabled,
+    output logic                   inband_command_enabled,
+    output logic                   desc_valid,
+    output logic [1:0]             desc_dest,
+    output logic [31:0]            desc_len,
+    input  logic                   desc_ready,
 
     input  logic                   start_ready,
     input  logic                   busy,
@@ -59,8 +65,26 @@ module attn_axi_lite_slave
   logic [3:0] wstrb_r;
   logic done_sticky, error_sticky, stream_error_sticky;
   logic [7:0] error_code_r;
+  localparam int DESC_PTR_W = $clog2(STREAM_DESC_FIFO_DEPTH);
+  localparam int DESC_COUNT_W = $clog2(STREAM_DESC_FIFO_DEPTH + 1);
+  logic [1:0] desc_dest_mem [STREAM_DESC_FIFO_DEPTH];
+  logic [31:0] desc_len_mem [STREAM_DESC_FIFO_DEPTH];
+  logic [DESC_PTR_W-1:0] desc_wr_ptr, desc_rd_ptr;
+  logic [DESC_COUNT_W-1:0] desc_count;
 
   wire write_fire = aw_acked && w_acked && !s_axi_bvalid;
+  wire desc_pop = desc_queue_enabled && desc_valid && desc_ready;
+  wire desc_push_attempt = write_fire && (awaddr_r == CSR_DESC_PUSH);
+  wire desc_push_format_valid = (wdata_r[1:0] <= STREAM_TO_Q_BUF) &&
+                                (wdata_r[31:2] != 30'd0);
+  wire desc_full = (desc_count == DESC_COUNT_W'(STREAM_DESC_FIFO_DEPTH));
+  wire desc_push_accept = desc_push_attempt && desc_queue_enabled &&
+                          !inband_command_enabled && desc_push_format_valid &&
+                          (!desc_full || desc_pop);
+
+  assign desc_valid = (desc_count != 0);
+  assign desc_dest = desc_dest_mem[desc_rd_ptr];
+  assign desc_len = {desc_len_mem[desc_rd_ptr][31:2], 2'b00};
 
   function automatic logic [31:0] merge_wstrb(
     input logic [31:0] old_value,
@@ -150,6 +174,11 @@ module attn_axi_lite_slave
       stream_dest         <= STREAM_TO_K_CACHE;
       stream_len          <= 32'd0;
       result_len          <= 32'd0;
+      desc_queue_enabled  <= 1'b0;
+      inband_command_enabled <= 1'b0;
+      desc_wr_ptr         <= '0;
+      desc_rd_ptr         <= '0;
+      desc_count          <= '0;
       done_sticky         <= 1'b0;
       error_sticky        <= 1'b0;
       stream_error_sticky <= 1'b0;
@@ -170,6 +199,27 @@ module attn_axi_lite_slave
         if (error_code_r == ERR_NONE)
           error_code_r <= ERR_STREAM_LEN;
       end
+
+      if (desc_push_attempt && !desc_push_format_valid) begin
+        error_sticky <= 1'b1;
+        error_code_r <= ERR_DESC_FORMAT;
+      end else if (desc_push_attempt && desc_full && !desc_pop) begin
+        error_sticky <= 1'b1;
+        error_code_r <= ERR_DESC_FULL;
+      end
+
+      if (desc_pop)
+        desc_rd_ptr <= desc_rd_ptr + 1'b1;
+      if (desc_push_accept) begin
+        desc_dest_mem[desc_wr_ptr] <= wdata_r[1:0];
+        desc_len_mem[desc_wr_ptr] <= {wdata_r[31:2], 2'b00};
+        desc_wr_ptr <= desc_wr_ptr + 1'b1;
+      end
+      unique case ({desc_push_accept, desc_pop})
+        2'b10: desc_count <= desc_count + 1'b1;
+        2'b01: desc_count <= desc_count - 1'b1;
+        default: begin end
+      endcase
 
       if (write_fire) begin
         s_axi_bvalid <= 1'b1;
@@ -201,6 +251,17 @@ module attn_axi_lite_slave
           CSR_CFG:         cfg_causal      <= merge1(cfg_causal, wdata_r, wstrb_r);
           CSR_STREAM_DEST: stream_dest     <= merge2(stream_dest, wdata_r, wstrb_r);
           CSR_STREAM_LEN:  stream_len      <= merge_wstrb(stream_len, wdata_r, wstrb_r);
+          CSR_DESC_CTRL: begin
+            if (wstrb_r[0]) begin
+              desc_queue_enabled <= wdata_r[0];
+              inband_command_enabled <= wdata_r[2];
+              if (wdata_r[1]) begin
+                desc_wr_ptr <= '0;
+                desc_rd_ptr <= '0;
+                desc_count  <= '0;
+              end
+            end
+          end
           CSR_RESULT_LEN:  result_len      <= merge_wstrb(result_len, wdata_r, wstrb_r);
           default: begin end
         endcase
@@ -244,6 +305,21 @@ module attn_axi_lite_slave
           end
           CSR_STREAM_DEST:     s_axi_rdata <= {30'd0, stream_dest};
           CSR_STREAM_LEN:      s_axi_rdata <= stream_len;
+          CSR_DESC_STATUS: begin
+            s_axi_rdata <= 32'd0;
+            s_axi_rdata[31] <= 1'b1;
+            s_axi_rdata[30] <= 1'b1;
+            s_axi_rdata[11] <= inband_command_enabled;
+            s_axi_rdata[10] <= desc_queue_enabled;
+            s_axi_rdata[9] <= desc_full;
+            s_axi_rdata[8] <= !desc_valid;
+            s_axi_rdata[5:0] <= 6'(desc_count);
+          end
+          CSR_DESC_CTRL: begin
+            s_axi_rdata <= 32'd0;
+            s_axi_rdata[2] <= inband_command_enabled;
+            s_axi_rdata[0] <= desc_queue_enabled;
+          end
           CSR_RESULT_LEN:      s_axi_rdata <= result_len;
           CSR_PERF_CYCLES:     s_axi_rdata <= cycle_cnt;
           CSR_PERF_CYCLES_HI:  s_axi_rdata <= 32'd0;

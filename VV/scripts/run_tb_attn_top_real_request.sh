@@ -35,4 +35,8 @@ vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k \
 
 ./simv -no_save ${SIM_ARGS:-} -l sim.log
 grep -q "REAL REQUEST PATH PASS" sim.log
+./simv -no_save ${SIM_ARGS:-} +DESC_QUEUE -l sim_desc_queue.log
+grep -q "transport=descriptor-batch" sim_desc_queue.log
+./simv -no_save ${SIM_ARGS:-} +INBAND_COMMAND -l sim_inband.log
+grep -q "inband-stream" sim_inband.log
 echo "ALL REAL REQUEST PATH XPM CHECKS PASSED"
