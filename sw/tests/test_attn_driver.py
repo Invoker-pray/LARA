@@ -52,6 +52,17 @@ class AttentionDriverTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be a non-negative number"):
                 AttentionAccelerator()
 
+    def test_prefetch_mode_validation_and_profile_gate(self):
+        with self.assertRaisesRegex(ValueError, "prefetch_mode"):
+            AttentionAccelerator(prefetch_mode="invalid")
+        accel = AttentionAccelerator(prefetch_mode="descriptor")
+        q = np.zeros((N_Q_HEADS, 1, HEAD_DIM), dtype=np.uint16)
+        k = np.zeros((N_KV_HEADS, 1, HEAD_DIM), dtype=np.uint16)
+        accel.run_attention(q, k, k, seq_len=1)
+        assert accel.last_profile is not None
+        self.assertEqual(accel.last_profile.prefetch_mode, "descriptor")
+        self.assertEqual(accel.last_profile.buffer_wait_ms, 0.0)
+
     def test_new_request_is_serviced_without_sleep(self):
         accel = AttentionAccelerator(request_poll_sleep_us=20)
         accel._hw_ready = True

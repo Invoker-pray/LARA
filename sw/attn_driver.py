@@ -106,6 +106,8 @@ DEFAULT_REQUEST_POLL_SLEEP_US = 20.0
 REQUEST_POLL_SLEEP_US_ENV = "LARA_REQUEST_POLL_SLEEP_US"
 STREAM_MODE_ENV = "LARA_STREAM_MODE"
 STREAM_MODES = ("auto", "inband", "descriptor", "legacy")
+PREFETCH_MODE_ENV = "LARA_PREFETCH_MODE"
+PREFETCH_MODES = ("off", "descriptor", "inband")
 
 ERR_NONE = 0x00
 ERR_BAD_CFG = 0x01
@@ -303,6 +305,12 @@ class RunProfile:
     inband_command_supported: bool = False
     inband_command_enabled: bool = False
     input_transport: str = "legacy"
+    # v3.1 experiment gate.  This is intentionally metadata-only until the
+    # RTL exposes a verified ownership/ready protocol for overlapping loads.
+    prefetch_mode: str = "off"
+    buffer_wait_ms: float = 0.0
+    input_dma_overlap_ms: float = 0.0
+    transport_stall_ms: float = 0.0
     input_dma_setup_ms: float = 0.0
     input_dma_transfer_ms: float = 0.0
     input_dma_transfers: int = 0
@@ -346,6 +354,7 @@ class AttentionAccelerator:
         overlay: Any | None = None,
         request_poll_sleep_us: float | None = None,
         stream_mode: str | None = None,
+        prefetch_mode: str | None = None,
     ) -> None:
         self.bitstream_path = str(Path(bitstream_path).resolve()) if bitstream_path else None
         self._git_hash = self._git_commit()
@@ -375,6 +384,17 @@ class AttentionAccelerator:
                 f"{STREAM_MODE_ENV}/stream_mode must be one of {STREAM_MODES}, got {stream_mode!r}"
             )
         self._requested_stream_mode = stream_mode
+        if prefetch_mode is None:
+            prefetch_mode = os.environ.get(PREFETCH_MODE_ENV, "off")
+        prefetch_mode = prefetch_mode.strip().lower()
+        if prefetch_mode not in PREFETCH_MODES:
+            raise ValueError(
+                f"{PREFETCH_MODE_ENV}/prefetch_mode must be one of {PREFETCH_MODES}, "
+                f"got {prefetch_mode!r}"
+            )
+        # Until the matching RTL ownership protocol lands, non-off modes are
+        # accepted for A/B manifest generation but do not alter transport.
+        self._requested_prefetch_mode = prefetch_mode
         if HAS_PYNQ:
             self.overlay = overlay if overlay is not None else Overlay(bitstream_path)
             # Overlay.download applies the HWH divisors but does not reprogram
@@ -848,6 +868,7 @@ class AttentionAccelerator:
             q_pos_base=q_pos_base,
             kv_pos_base=kv_pos_base,
             request_poll_sleep_us=self._request_poll_sleep_us,
+            prefetch_mode=self._requested_prefetch_mode,
             descriptor_queue_supported=self._descriptor_queue_supported,
             inband_command_supported=self._inband_command_supported,
         )
