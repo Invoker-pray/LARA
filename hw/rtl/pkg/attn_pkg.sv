@@ -281,6 +281,7 @@ package attn_pkg;
   localparam logic [13:0] CSR_PERF_CYCLES_HI  = 14'h104;  // Total cycle count [63:32]
   localparam logic [13:0] CSR_PERF_MAC_CYCLES = 14'h108;  // MAC-active cycles
   localparam logic [13:0] CSR_PERF_STALLS     = 14'h10C;  // Stall cycles waiting for host/memory
+  localparam logic [13:0] CSR_PERF_TRANSPORT_STALLS = 14'h110; // K/V DMA transport wait cycles
   localparam logic [13:0] CSR_PERF_BUFFER_WAIT = 14'h114; // Q-buffer ownership/ready wait cycles
 
   typedef enum logic [7:0] {

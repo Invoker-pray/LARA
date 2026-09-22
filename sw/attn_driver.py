@@ -50,6 +50,7 @@ CSR_RESULT_LEN = 0x058
 CSR_PERF_CYCLES = 0x100
 CSR_PERF_MAC_CYCLES = 0x108
 CSR_PERF_STALLS = 0x10C
+CSR_PERF_TRANSPORT_STALLS = 0x110
 CSR_PERF_BUFFER_WAIT = 0x114
 
 CTRL_START = 1 << 0
@@ -339,6 +340,7 @@ class RunProfile:
     pl_mac_cycles: int = 0
     pl_stall_cycles: int = 0
     pl_buffer_wait_cycles: int = 0
+    pl_transport_stall_cycles: int = 0
     pl_core_active_cycles_excluding_stalls: int = 0
     pl_total_ms: float = 0.0
     pl_mac_ms: float = 0.0
@@ -839,6 +841,7 @@ class AttentionAccelerator:
             "cycles": self.mmio.read(CSR_PERF_CYCLES),
             "mac_cycles": self.mmio.read(CSR_PERF_MAC_CYCLES),
             "stall_cycles": self.mmio.read(CSR_PERF_STALLS),
+            "transport_stall_cycles": self.mmio.read(CSR_PERF_TRANSPORT_STALLS),
             "buffer_wait_cycles": self.mmio.read(CSR_PERF_BUFFER_WAIT),
         }
 
@@ -936,6 +939,7 @@ class AttentionAccelerator:
         self.last_profile.pl_mac_cycles = perf["mac_cycles"]
         self.last_profile.pl_stall_cycles = perf["stall_cycles"]
         self.last_profile.pl_buffer_wait_cycles = perf["buffer_wait_cycles"]
+        self.last_profile.pl_transport_stall_cycles = perf["transport_stall_cycles"]
         self.last_profile.pl_core_active_cycles_excluding_stalls = max(
             perf["cycles"] - perf["stall_cycles"], 0,
         )
@@ -944,6 +948,7 @@ class AttentionAccelerator:
         self.last_profile.pl_mac_ms = perf["mac_cycles"] / cycles_per_ms
         self.last_profile.pl_stall_ms = perf["stall_cycles"] / cycles_per_ms
         self.last_profile.buffer_wait_ms = perf["buffer_wait_cycles"] / cycles_per_ms
+        self.last_profile.transport_stall_ms = perf["transport_stall_cycles"] / cycles_per_ms
         self.last_profile.pl_core_active_ms_excluding_stalls = (
             self.last_profile.pl_core_active_cycles_excluding_stalls / cycles_per_ms
         )

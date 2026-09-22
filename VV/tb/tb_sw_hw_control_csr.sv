@@ -10,7 +10,7 @@ module tb_sw_hw_control_csr;
   logic [15:0] seq_len, q_pos, kv_pos; logic cfg_causal;
   logic [1:0] stream_dest; logic [31:0] stream_len, result_len;
   logic kv_req, q_req, q_bank; logic [2:0] kv_group, q_group; logic [1:0] q_head; logic [7:0] q_tile;
-  logic [31:0] cycle_cnt, mac_cycles, stall_cycles, buffer_wait_cycles; int errors = 0;
+  logic [31:0] cycle_cnt, mac_cycles, stall_cycles, buffer_wait_cycles, kv_transport_stall_cycles; int errors = 0;
   logic desc_queue_enabled, inband_command_enabled, desc_valid, desc_ready;
   logic [1:0] desc_dest;
   logic [31:0] desc_len;
@@ -32,7 +32,7 @@ module tb_sw_hw_control_csr;
     .core_error, .stream_error, .kv_load_req(kv_req), .q_load_req(q_req),
     .q_load_bank(q_bank), .kv_req_group(kv_group), .q_req_group(q_group),
     .q_req_head(q_head), .q_req_tile(q_tile), .cycle_cnt, .mac_cycles, .stall_cycles,
-    .buffer_wait_cycles
+    .buffer_wait_cycles, .kv_transport_stall_cycles
   );
 
   task automatic fail(input string msg); begin $display("FAIL: %s", msg); errors++; end endtask
@@ -56,7 +56,7 @@ module tb_sw_hw_control_csr;
     awaddr=0; araddr=0; awvalid=0; wvalid=0; arvalid=0; wdata=0; wstrb=4'hf;
     bready=0; rready=0; start_ready=1; busy=0; done=0; core_error=0; stream_error=0;
     kv_req=0; q_req=0; q_bank=0; kv_group=3; q_group=2; q_head=1; q_tile=7;
-    cycle_cnt=32'h1234; mac_cycles=32'h55; stall_cycles=32'h66; buffer_wait_cycles=32'h77; desc_ready=0;
+    cycle_cnt=32'h1234; mac_cycles=32'h55; stall_cycles=32'h66; buffer_wait_cycles=32'h77; kv_transport_stall_cycles=32'h88; desc_ready=0;
     repeat (3) @(posedge clk); rst_n=1; repeat (2) @(posedge clk);
     axi_read(CSR_STATUS, rd); if (rd[0] !== 1'b1) fail("ready after reset");
     axi_write(CSR_SEQ_LEN, 32'd33); axi_write(CSR_Q_POS_BASE, 32'd4); axi_write(CSR_KV_POS_BASE, 32'd8);
@@ -80,6 +80,7 @@ module tb_sw_hw_control_csr;
     axi_read(CSR_DESC_STATUS, rd); if (!rd[30] || !rd[11]) fail("in-band command capability");
     axi_read(CSR_PERF_CYCLES, rd); if (rd != cycle_cnt) fail("perf CSR must not alias CTRL");
     axi_read(CSR_PERF_BUFFER_WAIT, rd); if (rd != buffer_wait_cycles) fail("perf buffer wait CSR");
+    axi_read(CSR_PERF_TRANSPORT_STALLS, rd); if (rd != kv_transport_stall_cycles) fail("perf transport stall CSR");
     axi_write(CSR_CTRL, CTRL_CLEAR_STATUS); axi_read(CSR_STATUS, rd); if (rd[4:2] != 0) fail("clear status");
     if (errors == 0) begin $display("TB_SW_HW_CONTROL_CSR PASS"); $finish(0); end
     else begin $display("TB_SW_HW_CONTROL_CSR FAIL errors=%0d", errors); $finish(1); end
