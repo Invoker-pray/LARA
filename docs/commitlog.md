@@ -1,5 +1,21 @@
 # LARA 项目提交记录
 
+## 2026-09-23（二）
+
+### v3.2.0 — K/V 传输等待观测计数器（未上板）
+
+- 落地 `docs/v3.1_design.md` §3 的 `PERF_TRANSPORT_STALLS`（CSR `0x110`）：
+  `attn_top` 统计 `kv_load_req_pending && !kv_load_done` 的周期（K/V DMA
+  等待份额，`start` 清零），纯观测、零数据流改动；读通道接入
+  `attn_axi_lite_slave`。
+- `sw/attn_driver.py`：`read_perf` 采集 `transport_stall_cycles`，补上
+  `transport_stall_ms` 的 cycle→ms 换算（该字段此前从未赋值）。
+- `tb_sw_hw_control_csr.sv` 驱动并校验 `0x110` 回读。
+- `docs/v3.1_design.md`：0x110/0x114 标记已实现，"当前 RTL 事实"更新
+  Q tag 保护落地状态。
+- 门禁：python golden 7/7、`sw/tests` 40/40、Verilator lint 0、VCS 完整
+  回归（synth+XPM）**28/28 PASS**。上板未开始（`.0`）。
+
 ## 2026-09-23
 
 ### v3.1.0 — Q bank tag 保护、buffer-wait 观测与仿真债务清偿（未上板）
