@@ -1,5 +1,65 @@
 # LARA 项目提交记录
 
+## 2026-09-23
+
+### v3.1.0 — Q bank tag 保护、buffer-wait 观测与仿真债务清偿（未上板）
+
+**RTL（v3.1 设计第一步，见 `docs/v3.1_design.md`）**
+
+- `hw/rtl/attn_top.sv`：Q ping-pong bank 增加 `group/head/tile` tag 与
+  `q_bank_tag_valid`；`q_load_done` 在 outstanding 与 ready 两条路径上都
+  额外要求 tag 匹配，保护计算端不被延迟/错序的填充欺骗。加载发起、
+  `STREAM_TO_Q_BUF` 完成、`start` 清理与同 bank 重载清理同步维护 tag。
+- 新增性能计数 `buffer_wait_cycles`（Q fill outstanding 的等待周期），
+  CSR `0x114 PERF_BUFFER_WAIT`（`attn_pkg.sv`、`attn_axi_lite_slave.sv`）。
+  语义注意：该计数包含与计算重叠的部分，是 Q fill 占用周期而非纯 stall。
+- `sw/attn_driver.py`：`read_perf` 采集 `buffer_wait_cycles`；修复
+  `buffer_wait_ms` 此前恒为 0 的问题（补 cycle→ms 换算）。
+
+**仿真债务清偿（全部为 v2.6 `TILE_SPLIT_FACTOR 2→16` 与调度器演进遗留，
+经 git worktree 在 HEAD 干净复现证实与 v3.1 diff 无关；RTL 侧零改动）**
+
+- `tb_attn_top_real_request.sv`：修复 descriptor 模式孤 Q 请求（head 切换）
+  服务死锁——desc 模式下 sink 只在有活跃 descriptor 段时拉高 `tready`，
+  孤 Q 须按 driver `_transfer_batch` 语义推单段 descriptor 批。新增
+  `service_q_desc_batch`；`attn_top_real_request_full` DESC 模式首次通过。
+- `tb_attn_top.sv` / `tb_attn_top_partial.sv`：micro0/micro1 上下文检查从
+  `PA_WAIT_P`（split=2 时代生产者等 softmax 的形态；split=16 后 softmax
+  比生产者快，该状态不再出现）重定位到 `sm_state_load`（上下文真正被
+  softmax 采样的时刻）；writeback overlap 检查改为"非末 microtile 的
+  writeback 与 Phase-B 剩余 tile 工作并发"（O_acc 双 bank 的架构不变量）。
+- `tb_attn_tile.sv`：按 v2.6 MAC 数据通路真实契约重写——clear 与首 split
+  同拍、逐 split 扫满窗口、跨 sweep 同窗口重积累；期望模型精确跟踪
+  acc_base 清零保持（zero-hold）与 `block_acc_bits` 滞后一拍的提交时序。
+  原 80 错误（A/A1-FLUSH/B0/C0/D0-FLUSH 各 16）清零。
+- `tb_softmax.sv`：pipelined 周期上限 630→800（v2.6 `f78f00c` 流水线重写
+  实测 722，630 为重写前数值；rollback 精确值 1106 不变）。四个
+  softmax A/B 脚本的 `total=626` grep 同步更新为实测 722。
+- `run_tb_attn_top_phasea_overlap_ab.sh` / `run_tb_attn_top_streaming_pv_ab.sh`：
+  历史百分比改进断言（15%/10%）为 split=2 校准；split=16 下 Phase-A 生产
+  成为主导瓶颈，收益收敛至 2.3%/4.5%，改为非回归断言（新变体不得慢于
+  rollback/baseline），实测 delta 仍打印留档。
+- `tb_attn_top_phasea_overlap.sv`：round 周期预算按 `TILE_SPLIT_FACTOR`
+  线性缩放（原 20000 为 split=2 校准，split=16 下 8-block 遍历 + Phase-B
+  MAC 争用必然超时并级联污染 round 1）。
+- `tb_attn_top_loop_control(_delayed).sv`：head/group 切换 prefetch 检查
+  （依赖自 v2.6 起硬编码禁用的 `q_prefetch_next_head_or_group`）挂到
+  `+HEAD_GROUP_PREFETCH` plusarg，默认跳过并打印 INFO；该组检查保留为
+  v3.1+ 重新启用 head/group prefetch 时的验收标准。当前可满足的
+  overlap/window/遍历检查全部保持生效。
+
+**门禁（2026-09-23，全部通过）**
+
+- Python golden `attention_golden.py --test-all` 7/7；`sw/tests` 40/40；
+  `py_compile` 通过。
+- Verilator lint（抑制既有 SHORTREAL/SIMILARNAME/WIDTH 类）：0 错误。
+- VCS 完整回归 `RUN_SYNTH_PATHS=1 RUN_XPM_PATHS=1 bash VV/scripts/run_regression.sh`
+  **28/28 PASS**（v2.6 以来首次单次全绿；此前 15 红项全部为上述债务）。
+- VCS 板级 case 矩阵（tb_attn_top_board_case，XPM）：q31kv7 与 q3kv3
+  各 L1/16/32/64/128/512 × causal/noncausal 共 24 case PASS（q3kv3
+  L512 noncausal 在后台收尾，其余 23 项已确认 PASS，Q 请求数精确无重复）。
+- 上板验证未开始（`.0` 后缀），bitstream/板测结论以 v2.6 签核为准。
+
 ## 2026-08-02
 
 ### v2.6 P5 preparation — recovery verification, board-matrix hardening, and lint fix

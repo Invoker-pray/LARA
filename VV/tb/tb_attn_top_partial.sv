@@ -158,7 +158,9 @@ module tb_attn_top_partial;
     int logical_row;
 
     if (rst_n) begin
-      if ((dut.phasea_state == 3'd5) && !saw_micro0_reload &&
+      // Context checks observe the cycle softmax samples the presented
+      // context (sm_state_load); see the note in tb_attn_top.sv.
+      if (dut.sm_state_load && !saw_micro0_reload &&
           (dut.phasea_held_micro == 0) && (dut.phasea_held_kv_blk == 1)) begin
         if ((dut.sm_state_l_in[0] == 32'd0) || (dut.sm_state_m_in[0] == FP32_NEG_INF)) begin
           $display("FAIL partial micro0 reload context was not preserved");
@@ -167,7 +169,7 @@ module tb_attn_top_partial;
         saw_micro0_reload = 1'b1;
       end
 
-      if ((dut.phasea_state == 3'd5) && !saw_micro1_fresh &&
+      if (dut.sm_state_load && !saw_micro1_fresh &&
           (dut.phasea_held_micro == 1) && (dut.phasea_held_kv_blk == 0)) begin
         for (int ri = 0; ri < TILE_ROWS; ri++) begin
           if ((dut.sm_state_m_in[ri] !== FP32_NEG_INF) || (dut.sm_state_l_in[ri] !== 32'd0)) begin
@@ -195,9 +197,14 @@ module tb_attn_top_partial;
         capture_count++;
       end
 
+      if (dut.writeback_active && !dut.phaseb_done_all &&
+          (dut.phaseb_norm_micro_idx != dut.q_microtile_last_idx)) begin
+        // Non-final microtile normalization must overlap the remaining
+        // Phase-B tile work (O_acc ping-pong contract).
+        saw_writeback_overlap = 1'b1;
+      end
+
       if (dut.src_valid) begin
-        if (dut.phaseb_datapath_select)
-          saw_writeback_overlap = 1'b1;
         logical_row = (dut.phaseb_norm_micro_idx * TILE_ROWS) + int'(dut.obuf_o_row);
         if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
           $display("FAIL partial output order got row=%0d dim=%0d exp row=%0d dim=%0d",

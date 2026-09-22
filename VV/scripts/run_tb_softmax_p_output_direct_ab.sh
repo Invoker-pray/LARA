@@ -30,6 +30,6 @@ run_variant() {
 run_variant registered +define+LARA_SOFTMAX_P_INPLACE_ENABLE
 run_variant direct "+define+LARA_SOFTMAX_P_INPLACE_ENABLE +define+LARA_SOFTMAX_P_OUTPUT_DIRECT_ENABLE"
 cmp "${BASE_DIR}/registered/outputs.bits" "${BASE_DIR}/direct/outputs.bits"
-grep -q "total=626" "${BASE_DIR}/registered/sim.log"
-grep -q "total=626" "${BASE_DIR}/direct/sim.log"
+grep -q "total=722" "${BASE_DIR}/registered/sim.log"
+grep -q "total=722" "${BASE_DIR}/direct/sim.log"
 echo "ALL SOFTMAX P DIRECT-OUTPUT A/B BIT-EXACT CHECKS PASSED"

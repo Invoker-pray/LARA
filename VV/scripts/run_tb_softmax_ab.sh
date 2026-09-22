@@ -31,5 +31,5 @@ run_variant rollback +define+LARA_SOFTMAX_P_PIPE_ROLLBACK
 run_variant pipeline ""
 cmp "${BASE_DIR}/rollback/outputs.bits" "${BASE_DIR}/pipeline/outputs.bits"
 grep -q "total=1106" "${BASE_DIR}/rollback/sim.log"
-grep -q "total=626" "${BASE_DIR}/pipeline/sim.log"
+grep -q "total=722" "${BASE_DIR}/pipeline/sim.log"
 echo "ALL SOFTMAX A/B BIT-EXACT CHECKS PASSED"

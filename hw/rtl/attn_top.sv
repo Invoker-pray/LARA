@@ -22,7 +22,7 @@ module attn_top
   output logic m_axis_tlast;
   logic start, done, busy, start_ready, core_error;
   logic [15:0] seq_len, cfg_q_pos_base, cfg_kv_pos_base;
-  logic [31:0] cycle_cnt, mac_cycles, stall_cycles;
+  logic [31:0] cycle_cnt, mac_cycles, stall_cycles, buffer_wait_cycles;
   logic cfg_causal;
   logic [2:0] gqa_group; logic [1:0] q_head;
   logic [2:0] q_req_group; logic [1:0] q_req_head; logic [7:0] q_req_tile;
@@ -171,6 +171,12 @@ module attn_top
   logic obuf_clear_bank, obuf_clear_bank_sel;
   logic k_loaded, v_loaded;
   logic [1:0] q_bank_ready;
+  // A ready bit is consumable only when its Q request tag matches. This
+  // protects the ping-pong path from delayed/out-of-order fills.
+  logic [2:0] q_bank_group_tag [2];
+  logic [1:0] q_bank_head_tag [2];
+  logic [7:0] q_bank_tile_tag [2];
+  logic [1:0] q_bank_tag_valid;
   logic q_load_bank_sel;
   logic q_load_bank_sel_latched;
   logic q_load_outstanding;
@@ -774,8 +780,26 @@ module attn_top
                          (phasea_state != PA_DRAIN) &&
                          (phasea_state != PA_FLUSH) &&
                          !(q_load_start && (q_load_bank_sel == q_compute_bank_sel));
-  assign q_load_done = q_load_outstanding ? q_bank_ready[q_load_bank_sel_latched]
-                                          : q_bank_ready[q_ready_bank_sel];
+  wire q_tag_match_outstanding = q_bank_tag_valid[q_load_bank_sel_latched] &&
+                                  (q_bank_group_tag[q_load_bank_sel_latched] == q_req_group_r) &&
+                                  (q_bank_head_tag[q_load_bank_sel_latched] == q_req_head_r) &&
+                                  (q_bank_tile_tag[q_load_bank_sel_latched] == q_req_tile_r);
+  wire q_tag_match_ready = q_bank_tag_valid[q_ready_bank_sel] &&
+                           (q_bank_group_tag[q_ready_bank_sel] == q_req_group) &&
+                           (q_bank_head_tag[q_ready_bank_sel] == q_req_head) &&
+                           (q_bank_tile_tag[q_ready_bank_sel] == q_req_tile);
+  assign q_load_done = q_load_outstanding
+                     ? (q_bank_ready[q_load_bank_sel_latched] && q_tag_match_outstanding)
+                     : (q_bank_ready[q_ready_bank_sel] && q_tag_match_ready);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      buffer_wait_cycles <= 32'd0;
+    else if (start)
+      buffer_wait_cycles <= 32'd0;
+    else if (q_load_outstanding && !q_load_done)
+      buffer_wait_cycles <= buffer_wait_cycles + 32'd1;
+  end
   assign o_write_tile_done = writeback_last_sample &&
                              src_ready &&
                              (phaseb_norm_micro_idx == q_microtile_last_idx);
@@ -852,6 +876,12 @@ module attn_top
       k_loaded  <= 1'b0;
       v_loaded  <= 1'b0;
       q_bank_ready <= 2'b00;
+      q_bank_tag_valid <= 2'b00;
+      for (int qbi = 0; qbi < 2; qbi++) begin
+        q_bank_group_tag[qbi] <= 3'd0;
+        q_bank_head_tag[qbi] <= 2'd0;
+        q_bank_tile_tag[qbi] <= 8'd0;
+      end
       q_load_bank_sel_latched <= 1'b0;
       q_load_outstanding <= 1'b0;
       q_same_bank_reload_pending <= 1'b0;
@@ -873,6 +903,7 @@ module attn_top
       if (q_load_start && !q_load_start_d) begin
         q_load_bank_sel_latched <= q_load_bank_sel;
         q_bank_ready[q_load_bank_sel] <= 1'b0;
+        q_bank_tag_valid[q_load_bank_sel] <= 1'b0;
         q_load_outstanding <= 1'b1;
         q_same_bank_reload_pending <= (q_load_bank_sel == q_compute_bank_sel);
       end
@@ -905,6 +936,10 @@ module attn_top
           end
           STREAM_TO_Q_BUF: begin
             q_bank_ready[q_load_bank_sel_latched] <= 1'b1;
+            q_bank_tag_valid[q_load_bank_sel_latched] <= 1'b1;
+            q_bank_group_tag[q_load_bank_sel_latched] <= q_req_group_r;
+            q_bank_head_tag[q_load_bank_sel_latched] <= q_req_head_r;
+            q_bank_tile_tag[q_load_bank_sel_latched] <= q_req_tile_r;
             q_load_req_pending <= 1'b0;
           end
           default: begin end
@@ -915,6 +950,7 @@ module attn_top
         k_loaded <= 1'b0;
         v_loaded <= 1'b0;
         q_bank_ready <= 2'b00;
+        q_bank_tag_valid <= 2'b00;
         q_load_outstanding <= 1'b0;
         q_same_bank_reload_pending <= 1'b0;
         o_write_done_d <= 1'b0;
@@ -937,6 +973,7 @@ module attn_top
         // writeback, otherwise ST_Q_INIT observes a stale ready bit and skips
         // the reload.
         q_bank_ready[q_compute_bank_sel] <= 1'b0;
+        q_bank_tag_valid[q_compute_bank_sel] <= 1'b0;
       end
 
       if (o_write_done && !o_write_done_d)
@@ -964,7 +1001,7 @@ module attn_top
   assign q_load_req  = q_load_req_pending;
   assign q_load_bank = q_req_bank_r;
 
-  attn_axi_lite_slave u_csr(.clk,.rst_n,.s_axi_awaddr,.s_axi_awvalid,.s_axi_awready,.s_axi_wdata,.s_axi_wstrb,.s_axi_wvalid,.s_axi_wready,.s_axi_bresp,.s_axi_bvalid,.s_axi_bready,.s_axi_araddr,.s_axi_arvalid,.s_axi_arready,.s_axi_rdata,.s_axi_rresp,.s_axi_rvalid,.s_axi_rready,.start,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.stream_dest(stream_dest_cfg),.stream_len(stream_len_cfg),.result_len(result_len_cfg),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.start_ready,.busy,.done,.core_error,.stream_error,.kv_load_req,.q_load_req,.q_load_bank,.kv_req_group(kv_req_group_r),.q_req_group(q_req_group_r),.q_req_head(q_req_head_r),.q_req_tile(q_req_tile_r),.cycle_cnt,.mac_cycles,.stall_cycles);
+  attn_axi_lite_slave u_csr(.clk,.rst_n,.s_axi_awaddr,.s_axi_awvalid,.s_axi_awready,.s_axi_wdata,.s_axi_wstrb,.s_axi_wvalid,.s_axi_wready,.s_axi_bresp,.s_axi_bvalid,.s_axi_bready,.s_axi_araddr,.s_axi_arvalid,.s_axi_arready,.s_axi_rdata,.s_axi_rresp,.s_axi_rvalid,.s_axi_rready,.start,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.stream_dest(stream_dest_cfg),.stream_len(stream_len_cfg),.result_len(result_len_cfg),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.start_ready,.busy,.done,.core_error,.stream_error,.kv_load_req,.q_load_req,.q_load_bank,.kv_req_group(kv_req_group_r),.q_req_group(q_req_group_r),.q_req_head(q_req_head_r),.q_req_tile(q_req_tile_r),.cycle_cnt,.mac_cycles,.stall_cycles,.buffer_wait_cycles);
   attn_axi_stream_sink u_sink(.clk,.rst_n,.s_axis_tdata,.s_axis_tvalid,.s_axis_tready,.s_axis_tlast,.data_valid(axis_valid),.data_out(axis_data),.data_last(axis_last),.cfg_dest(stream_dest_cfg),.cfg_len(stream_len_cfg),.cfg_burst(4'd0),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.kv_load_req,.q_load_req,.dest_sel(axis_dest),.bytes_received(sink_bytes_received),.overflow(sink_overflow),.underflow(sink_underflow),.done(axis_done));
   attn_axi_stream_source u_src(.clk,.rst_n,.data_valid(src_valid),.data_in(src_data),.data_last(src_last),.data_ready(src_ready),.cfg_len(result_len_cfg),.m_axis_tdata,.m_axis_tvalid,.m_axis_tready,.m_axis_tlast,.bytes_sent(src_bytes_sent),.done(src_done));
   attn_core u_fsm(.clk,.rst_n,.start,.start_ready,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.done,.busy,.kv_load_start,.kv_load_done,.q_load_start,.q_load_done,.o_write_start,.o_write_done,.buf_sel,.q_load_bank_sel,.q_ready_bank_sel,.o_bank_sel,.group_advance,.mac_phase,.mac_start,.mac_done,.softmax_start,.softmax_done,.kv_tile_first,.kv_tile_last,.q_tile_start,.kv_tile_start,.active_q_rows,.active_kv_cols,.causal_en,.current_group(gqa_group),.current_head(q_head),.current_q_tile,.current_kv_tile,.q_req_group,.q_req_head,.q_req_tile,.error(core_error),.cycle_cnt,.mac_cycles,.stall_cycles,.perf_valid(perf_valid_unused));

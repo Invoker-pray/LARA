@@ -259,7 +259,11 @@ module tb_attn_top;
         end
       end
 
-      if ((dut.phasea_state == 3'd5) && !saw_micro0_reload &&
+      // Since the v2.6 split-factor change the pipelined softmax retires
+      // faster than Phase-A produces, so the producer no longer parks a held
+      // block in PA_WAIT_P.  The context contract is instead observable at
+      // sm_state_load: the cycle softmax samples the presented context.
+      if (dut.sm_state_load && !saw_micro0_reload &&
           (dut.phasea_held_micro == 0) && (dut.phasea_held_kv_blk == 1)) begin
         if ((dut.sm_state_l_in[0] == 32'd0) || (dut.sm_state_m_in[0] == FP32_NEG_INF)) begin
           $display("FAIL micro0 reload context was not preserved");
@@ -268,7 +272,7 @@ module tb_attn_top;
         saw_micro0_reload = 1'b1;
       end
 
-      if ((dut.phasea_state == 3'd5) && !saw_micro1_fresh &&
+      if (dut.sm_state_load && !saw_micro1_fresh &&
           (dut.phasea_held_micro == 1) && (dut.phasea_held_kv_blk == 0)) begin
         for (int ri = 0; ri < TILE_ROWS; ri++) begin
           if ((dut.sm_state_m_in[ri] !== FP32_NEG_INF) || (dut.sm_state_l_in[ri] !== 32'd0)) begin
@@ -346,9 +350,15 @@ module tb_attn_top;
         end
       end
 
+      if (dut.writeback_active && !dut.phaseb_done_all &&
+          (dut.phaseb_norm_micro_idx != dut.q_microtile_last_idx)) begin
+        // A non-final microtile must normalize/writeback while Phase B still
+        // has remaining tile work — the O_acc ping-pong exists for exactly
+        // this overlap.
+        saw_writeback_overlap = 1'b1;
+      end
+
       if (dut.src_valid && dut.src_ready) begin
-        if (dut.phaseb_datapath_select)
-          saw_writeback_overlap = 1'b1;
         logical_row = (dut.phaseb_norm_micro_idx * TILE_ROWS) + int'(dut.obuf_o_row);
         if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
           $display("FAIL output order got row=%0d dim=%0d exp row=%0d dim=%0d",
@@ -562,7 +572,7 @@ module tb_attn_top;
       err++;
     end
     if (Q_MICROTILES > 1 && !saw_writeback_overlap) begin
-      $display("FAIL did not observe writeback overlap during Phase-B MAC ownership");
+      $display("FAIL did not observe writeback overlap with remaining Phase-B tile work");
       err++;
     end
     if (!saw_packed_beat_stall) begin

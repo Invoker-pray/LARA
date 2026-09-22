@@ -56,7 +56,8 @@ module attn_axi_lite_slave
     input  logic [7:0]             q_req_tile,
     input  logic [31:0]            cycle_cnt,
     input  logic [31:0]            mac_cycles,
-    input  logic [31:0]            stall_cycles
+    input  logic [31:0]            stall_cycles,
+    input  logic [31:0]            buffer_wait_cycles
 );
 
   logic aw_acked, w_acked;
@@ -325,6 +326,7 @@ module attn_axi_lite_slave
           CSR_PERF_CYCLES_HI:  s_axi_rdata <= 32'd0;
           CSR_PERF_MAC_CYCLES: s_axi_rdata <= mac_cycles;
           CSR_PERF_STALLS:     s_axi_rdata <= stall_cycles;
+          CSR_PERF_BUFFER_WAIT: s_axi_rdata <= buffer_wait_cycles;
           default:             s_axi_rdata <= 32'd0;
         endcase
       end else if (s_axi_rvalid && s_axi_rready) begin

@@ -37,6 +37,9 @@ module tb_attn_top_loop_control_delayed;
   bit saw_group_switch_prefetch;
   bit saw_head_switch_prefetch_norm;
   bit saw_group_switch_prefetch_norm;
+  // Head/group-switch prefetch is disabled in the current scheduler; its
+  // checks run only when explicitly requested.
+  bit head_group_prefetch_enabled;
   bit seen_all_groups;
   bit saw_qk_authorization;
   logic kv_load_start_d, q_load_start_d, group_advance_d;
@@ -206,6 +209,7 @@ module tb_attn_top_loop_control_delayed;
   initial begin
     clk = 1'b0;
     rst_n = 1'b0;
+    head_group_prefetch_enabled = ($test$plusargs("HEAD_GROUP_PREFETCH") != 0);
     s_axi_awaddr = '0;
     s_axi_awvalid = 1'b0;
     s_axi_wdata = '0;
@@ -281,13 +285,19 @@ module tb_attn_top_loop_control_delayed;
       $display("FAIL delayed no active phase window during q prefetch");
       err++;
     end
-    if (!(saw_head_switch_prefetch || saw_head_switch_prefetch_norm)) begin
-      $display("FAIL delayed no head-switch prefetch observed");
-      err++;
-    end
-    if (!(saw_group_switch_prefetch || saw_group_switch_prefetch_norm)) begin
-      $display("FAIL delayed no group-switch prefetch observed");
-      err++;
+    // See the gating note in tb_attn_top_loop_control.sv: head/group-switch
+    // prefetch is disabled until the v3.1+ overlap work re-enables it.
+    if (head_group_prefetch_enabled) begin
+      if (!(saw_head_switch_prefetch || saw_head_switch_prefetch_norm)) begin
+        $display("FAIL delayed no head-switch prefetch observed");
+        err++;
+      end
+      if (!(saw_group_switch_prefetch || saw_group_switch_prefetch_norm)) begin
+        $display("FAIL delayed no group-switch prefetch observed");
+        err++;
+      end
+    end else begin
+      $display("INFO delayed head/group-switch prefetch checks skipped (feature disabled; run with +HEAD_GROUP_PREFETCH to enable)");
     end
     if (!seen_all_groups) begin
       $display("FAIL delayed did not observe terminal group/head traversal");

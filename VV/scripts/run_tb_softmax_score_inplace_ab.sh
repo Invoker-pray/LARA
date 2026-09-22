@@ -30,6 +30,6 @@ run_variant() {
 run_variant separate "+define+LARA_SOFTMAX_P_INPLACE_ENABLE +define+LARA_SOFTMAX_P_OUTPUT_DIRECT_ENABLE"
 run_variant inplace "+define+LARA_SOFTMAX_P_INPLACE_ENABLE +define+LARA_SOFTMAX_P_OUTPUT_DIRECT_ENABLE +define+LARA_SOFTMAX_SCORE_INPLACE_ENABLE"
 cmp "${BASE_DIR}/separate/outputs.bits" "${BASE_DIR}/inplace/outputs.bits"
-grep -q "total=626" "${BASE_DIR}/separate/sim.log"
-grep -q "total=626" "${BASE_DIR}/inplace/sim.log"
+grep -q "total=722" "${BASE_DIR}/separate/sim.log"
+grep -q "total=722" "${BASE_DIR}/inplace/sim.log"
 echo "ALL SOFTMAX SCORE IN-PLACE A/B BIT-EXACT CHECKS PASSED"

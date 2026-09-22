@@ -139,6 +139,24 @@ module tb_attn_top_real_request;
     end
   endtask
 
+  // Descriptor-mode orphan Q request (head switch inside a GQA group): the
+  // driver pushes a single Q descriptor batch, mirroring _transfer_batch in
+  // sw/attn_driver.py.  A legacy send_stream would never be accepted because
+  // the sink only raises tready while a descriptor segment is active.
+  task automatic service_q_desc_batch;
+    begin
+      request_count = request_count + 1;
+      q_request_count = q_request_count + 1;
+      if (full_real || $test$plusargs("DEBUG_REAL"))
+        $display("REAL_REQ Q group=%0d head=%0d tile=%0d bank=%0d count=%0d",
+                 dut.q_req_group_r, dut.q_req_head_r, dut.q_req_tile_r,
+                 dut.q_load_bank_sel_latched, q_request_count);
+      saw_q_request = 1'b1;
+      axi_write(CSR_DESC_PUSH, (Q_BEATS << 2) | STREAM_TO_Q_BUF);
+      send_batch_segment(Q_BEATS, BF16_ONE, 1'b1, 1'b1);
+    end
+  endtask;
+
   task automatic send_inband_word(
     input logic [31:0] word,
     input logic packet_last
@@ -418,6 +436,8 @@ module tb_attn_top_real_request;
         @(posedge clk);
       else if (desc_queue_mode && dut.kv_load_req && dut.q_load_req)
         service_kvq_batch();
+      else if (desc_queue_mode && dut.q_load_req)
+        service_q_desc_batch();
       else if (dut.kv_load_req)
         service_kv_request();
       else if (dut.q_load_req)

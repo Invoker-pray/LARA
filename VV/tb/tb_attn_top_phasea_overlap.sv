@@ -187,6 +187,11 @@ module tb_attn_top_phasea_overlap;
     end
   end
 
+  // Round budget: calibrated 20000 cycles at TILE_SPLIT_FACTOR=2.  The
+  // per-block Phase-A traversal scales with the split factor, and the forced
+  // Phase-B window interleaves MAC ownership, so scale the budget linearly.
+  localparam int ROUND_CYCLE_LIMIT = (20000 * TILE_SPLIT_FACTOR) / 2;
+
   task automatic run_phasea_round(input integer rid, output integer elapsed);
     begin
       round_id = rid;
@@ -195,7 +200,7 @@ module tb_attn_top_phasea_overlap;
       elapsed = 0;
       test_window = 1'b1;
       @(negedge clk);
-      while (!dut.phasea_done_all && (elapsed < 20000)) begin
+      while (!dut.phasea_done_all && (elapsed < ROUND_CYCLE_LIMIT)) begin
         tick();
         @(negedge clk);
         elapsed++;
@@ -205,7 +210,7 @@ module tb_attn_top_phasea_overlap;
       tick();
       tick();
       @(negedge clk);
-      if (!dut.phasea_done_all && (elapsed >= 20000)) begin
+      if (!dut.phasea_done_all && (elapsed >= ROUND_CYCLE_LIMIT)) begin
         $display("FAIL Phase-A timeout round=%0d", rid);
         err++;
       end

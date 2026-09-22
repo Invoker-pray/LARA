@@ -50,6 +50,7 @@ CSR_RESULT_LEN = 0x058
 CSR_PERF_CYCLES = 0x100
 CSR_PERF_MAC_CYCLES = 0x108
 CSR_PERF_STALLS = 0x10C
+CSR_PERF_BUFFER_WAIT = 0x114
 
 CTRL_START = 1 << 0
 CTRL_CLEAR_STATUS = 1 << 1
@@ -337,6 +338,7 @@ class RunProfile:
     pl_total_cycles: int = 0
     pl_mac_cycles: int = 0
     pl_stall_cycles: int = 0
+    pl_buffer_wait_cycles: int = 0
     pl_core_active_cycles_excluding_stalls: int = 0
     pl_total_ms: float = 0.0
     pl_mac_ms: float = 0.0
@@ -833,7 +835,12 @@ class AttentionAccelerator:
         return np.frombuffer(out_buf[:nbytes].tobytes(), dtype=np.uint16).reshape(N_Q_HEADS, seq_len, HEAD_DIM)
 
     def read_perf(self) -> dict[str, int]:
-        return {"cycles": self.mmio.read(CSR_PERF_CYCLES), "mac_cycles": self.mmio.read(CSR_PERF_MAC_CYCLES), "stall_cycles": self.mmio.read(CSR_PERF_STALLS)}
+        return {
+            "cycles": self.mmio.read(CSR_PERF_CYCLES),
+            "mac_cycles": self.mmio.read(CSR_PERF_MAC_CYCLES),
+            "stall_cycles": self.mmio.read(CSR_PERF_STALLS),
+            "buffer_wait_cycles": self.mmio.read(CSR_PERF_BUFFER_WAIT),
+        }
 
     def run_attention(
         self,
@@ -928,6 +935,7 @@ class AttentionAccelerator:
         self.last_profile.pl_total_cycles = perf["cycles"]
         self.last_profile.pl_mac_cycles = perf["mac_cycles"]
         self.last_profile.pl_stall_cycles = perf["stall_cycles"]
+        self.last_profile.pl_buffer_wait_cycles = perf["buffer_wait_cycles"]
         self.last_profile.pl_core_active_cycles_excluding_stalls = max(
             perf["cycles"] - perf["stall_cycles"], 0,
         )
@@ -935,6 +943,7 @@ class AttentionAccelerator:
         self.last_profile.pl_total_ms = perf["cycles"] / cycles_per_ms
         self.last_profile.pl_mac_ms = perf["mac_cycles"] / cycles_per_ms
         self.last_profile.pl_stall_ms = perf["stall_cycles"] / cycles_per_ms
+        self.last_profile.buffer_wait_ms = perf["buffer_wait_cycles"] / cycles_per_ms
         self.last_profile.pl_core_active_ms_excluding_stalls = (
             self.last_profile.pl_core_active_cycles_excluding_stalls / cycles_per_ms
         )
