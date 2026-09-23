@@ -745,6 +745,13 @@ def main():
     if args.export_hex:
         args.export_tb_data = True
 
+    # Default behavior: run self-test.  Applied before the test blocks so
+    # the flag is honored without re-entering main() (the former recursive
+    # default re-parsed argv and recursed forever).
+    if not any([args.self_test, args.test_all, args.export_tb_data]):
+        print("No action specified. Running --self-test by default.\n")
+        args.self_test = True
+
     tests_run = 0
     tests_passed = 0
 
@@ -800,13 +807,6 @@ def main():
         if args.module in ('all', 'attention'):
             export_attention_test_data(args.seq_len, args.output_dir)
         print()
-
-    # Default behavior: run self-test
-    if not any([args.self_test, args.test_all, args.export_tb_data]):
-        print("No action specified. Running --self-test by default.\n")
-        args.self_test = True
-        # Recurse once
-        return main()
 
     if tests_run > 0:
         print(f"Summary: {tests_passed}/{tests_run} tests passed")

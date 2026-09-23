@@ -1,5 +1,16 @@
 # LARA 项目提交记录
 
+## 2026-09-23（四）
+
+### v3.4.0 — 修复 golden model 无参数运行的无限递归（未上板）
+
+- `python_godel/attention_golden.py`：`main()` 尾部的"默认自测"通过递归
+  实现，但每次递归重新解析 argv，flag 永远为 False → 无参数运行必然
+  `RecursionError`。改为在解析参数后立即应用默认值，删除递归路径。
+- 验证：无参数运行输出 3/3 self-test 后正常退出；`--test-all` 7/7；
+  `sw/tests` 40/40。纯 Python 工具修复，RTL/SV 零改动，VCS 回归结果
+  不受影响（上一轮 28/28 仍有效）。
+
 ## 2026-09-23（三）
 
 ### v3.3.0 — 板级 case 仿真守住新观测计数器（未上板）
