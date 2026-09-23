@@ -12,7 +12,9 @@ bit-exact 前提下推进 transport/overlap 优化。
   model 与回归脚本。
 - `hw/rtl` RTL，`sw/` PYNQ driver 与上板脚本，`VV/tb`+`VV/scripts` VCS
   testbench 与回归，`python_godel/` Python golden model。
-- 详细提交记录见 [`docs/commitlog.md`](docs/commitlog.md)。
+- 详细提交记录见 [`docs/commitlog.md`](docs/commitlog.md)；
+  设计与验证的踩坑记录见 [`docs/design_pitfalls.md`](docs/design_pitfalls.md)
+  （改架构参数 / 写 TB / 加 CSR 前必读）。
 
 ## 验证门禁（develop）
 

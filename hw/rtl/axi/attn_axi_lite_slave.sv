@@ -58,7 +58,17 @@ module attn_axi_lite_slave
     input  logic [31:0]            mac_cycles,
     input  logic [31:0]            stall_cycles,
     input  logic [31:0]            buffer_wait_cycles,
-    input  logic [31:0]            kv_transport_stall_cycles
+    input  logic [31:0]            kv_transport_stall_cycles,
+    // Prefetch control/status (0x03C/0x040)
+    output logic                   prefetch_enable,
+    output logic                   prefetch_error_clear,
+    input  logic                   prefetch_supported,
+    input  logic                   prefetch_enabled,
+    input  logic                   prefetch_q_ready,
+    input  logic                   prefetch_kv_ready,
+    input  logic                   prefetch_underflow,
+    input  logic                   prefetch_overflow,
+    input  logic [7:0]             prefetch_outstanding
 );
 
   logic aw_acked, w_acked;
@@ -178,6 +188,8 @@ module attn_axi_lite_slave
       result_len          <= 32'd0;
       desc_queue_enabled  <= 1'b0;
       inband_command_enabled <= 1'b0;
+      prefetch_enable     <= 1'b0;
+      prefetch_error_clear <= 1'b0;
       desc_wr_ptr         <= '0;
       desc_rd_ptr         <= '0;
       desc_count          <= '0;
@@ -223,6 +235,8 @@ module attn_axi_lite_slave
         default: begin end
       endcase
 
+      prefetch_error_clear <= 1'b0;
+
       if (write_fire) begin
         s_axi_bvalid <= 1'b1;
         s_axi_bresp  <= 2'b00;
@@ -263,6 +277,12 @@ module attn_axi_lite_slave
                 desc_count  <= '0;
               end
             end
+          end
+          CSR_PREFETCH_CTRL: begin
+            if (wstrb_r[0])
+              prefetch_enable <= wdata_r[0];
+            if (wstrb_r[1])
+              prefetch_error_clear <= 1'b1;
           end
           CSR_RESULT_LEN:  result_len      <= merge_wstrb(result_len, wdata_r, wstrb_r);
           default: begin end
@@ -329,6 +349,14 @@ module attn_axi_lite_slave
           CSR_PERF_STALLS:     s_axi_rdata <= stall_cycles;
           CSR_PERF_TRANSPORT_STALLS: s_axi_rdata <= kv_transport_stall_cycles;
           CSR_PERF_BUFFER_WAIT: s_axi_rdata <= buffer_wait_cycles;
+          CSR_PREFETCH_STATUS: s_axi_rdata <=
+              (32'(prefetch_outstanding) << 8) |
+              (32'(prefetch_supported)) |
+              (32'(prefetch_enabled) << 1) |
+              (32'(prefetch_q_ready) << 2) |
+              (32'(prefetch_kv_ready) << 3) |
+              (32'(prefetch_underflow) << 4) |
+              (32'(prefetch_overflow) << 5);
           default:             s_axi_rdata <= 32'd0;
         endcase
       end else if (s_axi_rvalid && s_axi_rready) begin

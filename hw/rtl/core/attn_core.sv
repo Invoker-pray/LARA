@@ -40,6 +40,7 @@ module attn_core
     output logic        q_ready_bank_sel, // Which Q bank readiness q_load_done refers to
     output logic        o_bank_sel,       // O_acc bank select (toggles per Q tile)
     output logic        group_advance,    // pulse: advance to next GQA group, KV must be reloaded
+    input  logic        kv_prefetch_enable, // issue next-group K/V request during the last head
 
     // --- Compute Control ---
     output logic        mac_phase,
@@ -63,6 +64,7 @@ module attn_core
     output logic [2:0]  q_req_group,
     output logic [1:0]  q_req_head,
     output logic [7:0]  q_req_tile,
+    output logic [2:0]  kv_req_group,
 
     // --- Error flag ---
     output logic        error,           // sticky: illegal config detected
@@ -88,6 +90,7 @@ module attn_core
   logic        q_prefetch_next_tile;
   logic        q_prefetch_next_head_or_group;
   logic        q_prefetch_head_or_group_early;
+  logic        kv_prefetch_next_group;
 
   localparam logic [15:0] MAX_SEQ_LEN_U16 = 16'(MAX_SEQ_LEN);
   localparam logic [16:0] MAX_SEQ_LEN_U17 = 17'(MAX_SEQ_LEN);
@@ -187,9 +190,28 @@ module attn_core
     end
   end
 
+  // Describe the K/V group the current kv_load_start refers to. The request
+  // may be an early prefetch for the next group, issued while the final head
+  // of the current group is still computing; the top-level ownership gate
+  // backpressures the actual fill until the active group retires.
+  always_comb begin
+    kv_req_group = group_cnt;
+    if (kv_prefetch_next_group) begin
+      if (group_cnt < LAST_GQA_GROUP)
+        kv_req_group = group_cnt + 3'd1;
+    end
+  end
+
   // start_ready: accept only in IDLE
   assign start_ready = (state == ST_IDLE);
   assign q_prefetch_next_tile = kv_tile_last && (q_tile_idx < q_tile_last_idx);
+  // The final head of a non-final group no longer touches K/V once its AV
+  // drain completes; the next group's fill request may be issued during that
+  // window so the host-side request/DMA latency hides behind the tail compute.
+  assign kv_prefetch_next_group =
+      ((state == ST_QK_DOT) || (state == ST_SOFTMAX) || (state == ST_AV_DOT) ||
+       (state == ST_NORMALIZE) || (state == ST_WRITE_O)) &&
+      (head_cnt == LAST_Q_HEAD) && (group_cnt < LAST_GQA_GROUP);
   // A head/group transition reuses the same Q bank when the current Q tile
   // is the only tile.  Do not prefetch the following head into that bank while
   // it is still being consumed; the next head is loaded synchronously through
@@ -364,6 +386,9 @@ module attn_core
       // state cannot issue the same request again.
       if (q_load_start && (q_prefetch_next_tile || q_prefetch_next_head_or_group))
         q_prefetch_issued <= 1'b1;
+      // Same one-shot guard for the early next-group K/V request.
+      if (kv_load_start && kv_prefetch_next_group)
+        kv_prefetch_issued <= 1'b1;
     end
   end
 
@@ -483,6 +508,15 @@ module attn_core
       end
       default: begin end
     endcase
+
+    // Early next-group K/V request (prefetch v1): issued at most once per
+    // group while the final head is still computing. The ownership gate in
+    // attn_top backpressures the fill itself until the active group retires;
+    // ST_LOAD_KV remains the fallback when the prefetch is disabled or the
+    // request never went out.
+    if (kv_prefetch_enable && kv_prefetch_next_group &&
+        !kv_prefetch_issued && !kv_load_done)
+      kv_load_start = 1'b1;
   end
 
 endmodule

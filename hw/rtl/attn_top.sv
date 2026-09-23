@@ -28,7 +28,7 @@ module attn_top
   logic [31:0] kv_transport_stall_cycles;
   logic cfg_causal;
   logic [2:0] gqa_group; logic [1:0] q_head;
-  logic [2:0] q_req_group; logic [1:0] q_req_head; logic [7:0] q_req_tile;
+  logic [2:0] q_req_group, kv_req_group; logic [1:0] q_req_head; logic [7:0] q_req_tile;
   logic [7:0] current_q_tile, current_kv_tile;
   logic kv_load_req, q_load_req, q_load_bank;
   logic [1:0] stream_dest_cfg;
@@ -173,6 +173,30 @@ module attn_top
   logic [15:0] obuf_data_raw;
   logic obuf_clear_bank, obuf_clear_bank_sel;
   logic k_loaded, v_loaded;
+  // K/V cache ownership (prefetch v1): one physical bank whose fill may only
+  // start once the active group's last K/V read has retired. The request to
+  // the host can be issued much earlier; the sink backpressures the payload
+  // while the cache is still owned by compute.
+  typedef enum logic [1:0] {
+    KV_IDLE    = 2'd0,
+    KV_FILLING = 2'd1,
+    KV_READY   = 2'd2,
+    KV_ACTIVE  = 2'd3
+  } kv_phase_t;
+  kv_phase_t kv_phase;
+  logic [2:0] kv_content_group;
+  logic       kv_reads_done;
+  logic       kv_overflow_sticky, kv_underflow_sticky;
+  wire  kv_k_done_now = axis_done && (axis_dest == STREAM_TO_K_CACHE);
+  wire  kv_v_done_now = axis_done && (axis_dest == STREAM_TO_V_CACHE);
+  wire  kv_fill_complete = (kv_k_done_now && v_loaded) ||
+                           (kv_v_done_now && k_loaded);
+  wire  kv_fill_ready = (kv_phase == KV_READY) &&
+                        (kv_content_group == gqa_group);
+  wire  kv_wr_allowed = (kv_phase == KV_IDLE) || (kv_phase == KV_FILLING) ||
+                        ((kv_phase == KV_ACTIVE) && kv_reads_done);
+  wire  kv_fill_start = (k_wr_en || v_wr_en) &&
+                        ((kv_phase == KV_IDLE) || (kv_phase == KV_ACTIVE));
   logic [1:0] q_bank_ready;
   // A ready bit is consumable only when its Q request tag matches. This
   // protects the ping-pong path from delayed/out-of-order fills.
@@ -204,6 +228,8 @@ module attn_top
   logic [31:0] src_bytes_sent;
   logic        sink_overflow, sink_underflow, stream_error;
   logic        qbuf_bank_ready_unused;
+  logic        prefetch_error_clear;
+  logic        prefetch_enable_r;
   logic [1:0] q_microtiles_active;
   logic [0:0] q_microtile_last_idx;
   logic [1:0] kv_subblock_last_idx;
@@ -776,7 +802,9 @@ module attn_top
   assign obuf_dim_blk = phaseb_dim_blk_idx;
   assign obuf_norm = writeback_launch;
   assign mac_done = mac_phase ? phaseb_done_all : phasea_done_all;
-  assign kv_load_done = k_loaded && v_loaded;
+  // kv_load_done is ownership-based: the bank content must be READY and its
+  // group tag must match the group the controller is about to compute.
+  assign kv_load_done = kv_fill_ready;
   assign q_compute_bank_sel = buf_sel;
   assign phasea_window = phasea_authorized && busy && !mac_phase && !mac_start &&
                          !softmax_start && !kv_load_start && !o_write_start &&
@@ -887,6 +915,11 @@ module attn_top
       v_wr_addr <= 16'd0;
       k_loaded  <= 1'b0;
       v_loaded  <= 1'b0;
+      kv_phase  <= KV_IDLE;
+      kv_content_group <= 3'd0;
+      kv_reads_done <= 1'b0;
+      kv_overflow_sticky <= 1'b0;
+      kv_underflow_sticky <= 1'b0;
       q_bank_ready <= 2'b00;
       q_bank_tag_valid <= 2'b00;
       for (int qbi = 0; qbi < 2; qbi++) begin
@@ -925,12 +958,63 @@ module attn_top
         q_load_outstanding <= 1'b0;
 
       if (kv_load_start && !kv_load_start_d) begin
-        k_loaded <= 1'b0;
-        v_loaded <= 1'b0;
+        // k/v_loaded are cleared at the first fill beat, not at request
+        // issue: with the early prefetch the fill may still be backpressured
+        // behind the active group when the request goes out.
         kv_load_req_pending <= 1'b1;
-        kv_req_group_r <= gqa_group;
+        kv_req_group_r <= kv_req_group;
       end
       kv_load_start_d <= kv_load_start;
+
+      // --- K/V cache ownership (prefetch v1) ---
+      if (prefetch_error_clear) begin
+        kv_overflow_sticky <= 1'b0;
+        kv_underflow_sticky <= 1'b0;
+      end
+
+      if (kv_fill_start) begin
+        k_loaded <= 1'b0;
+        v_loaded <= 1'b0;
+        kv_content_group <= kv_req_group_r;
+        kv_phase <= KV_FILLING;
+      end else if (kv_fill_complete) begin
+        kv_phase <= KV_READY;
+      end else if (kv_fill_ready) begin
+        // The controller consumes the READY bank (kv_load_done); latch the
+        // active ownership so late fill beats cannot overwrite it.
+        kv_phase <= KV_ACTIVE;
+        kv_reads_done <= 1'b0;
+      end
+
+      if (kv_k_done_now)
+        k_loaded <= 1'b1;
+      if (kv_v_done_now)
+        v_loaded <= 1'b1;
+
+      if (kv_fill_complete)
+        kv_load_req_pending <= 1'b0;
+
+      // The bank may be refilled only after the final head's FINAL Q tile
+      // drains its last K/V tile.  The head check alone releases the bank
+      // after tile 0 of a multi-tile head (L>TILE_Q), and an early next-group
+      // fill then overwrites K/V that the remaining tiles still need —
+      // caught by the L=128 board case (first mismatch at the start of the
+      // last head's second Q tile).
+      if (mac_done && mac_phase && kv_tile_last && (q_head == 2'(GQA_GROUP_SIZE - 1)) &&
+          final_q_tile_active)
+        kv_reads_done <= 1'b1;
+
+      if (axis_valid && ((axis_dest == STREAM_TO_K_CACHE) ||
+                         (axis_dest == STREAM_TO_V_CACHE))) begin
+        if (kv_phase == KV_READY) begin
+          // Payload arriving for a completed (not yet consumed) fill.
+          kv_overflow_sticky <= 1'b1;
+        end else if (kv_phase == KV_ACTIVE && !kv_reads_done) begin
+          // Only reachable through forced/preloaded paths; the sink
+          // backpressures the normal stream. Record it for diagnosis.
+          kv_underflow_sticky <= 1'b1;
+        end
+      end
       o_write_done_d <= o_write_done;
 
       if (o_write_tile_done)
@@ -939,11 +1023,9 @@ module attn_top
       if (axis_done) begin
         case (axis_dest)
           STREAM_TO_K_CACHE: begin
-            k_loaded <= 1'b1;
             k_wr_addr <= 16'd0;
           end
           STREAM_TO_V_CACHE: begin
-            v_loaded <= 1'b1;
             v_wr_addr <= 16'd0;
           end
           STREAM_TO_Q_BUF: begin
@@ -961,6 +1043,9 @@ module attn_top
       if (start) begin
         k_loaded <= 1'b0;
         v_loaded <= 1'b0;
+        kv_phase <= KV_IDLE;
+        kv_content_group <= 3'd0;
+        kv_reads_done <= 1'b0;
         q_bank_ready <= 2'b00;
         q_bank_tag_valid <= 2'b00;
         q_load_outstanding <= 1'b0;
@@ -999,24 +1084,41 @@ module attn_top
         q_req_bank_r  <= q_load_bank_sel;
       end
 
-      if (kv_load_done)
-        kv_load_req_pending <= 1'b0;
       if (group_advance) begin
-        k_loaded <= 1'b0;
-        v_loaded <= 1'b0;
-        kv_load_req_pending <= 1'b0;
+        // The active group's bank content is retired. An early fill for the
+        // next group (different tag) must survive this boundary.
+        if (kv_content_group == gqa_group)
+          kv_phase <= KV_IDLE;
       end
     end
   end
 
-  assign kv_load_req = kv_load_req_pending;
+  // The early K/V request stays internal until the bank can legally be
+  // refilled (IDLE, or ACTIVE with the final head's final Q tile drained).
+  // Exposing it earlier would make a single-threaded, KV-first host enter
+  // the K/V service loop and block on the sink backpressure while the
+  // remaining Q tiles of the last head starve — a protocol deadlock
+  // (reproduced by the L=128 +KV_PREFETCH board case).  Gating the request
+  // instead of the data keeps the fill overlapping the last tile's
+  // normalize/writeback window without any host-side ordering assumption.
+  // FILLING must stay visible too: an in-band stream consumes each segment
+  // header only while the request is high, so dropping it mid-fill (after
+  // K, before V) wedges the pre-packed stream at the V header — reproduced
+  // by +FULL_REAL +KV_PREFETCH +INBAND_COMMAND at group 0.
+  wire kv_req_visible = (kv_phase == KV_IDLE) ||
+                        (kv_phase == KV_FILLING) ||
+                        ((kv_phase == KV_ACTIVE) && kv_reads_done);
+  assign kv_load_req = kv_load_req_pending && kv_req_visible;
   assign q_load_req  = q_load_req_pending;
   assign q_load_bank = q_req_bank_r;
+  wire [7:0] prefetch_outstanding = {6'd0, q_load_outstanding,
+                                     (kv_phase == KV_FILLING)};
+  wire       prefetch_q_ready = |(q_bank_ready & q_bank_tag_valid);
 
-  attn_axi_lite_slave u_csr(.clk,.rst_n,.s_axi_awaddr,.s_axi_awvalid,.s_axi_awready,.s_axi_wdata,.s_axi_wstrb,.s_axi_wvalid,.s_axi_wready,.s_axi_bresp,.s_axi_bvalid,.s_axi_bready,.s_axi_araddr,.s_axi_arvalid,.s_axi_arready,.s_axi_rdata,.s_axi_rresp,.s_axi_rvalid,.s_axi_rready,.start,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.stream_dest(stream_dest_cfg),.stream_len(stream_len_cfg),.result_len(result_len_cfg),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.start_ready,.busy,.done,.core_error,.stream_error,.kv_load_req,.q_load_req,.q_load_bank,.kv_req_group(kv_req_group_r),.q_req_group(q_req_group_r),.q_req_head(q_req_head_r),.q_req_tile(q_req_tile_r),.cycle_cnt,.mac_cycles,.stall_cycles,.buffer_wait_cycles,.kv_transport_stall_cycles);
-  attn_axi_stream_sink u_sink(.clk,.rst_n,.s_axis_tdata,.s_axis_tvalid,.s_axis_tready,.s_axis_tlast,.data_valid(axis_valid),.data_out(axis_data),.data_last(axis_last),.cfg_dest(stream_dest_cfg),.cfg_len(stream_len_cfg),.cfg_burst(4'd0),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.kv_load_req,.q_load_req,.dest_sel(axis_dest),.bytes_received(sink_bytes_received),.overflow(sink_overflow),.underflow(sink_underflow),.done(axis_done));
+  attn_axi_lite_slave u_csr(.clk,.rst_n,.s_axi_awaddr,.s_axi_awvalid,.s_axi_awready,.s_axi_wdata,.s_axi_wstrb,.s_axi_wvalid,.s_axi_wready,.s_axi_bresp,.s_axi_bvalid,.s_axi_bready,.s_axi_araddr,.s_axi_arvalid,.s_axi_arready,.s_axi_rdata,.s_axi_rresp,.s_axi_rvalid,.s_axi_rready,.start,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.stream_dest(stream_dest_cfg),.stream_len(stream_len_cfg),.result_len(result_len_cfg),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.start_ready,.busy,.done,.core_error,.stream_error,.kv_load_req,.q_load_req,.q_load_bank,.kv_req_group(kv_req_group_r),.q_req_group(q_req_group_r),.q_req_head(q_req_head_r),.q_req_tile(q_req_tile_r),.cycle_cnt,.mac_cycles,.stall_cycles,.buffer_wait_cycles,.kv_transport_stall_cycles,.prefetch_enable(prefetch_enable_r),.prefetch_error_clear,.prefetch_supported(1'b1),.prefetch_enabled(prefetch_enable_r),.prefetch_q_ready,.prefetch_kv_ready(kv_fill_ready),.prefetch_underflow(kv_underflow_sticky),.prefetch_overflow(kv_overflow_sticky),.prefetch_outstanding);
+  attn_axi_stream_sink u_sink(.clk,.rst_n,.s_axis_tdata,.s_axis_tvalid,.s_axis_tready,.s_axis_tlast,.data_valid(axis_valid),.data_out(axis_data),.data_last(axis_last),.cfg_dest(stream_dest_cfg),.cfg_len(stream_len_cfg),.cfg_burst(4'd0),.desc_queue_enabled,.inband_command_enabled,.desc_valid,.desc_dest,.desc_len,.desc_ready,.kv_load_req,.q_load_req,.kv_wr_ready(kv_wr_allowed),.dest_sel(axis_dest),.bytes_received(sink_bytes_received),.overflow(sink_overflow),.underflow(sink_underflow),.done(axis_done));
   attn_axi_stream_source u_src(.clk,.rst_n,.data_valid(src_valid),.data_in(src_data),.data_last(src_last),.data_ready(src_ready),.cfg_len(result_len_cfg),.m_axis_tdata,.m_axis_tvalid,.m_axis_tready,.m_axis_tlast,.bytes_sent(src_bytes_sent),.done(src_done));
-  attn_core u_fsm(.clk,.rst_n,.start,.start_ready,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.done,.busy,.kv_load_start,.kv_load_done,.q_load_start,.q_load_done,.o_write_start,.o_write_done,.buf_sel,.q_load_bank_sel,.q_ready_bank_sel,.o_bank_sel,.group_advance,.mac_phase,.mac_start,.mac_done,.softmax_start,.softmax_done,.kv_tile_first,.kv_tile_last,.q_tile_start,.kv_tile_start,.active_q_rows,.active_kv_cols,.causal_en,.current_group(gqa_group),.current_head(q_head),.current_q_tile,.current_kv_tile,.q_req_group,.q_req_head,.q_req_tile,.error(core_error),.cycle_cnt,.mac_cycles,.stall_cycles,.perf_valid(perf_valid_unused));
+  attn_core u_fsm(.clk,.rst_n,.start,.start_ready,.seq_len,.cfg_q_pos_base,.cfg_kv_pos_base,.cfg_causal,.done,.busy,.kv_load_start,.kv_load_done,.q_load_start,.q_load_done,.o_write_start,.o_write_done,.buf_sel,.q_load_bank_sel,.q_ready_bank_sel,.o_bank_sel,.group_advance,.kv_prefetch_enable(prefetch_enable_r),.mac_phase,.mac_start,.mac_done,.softmax_start,.softmax_done,.kv_tile_first,.kv_tile_last,.q_tile_start,.kv_tile_start,.active_q_rows,.active_kv_cols,.causal_en,.current_group(gqa_group),.current_head(q_head),.current_q_tile,.current_kv_tile,.q_req_group,.q_req_head,.q_req_tile,.kv_req_group,.error(core_error),.cycle_cnt,.mac_cycles,.stall_cycles,.perf_valid(perf_valid_unused));
   kv_cache_ram u_kcache(.clk,.rst_n,.wr_en(k_wr_en),.wr_addr(k_wr_addr),.wr_data(axis_data),.rd_en(k_rd_en),.rd_token_start(k_rd_start),.rd_dim(k_rd_dim),.rd_data(k_rd),.rd_vec_en(1'b0),.rd_vec_token_idx(16'd0),.rd_vec_dim_start(7'd0),.rd_vec_data(k_rd_vec_unused));
   kv_cache_ram #(.TOKEN_PARALLEL_READ(1'b0)) u_vcache(.clk,.rst_n,.wr_en(v_wr_en),.wr_addr(v_wr_addr),.wr_data(axis_data),.rd_en(v_rd_en),.rd_token_start(v_rd_start),.rd_dim(v_rd_dim),.rd_data(v_rd),.rd_vec_en(v_rd_vec_en),.rd_vec_token_idx(v_rd_vec_token_idx),.rd_vec_dim_start(v_rd_vec_dim_start),.rd_vec_data(v_rd_vec_data));
   tile_buffer u_qbuf(.clk,.rst_n,.wr_en(qbuf_wr_en),.wr_data(axis_data),.rd_en(phasea_depth_active),.rd_row(q_rd_row),.rd_row_start(q_rd_row_start),.rd_dim(q_rd_dim),.rd_data(q_buf_rd),.rd_block_data(q_block_rd),.wr_bank_sel(q_load_bank_sel_latched),.rd_bank_sel(q_compute_bank_sel),.bank_ready(qbuf_bank_ready_unused));

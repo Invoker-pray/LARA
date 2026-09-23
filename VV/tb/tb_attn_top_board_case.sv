@@ -68,6 +68,7 @@ module tb_attn_top_board_case;
   localparam logic [13:0] CSR_PERF_STALLS  = 14'h10c;
   localparam logic [13:0] CSR_PERF_TRANSPORT_STALLS = 14'h110;
   localparam logic [13:0] CSR_PERF_BUFFER_WAIT = 14'h114;
+  localparam logic [13:0] CSR_PREFETCH_CTRL = 14'h03c;
 
   localparam logic [1:0] STREAM_TO_K_CACHE = 2'd0;
   localparam logic [1:0] STREAM_TO_V_CACHE = 2'd1;
@@ -504,6 +505,8 @@ module tb_attn_top_board_case;
     axi_write(CSR_KV_POS_BASE, case_kv_pos_base);
     axi_write(CSR_CFG, case_causal);
     axi_write(CSR_RESULT_LEN, OUTPUT_WORDS * 2);
+    if ($test$plusargs("KV_PREFETCH"))
+      axi_write(CSR_PREFETCH_CTRL, 32'd1);
     axi_write(CSR_CTRL, 32'd1);
 
     while (!dut.done) begin

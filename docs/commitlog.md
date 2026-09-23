@@ -1,5 +1,64 @@
 # LARA 项目提交记录
 
+## 2026-09-23（五）
+
+### v3.5.0 — K/V ownership v1：请求门控的早发预取（未上板）
+
+实现 `docs/v3.1_design.md` §1/§2 的第一版 K/V ownership：单物理 bank +
+四态协议（IDLE/FILLING/READY/ACTIVE）+ group tag。URAM 已 75%，物理双
+bank（+16 URAM）不可行，v1 采用"请求早发 + bank 可重填时才对 host 可见"
+的形态：早发请求在最后 head 计算期发出并锁存组号，bank 在最后 head
+**最后 Q tile** 的最后一个 KV tile 排空后释放；下一组 K/V 填充与最后
+tile 的 normalize/writeback 重叠，host 侧请求/DMA 延迟藏进计算。
+
+**RTL**：
+
+- `attn_core.sv`：新增 `kv_prefetch_enable` 输入与早发请求逻辑（最后
+  head 的计算/回写状态、且存在下一组时发一次，one-shot）；新增
+  `kv_req_group` 输出（早发时 override 为 group+1）。
+- `attn_top.sv`：K/V ownership 状态机（phase/content_group/reads_done/
+  sticky underflow/overflow）；`kv_load_done` 从裸 `k_loaded&&v_loaded`
+  改为"READY 且 tag 匹配"；`kv_load_req = pending && 可见`（可见 =
+  IDLE/FILLING/ACTIVE+reads_done）；group_advance 保留异组 tag 的在途
+  填充；tready 门控（sink `kv_wr_ready`）降级为安全网。
+- `attn_axi_stream_sink.sv`：新输入 `kv_wr_ready`，K/V 目的地数据拍在
+  ownership 未释放时背压（Q 段与 in-band 头不受影响）。
+- CSR：`0x03C PREFETCH_CTRL`（bit0 使能、bit1 W1P 清 sticky）、
+  `0x040 PREFETCH_STATUS`（supported/enabled/q_ready/kv_ready/
+  underflow/overflow/outstanding[7:0]）。
+
+**driver**：`_prepare_prefetch` capability 发现（旧 bitstream 0x040
+读 0 → 强制 off）；`LARA_PREFETCH_MODE=descriptor|inband` 且受支持时
+实际使能 RTL 早发（不再只是 metadata）；profile 记录
+`kv_prefetch_enabled`。默认 `off` 时行为与 v3.4.0 完全一致。
+
+**调试中定位并修复的三个协议 bug**（全部写入
+`docs/design_pitfalls.md` §9）：
+
+1. 释放条件漏"最后 Q tile"维度：L=128 最后 head 有 4 个 tile，tile 0
+   排空即放行 → 早发填充覆盖 tile 1-3 仍需的数据（L128 首错在最后
+   head 第二 tile 起始）。修复：释放加 `final_q_tile_active`。
+2. 门控数据流而非请求可见性：单线程 KV 优先的 host 阻塞在背压的 K/V
+   发送上 → 最后 head 剩余 tile 的 Q 请求饿死 → 死锁。修复：请求在
+   RTL 内保留，bank 可合法重填时才可见。
+3. 可见性窗口漏 FILLING：K 段填充开始后请求掉 0，in-band 预打包流的
+   V 段头消费要求请求为高 → group 0 死锁。修复：可见性 =
+   `IDLE || FILLING || (ACTIVE && reads_done)`。
+
+**TB**：real_request TB 补 desc 模式孤 K/V 批（`service_kv_desc_batch`，
+对齐 driver 语义）、`+KV_PREFETCH` plusarg 与早发生效断言（8 组中
+early=7）；board_case TB 同 plusarg 与 0x110/0x114 之外的 perf 校验
+保持；board_case 脚本新增 `LARA_BOARD_CASE_PLUSARGS` 透传；
+`tb_sw_hw_control_csr` 覆盖 0x03C/0x040。
+
+**门禁（2026-09-23，全部通过）**：Python golden 7/7、`sw/tests` 40/40、
+Verilator lint 0、VCS 完整回归（synth+XPM）**28/28**；prefetch 三模式
+端到端（legacy/descriptor/in-band × FULL_REAL）全 PASS（early=7、
+q=32/kv=8 精确）；板级 case 仿真 L1/L64/L128 × prefetch 及 L128 无
+prefetch 全部 bit-exact PASS。L128 无 prefetch 基准：
+`transport_stall=262312`（prefetch 版的对比数字待从终端补录/板上量化）。
+上板未开始（`.0`）。
+
 ## 2026-09-23（四）
 
 ### v3.4.0 — 修复 golden model 无参数运行的无限递归（未上板）

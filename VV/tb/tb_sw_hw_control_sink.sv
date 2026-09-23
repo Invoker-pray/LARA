@@ -8,6 +8,7 @@ module tb_sw_hw_control_sink;
   int done_count=0, k_count=0, v_count=0, q_count=0;
   logic desc_queue_enabled, inband_command_enabled, desc_valid, desc_ready;
   logic kv_load_req, q_load_req;
+  logic kv_wr_ready = 1'b1;
   logic [1:0] desc_dest; logic [31:0] desc_len;
   attn_axi_stream_sink dut(.*);
   task automatic send(input logic [31:0] data, input logic last);

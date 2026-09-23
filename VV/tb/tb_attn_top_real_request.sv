@@ -41,7 +41,8 @@ module tb_attn_top_real_request;
   integer last_debug_head;
   integer last_debug_group;
   logic saw_k_request, saw_v_request, saw_q_request;
-  logic full_real, desc_queue_mode, inband_mode;
+  logic full_real, desc_queue_mode, inband_mode, kv_prefetch_mode;
+  int early_kv_requests;
 
   localparam logic [13:0] CSR_CTRL        = 14'h000;
   localparam logic [13:0] CSR_SEQ_LEN     = 14'h008;
@@ -52,6 +53,7 @@ module tb_attn_top_real_request;
   localparam logic [13:0] CSR_STREAM_DEST = 14'h02c;
   localparam logic [13:0] CSR_DESC_PUSH   = 14'h030;
   localparam logic [13:0] CSR_DESC_CTRL   = 14'h038;
+  localparam logic [13:0] CSR_PREFETCH_CTRL = 14'h03c;
   localparam logic [13:0] CSR_RESULT_LEN  = 14'h058;
   localparam logic [31:0] CTRL_START      = 32'h1;
 
@@ -136,6 +138,26 @@ module tb_attn_top_real_request;
       send_batch_segment(K_V_BEATS, BF16_ONE, 1'b0, 1'b0);
       send_batch_segment(K_V_BEATS, BF16_TWO, 1'b0, 1'b0);
       send_batch_segment(Q_BEATS, BF16_ONE, 1'b1, 1'b1);
+    end
+  endtask
+
+  // Descriptor-mode orphan K/V request (early next-group prefetch): the
+  // driver pushes a K+V two-segment batch, mirroring _transfer_batch in
+  // sw/attn_driver.py.  A legacy send_stream would never be accepted because
+  // the sink only raises tready while a descriptor segment is active.
+  task automatic service_kv_desc_batch;
+    begin
+      request_count = request_count + 1;
+      kv_request_count = kv_request_count + 1;
+      saw_k_request = 1'b1;
+      saw_v_request = 1'b1;
+      if (full_real || $test$plusargs("DEBUG_REAL"))
+        $display("REAL_REQ K/V group=%0d count=%0d", dut.kv_req_group_r,
+                 kv_request_count);
+      axi_write(CSR_DESC_PUSH, (K_V_BEATS << 2) | STREAM_TO_K_CACHE);
+      axi_write(CSR_DESC_PUSH, (K_V_BEATS << 2) | STREAM_TO_V_CACHE);
+      send_batch_segment(K_V_BEATS, BF16_ONE, 1'b0, 1'b0);
+      send_batch_segment(K_V_BEATS, BF16_TWO, 1'b0, 1'b1);
     end
   endtask
 
@@ -290,6 +312,10 @@ module tb_attn_top_real_request;
   endtask
 
   always @(posedge clk) begin
+    if (rst_n && dut.kv_load_start && (dut.u_fsm.state != ST_LOAD_KV))
+      early_kv_requests = early_kv_requests + 1;
+
+
     if (rst_n && dut.k_wr_en) begin
       k_write_count = k_write_count + 1;
       if ($test$plusargs("DEBUG_REAL") &&
@@ -405,6 +431,8 @@ module tb_attn_top_real_request;
     full_real = $test$plusargs("FULL_REAL");
     desc_queue_mode = $test$plusargs("DESC_QUEUE");
     inband_mode = $test$plusargs("INBAND_COMMAND");
+    kv_prefetch_mode = $test$plusargs("KV_PREFETCH");
+    early_kv_requests = 0;
 
     repeat (4) @(posedge clk);
     rst_n = 1'b1;
@@ -418,6 +446,8 @@ module tb_attn_top_real_request;
       axi_write(CSR_DESC_CTRL, 32'h7);
     else if (desc_queue_mode)
       axi_write(CSR_DESC_CTRL, 32'h3);
+    if (kv_prefetch_mode)
+      axi_write(CSR_PREFETCH_CTRL, 32'd1);
     if (full_real) begin
       // Match board_test.py for L=1: 32 Q heads x 128 BF16 values.
       axi_write(CSR_RESULT_LEN, 32'd8192);
@@ -436,6 +466,8 @@ module tb_attn_top_real_request;
         @(posedge clk);
       else if (desc_queue_mode && dut.kv_load_req && dut.q_load_req)
         service_kvq_batch();
+      else if (desc_queue_mode && dut.kv_load_req)
+        service_kv_desc_batch();
       else if (desc_queue_mode && dut.q_load_req)
         service_q_desc_batch();
       else if (dut.kv_load_req)
@@ -489,6 +521,12 @@ module tb_attn_top_real_request;
       $display("FAIL output contains X beats=%0d", output_x_beats);
       errors = errors + 1;
     end
+    if (kv_prefetch_mode && full_real && (early_kv_requests == 0)) begin
+      $display("FAIL kv prefetch enabled but no early request observed");
+      errors = errors + 1;
+    end
+    if (kv_prefetch_mode && full_real && (early_kv_requests > 0))
+      $display("KV_PREFETCH early_requests=%0d kv_transport_stall_visible=1", early_kv_requests);
     if (errors == 0) begin
       $display("REAL REQUEST PATH PASS mode=%s transport=%s requests=%0d q_requests=%0d kv_requests=%0d output_beats=%0d nonzero_beats=%0d x_beats=%0d",
                full_real ? "full" : "focused",
@@ -503,10 +541,13 @@ module tb_attn_top_real_request;
     $fatal(1);
   end
 
+
+
   initial begin
     #5_000_000;
     $display("FAIL real request path timeout state=%0d busy=%0b done=%0b kv_req=%0b q_req=%0b",
              dut.u_fsm.state, dut.busy, dut.done, dut.kv_load_req, dut.q_load_req);
     $fatal(1);
   end
+
 endmodule

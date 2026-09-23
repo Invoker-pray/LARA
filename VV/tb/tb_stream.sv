@@ -57,6 +57,7 @@ module tb_stream;
     .cfg_dest, .cfg_len, .cfg_burst,
     .desc_queue_enabled, .inband_command_enabled,
     .desc_valid, .desc_dest, .desc_len, .desc_ready, .kv_load_req, .q_load_req,
+    .kv_wr_ready(1'b1),
     .dest_sel, .bytes_received, .overflow, .underflow, .done(sink_done)
   );
 

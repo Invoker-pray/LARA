@@ -63,6 +63,8 @@ SIM_DIR="VV/sim/tb_attn_top_board_case_xpm"
 XPM_SV="${XPM_SV:-/home/jiao/xilinx/2025.2/data/ip/xpm/xpm_memory/hdl/xpm_memory.sv}"
 EXTRA_DEFINES="${LARA_BOARD_CASE_DEFINES:-}"
 ACTUAL_ARG=()
+# Optional runtime plusargs, e.g. LARA_BOARD_CASE_PLUSARGS="+KV_PREFETCH"
+PLUSARGS=(${LARA_BOARD_CASE_PLUSARGS:-})
 if [[ -n "${ACTUAL_PATH:-}" ]]; then
   ACTUAL_ARG=("+ACTUAL_PATH=$(cd "$(dirname "${ACTUAL_PATH}")" && pwd)/$(basename "${ACTUAL_PATH}")")
 fi
@@ -102,6 +104,6 @@ vcs -full64 -sverilog -timescale=1ns/1ps +lint=all +v2k \
   +CAUSAL="${CASE_CAUSAL}" \
   +Q_POS_BASE="${CASE_Q_POS_BASE}" \
   +KV_POS_BASE="${CASE_KV_POS_BASE}" \
-  "${ACTUAL_ARG[@]}" -l sim.log
+  "${ACTUAL_ARG[@]}" "${PLUSARGS[@]}" -l sim.log
 grep -q "BOARD CASE PASS" sim.log
 echo "ALL BOARD CASE XPM CHECKS PASSED"

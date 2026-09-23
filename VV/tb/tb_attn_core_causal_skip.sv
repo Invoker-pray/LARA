@@ -34,6 +34,8 @@ module tb_attn_core_causal_skip;
   logic q_ready_bank_sel;
   logic o_bank_sel;
   logic group_advance;
+  logic kv_prefetch_enable;
+  logic [2:0] kv_req_group;
   logic mac_phase;
   logic mac_start;
   logic mac_done;
@@ -327,6 +329,7 @@ module tb_attn_core_causal_skip;
   initial begin
     clk = 1'b0;
     rst_n = 1'b0;
+    kv_prefetch_enable = 1'b0;
     start = 1'b0;
     seq_len = 16'd0;
     cfg_q_pos_base = 16'd0;

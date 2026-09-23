@@ -46,6 +46,8 @@ CSR_STREAM_DEST = 0x02C
 CSR_DESC_PUSH = 0x030
 CSR_DESC_STATUS = 0x034
 CSR_DESC_CTRL = 0x038
+CSR_PREFETCH_CTRL = 0x03C
+CSR_PREFETCH_STATUS = 0x040
 CSR_RESULT_LEN = 0x058
 CSR_PERF_CYCLES = 0x100
 CSR_PERF_MAC_CYCLES = 0x108
@@ -65,6 +67,10 @@ STATUS_Q_LOAD_REQ = 1 << 6
 
 DESC_STATUS_SUPPORTED = 1 << 31
 DESC_STATUS_INBAND_SUPPORTED = 1 << 30
+PREFETCH_STATUS_SUPPORTED = 1 << 0
+PREFETCH_STATUS_ENABLED = 1 << 1
+PREFETCH_CTRL_ENABLE = 1 << 0
+PREFETCH_CTRL_CLEAR_ERRORS = 1 << 1
 DESC_STATUS_INBAND_ENABLED = 1 << 11
 DESC_STATUS_ENABLED = 1 << 10
 DESC_STATUS_FULL = 1 << 9
@@ -306,9 +312,10 @@ class RunProfile:
     descriptor_queue_enabled: bool = False
     inband_command_supported: bool = False
     inband_command_enabled: bool = False
+    kv_prefetch_enabled: bool = False
     input_transport: str = "legacy"
-    # v3.1 experiment gate.  This is intentionally metadata-only until the
-    # RTL exposes a verified ownership/ready protocol for overlapping loads.
+    # v3.1 experiment gate; the RTL ownership protocol is armed per
+    # transaction through _prepare_prefetch when the bitstream supports it.
     prefetch_mode: str = "off"
     buffer_wait_ms: float = 0.0
     input_dma_overlap_ms: float = 0.0
@@ -436,6 +443,8 @@ class AttentionAccelerator:
         self.last_profile: RunProfile | None = None
         desc_status = self.mmio.read(CSR_DESC_STATUS)
         self._descriptor_queue_supported = bool(desc_status & DESC_STATUS_SUPPORTED)
+        # Armed by _prepare_prefetch once the transaction's CSR state is set.
+        self._kv_prefetch_active = False
         self._inband_command_supported = bool(desc_status & DESC_STATUS_INBAND_SUPPORTED)
         self._descriptor_queue_enabled = False
         self._inband_command_enabled = False
@@ -517,6 +526,28 @@ class AttentionAccelerator:
 
     def clear_status(self) -> None:
         self.mmio.write(CSR_CTRL, CTRL_CLEAR_STATUS)
+
+    def _prepare_prefetch(self) -> None:
+        """Capability-discover and arm the K/V early-request prefetch.
+
+        The RTL exposes the ownership protocol through CSR 0x03C/0x040.
+        Older bitstreams return 0 at 0x040 (unsupported bit clear), which
+        keeps the driver in the legacy request-timing mode.
+        """
+        status = self.mmio.read(CSR_PREFETCH_STATUS)
+        supported = bool(status & PREFETCH_STATUS_SUPPORTED)
+        if not supported:
+            self._kv_prefetch_active = False
+            return
+        if self._requested_prefetch_mode == "off":
+            self.mmio.write(CSR_PREFETCH_CTRL, 0)
+            self._kv_prefetch_active = False
+            return
+        self.mmio.write(CSR_PREFETCH_CTRL, PREFETCH_CTRL_ENABLE)
+        enabled = bool(self.mmio.read(CSR_PREFETCH_STATUS) & PREFETCH_STATUS_ENABLED)
+        if not enabled:
+            raise RuntimeError("K/V prefetch enable was not acknowledged by the bitstream")
+        self._kv_prefetch_active = True
 
     def _prepare_input_transport(self) -> None:
         mode = self._requested_stream_mode
@@ -893,8 +924,10 @@ class AttentionAccelerator:
         self.configure(L, q_pos_base=q_pos_base, kv_pos_base=kv_pos_base, causal=causal)
         self.clear_status()
         self._prepare_input_transport()
+        self._prepare_prefetch()
         self.last_profile.descriptor_queue_enabled = self._descriptor_queue_enabled
         self.last_profile.inband_command_enabled = self._inband_command_enabled
+        self.last_profile.kv_prefetch_enabled = self._kv_prefetch_active
         self.last_profile.input_transport = self._input_transport
         counts = self.byte_counts(L)
         if counts.o_bytes > DMA_MAX_TRANSFER_BYTES:

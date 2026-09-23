@@ -25,6 +25,11 @@ module attn_axi_stream_sink
     output logic        desc_ready,
     input  logic        kv_load_req,
     input  logic        q_load_req,
+    // Ownership backpressure for the K/V cache fill: while low, beats whose
+    // segment targets K_CACHE/V_CACHE are not accepted (tready held low) so
+    // the DMA stream parks until the cache is free to be overwritten. Q
+    // segments and in-band header words are never gated by this input.
+    input  logic        kv_wr_ready,
     output logic        data_valid,
     output logic [15:0] data_out,
     output logic        data_last,
@@ -56,6 +61,10 @@ module attn_axi_stream_sink
   wire dest_valid = (accepted_dest == STREAM_TO_K_CACHE) ||
                     (accepted_dest == STREAM_TO_V_CACHE) ||
                     (accepted_dest == STREAM_TO_Q_BUF);
+  // K/V ownership: hold off accepting payload beats (not headers, not Q
+  // segments) while the cache fill side is not ready.
+  wire dest_needs_kv_ready = (accepted_dest == STREAM_TO_K_CACHE) ||
+                             (accepted_dest == STREAM_TO_V_CACHE);
   wire [31:0] next_segment_byte_cnt = segment_active ? segment_byte_cnt + 32'd4 : 32'd4;
   wire segment_boundary = framed_mode &&
                           (next_segment_byte_cnt == accepted_len);
@@ -72,8 +81,10 @@ module attn_axi_stream_sink
   assign desc_ready = fifo_mode && !segment_active && !have_hi;
   assign s_axis_tready = !have_hi &&
                          (inband_command_enabled
-                            ? (segment_active || !inband_header_valid)
-                            : (!fifo_mode || segment_active));
+                            ? ((segment_active || !inband_header_valid) &&
+                               (!segment_active || !dest_needs_kv_ready || kv_wr_ready))
+                            : ((!fifo_mode || segment_active) &&
+                               (!dest_needs_kv_ready || kv_wr_ready)));
   assign bytes_received = total_byte_cnt;
 
   always_ff @(posedge clk or negedge rst_n) begin
