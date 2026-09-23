@@ -66,6 +66,8 @@ module tb_attn_top_board_case;
   localparam logic [13:0] CSR_PERF_CYCLES  = 14'h100;
   localparam logic [13:0] CSR_PERF_MAC     = 14'h108;
   localparam logic [13:0] CSR_PERF_STALLS  = 14'h10c;
+  localparam logic [13:0] CSR_PERF_TRANSPORT_STALLS = 14'h110;
+  localparam logic [13:0] CSR_PERF_BUFFER_WAIT = 14'h114;
 
   localparam logic [1:0] STREAM_TO_K_CACHE = 2'd0;
   localparam logic [1:0] STREAM_TO_V_CACHE = 2'd1;
@@ -423,9 +425,13 @@ module tb_attn_top_board_case;
   logic [31:0] perf_cycles;
   logic [31:0] perf_mac_cycles;
   logic [31:0] perf_stall_cycles;
+  logic [31:0] perf_transport_stall_cycles;
+  logic [31:0] perf_buffer_wait_cycles;
   logic [31:0] retained_cycles;
   logic [31:0] retained_mac_cycles;
   logic [31:0] retained_stall_cycles;
+  logic [31:0] retained_transport_stall_cycles;
+  logic [31:0] retained_buffer_wait_cycles;
 
     if (!$value$plusargs("CASE_DIR=%s", case_dir))
       case_dir = "/tmp/lara_case_l128";
@@ -516,26 +522,37 @@ module tb_attn_top_board_case;
     axi_read(CSR_PERF_CYCLES, perf_cycles);
     axi_read(CSR_PERF_MAC, perf_mac_cycles);
     axi_read(CSR_PERF_STALLS, perf_stall_cycles);
+    axi_read(CSR_PERF_TRANSPORT_STALLS, perf_transport_stall_cycles);
+    axi_read(CSR_PERF_BUFFER_WAIT, perf_buffer_wait_cycles);
     if ((perf_cycles == 0) || (perf_mac_cycles == 0) ||
-        (perf_stall_cycles == 0)) begin
-      $display("FAIL performance CSR returned zero after DONE: total=%0d mac=%0d stall=%0d",
-               perf_cycles, perf_mac_cycles, perf_stall_cycles);
+        (perf_stall_cycles == 0) || (perf_transport_stall_cycles == 0) ||
+        (perf_buffer_wait_cycles == 0)) begin
+      $display("FAIL performance CSR returned zero after DONE: total=%0d mac=%0d stall=%0d transport_stall=%0d buffer_wait=%0d",
+               perf_cycles, perf_mac_cycles, perf_stall_cycles,
+               perf_transport_stall_cycles, perf_buffer_wait_cycles);
       errors = errors + 1;
     end
     repeat (4) @(posedge clk);
     axi_read(CSR_PERF_CYCLES, retained_cycles);
     axi_read(CSR_PERF_MAC, retained_mac_cycles);
     axi_read(CSR_PERF_STALLS, retained_stall_cycles);
+    axi_read(CSR_PERF_TRANSPORT_STALLS, retained_transport_stall_cycles);
+    axi_read(CSR_PERF_BUFFER_WAIT, retained_buffer_wait_cycles);
     if ((retained_cycles != perf_cycles) ||
         (retained_mac_cycles != perf_mac_cycles) ||
-        (retained_stall_cycles != perf_stall_cycles)) begin
-      $display("FAIL performance CSR changed in IDLE: first=%0d/%0d/%0d retained=%0d/%0d/%0d",
+        (retained_stall_cycles != perf_stall_cycles) ||
+        (retained_transport_stall_cycles != perf_transport_stall_cycles) ||
+        (retained_buffer_wait_cycles != perf_buffer_wait_cycles)) begin
+      $display("FAIL performance CSR changed in IDLE: first=%0d/%0d/%0d/%0d/%0d retained=%0d/%0d/%0d/%0d/%0d",
                perf_cycles, perf_mac_cycles, perf_stall_cycles,
-               retained_cycles, retained_mac_cycles, retained_stall_cycles);
+               perf_transport_stall_cycles, perf_buffer_wait_cycles,
+               retained_cycles, retained_mac_cycles, retained_stall_cycles,
+               retained_transport_stall_cycles, retained_buffer_wait_cycles);
       errors = errors + 1;
     end
-    $display("PERF_CSR_AFTER_DONE total=%0d mac=%0d stall=%0d",
-             perf_cycles, perf_mac_cycles, perf_stall_cycles);
+    $display("PERF_CSR_AFTER_DONE total=%0d mac=%0d stall=%0d transport_stall=%0d buffer_wait=%0d",
+             perf_cycles, perf_mac_cycles, perf_stall_cycles,
+             perf_transport_stall_cycles, perf_buffer_wait_cycles);
 
     if (k_v_requests != N_KV_HEADS) begin
       $display("FAIL board case K/V requests got=%0d expected=%0d", k_v_requests, N_KV_HEADS);

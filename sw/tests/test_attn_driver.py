@@ -62,6 +62,12 @@ class AttentionDriverTest(unittest.TestCase):
         assert accel.last_profile is not None
         self.assertEqual(accel.last_profile.prefetch_mode, "descriptor")
         self.assertEqual(accel.last_profile.buffer_wait_ms, 0.0)
+        self.assertEqual(accel.last_profile.transport_stall_ms, 0.0)
+        # The observation counters must round-trip into the profile even when
+        # the (mock) hardware reports zero.
+        profile = accel.last_profile.to_dict()
+        self.assertIn("pl_transport_stall_cycles", profile)
+        self.assertIn("pl_buffer_wait_cycles", profile)
 
     def test_new_request_is_serviced_without_sleep(self):
         accel = AttentionAccelerator(request_poll_sleep_us=20)

@@ -1,5 +1,22 @@
 # LARA 项目提交记录
 
+## 2026-09-23（三）
+
+### v3.3.0 — 板级 case 仿真守住新观测计数器（未上板）
+
+- `tb_attn_top_board_case.sv`：DONE 后性能 CSR 校验扩展到 `0x110
+  PERF_TRANSPORT_STALLS` 与 `0x114 PERF_BUFFER_WAIT`（非零 + IDLE 保持），
+  与既有 total/mac/stall 检查同模式；`PERF_CSR_AFTER_DONE` 打印五个计数器。
+  L1 q31kv7 causal 实测：transport_stall=2216（8 组 K/V DMA 等待）、
+  buffer_wait=133616（Q fill outstanding 周期，含与计算重叠部分）。
+- `sw/tests/test_attn_driver.py`：prefetch gate 单测增加
+  `transport_stall_ms` 默认值与 profile 字段 round-trip 断言。
+- 至此 board matrix 仿真矩阵 24/24 全部 PASS（两套 position base ×
+  L1/16/32/64/128/512 × causal/noncausal，含用户后台完成的 q3kv3 L512
+  noncausal）。
+- 门禁：python golden 7/7、`sw/tests` 40/40、Verilator lint 0、VCS 完整
+  回归（synth+XPM）**28/28 PASS**。上板未开始（`.0`）。
+
 ## 2026-09-23（二）
 
 ### v3.2.0 — K/V 传输等待观测计数器（未上板）
