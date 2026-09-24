@@ -130,6 +130,7 @@ set_property -dict [list \
     CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ $FCLK_MHZ \
     CONFIG.PSU__USE__M_AXI_GP0 {1} CONFIG.PSU__USE__M_AXI_GP1 {1} \
     CONFIG.PSU__USE__S_AXI_GP2 {1} CONFIG.PSU__USE__S_AXI_GP3 {1} \
+    CONFIG.PSU__USE__IRQ0 {1} \
 ] [get_bd_cells ps8]
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_gen
@@ -197,6 +198,13 @@ apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list \
 
 connect_bd_intf_net [get_bd_intf_pins axi_dma/M_AXIS_MM2S] [get_bd_intf_pins accel/s_axis]
 connect_bd_intf_net [get_bd_intf_pins accel/m_axis] [get_bd_intf_pins axi_dma/S_AXIS_S2MM]
+
+# Interrupt: accel level irq (CSR-gated request/done/error) -> ps8 pl_ps_irq0.
+# The DMA interrupt outputs stay unwired exactly as in the polling design.
+create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat
+set_property -dict [list CONFIG.NUM_PORTS {1}] [get_bd_cells irq_concat]
+connect_bd_net [get_bd_pins accel/irq] [get_bd_pins irq_concat/In0]
+connect_bd_net [get_bd_pins irq_concat/dout] [get_bd_pins ps8/pl_ps_irq0]
 
 # Explicitly drive the AXI control/data path resets from rst_gen. This is the
 # same class of fix that was required in ~/git/xx to avoid a valid-looking BD

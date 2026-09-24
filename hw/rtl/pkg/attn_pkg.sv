@@ -272,6 +272,8 @@ package attn_pkg;
   localparam logic [13:0] CSR_PREFETCH_CTRL   = 14'h03C;  // [0] enable K/V early request, [1] clear sticky errors W1P
   localparam logic [13:0] CSR_PREFETCH_STATUS = 14'h040;  // [0] supported, [1] enabled, [2] q_ready, [3] kv_ready,
                                                           // [4] underflow, [5] overflow, [15:8] outstanding
+  localparam logic [13:0] CSR_IRQ_ENABLE      = 14'h044;  // [0] master IRQ enable (level, all sources)
+  localparam logic [13:0] CSR_IRQ_STATUS      = 14'h048;  // [0] kv_load_req, [1] q_load_req, [2] done, [3] error
   localparam int STREAM_DESC_FIFO_DEPTH       = 16;
 
   // --- Result Stream Control (0x050–0x07F) ---

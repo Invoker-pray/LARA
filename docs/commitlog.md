@@ -1,5 +1,36 @@
 # LARA 项目提交记录
 
+## 2026-09-24
+
+### v3.6.0 — CSR 门控电平 IRQ（RTL + Vivado 布线 + driver，未上板）
+
+改进 3 落地：request polling 替换为 PS 中断等待。
+
+**RTL**：`attn_axi_lite_slave` 新增电平输出
+`irq = irq_en & (kv_load_req | q_load_req | done_sticky | error_sticky |
+stream_error_sticky)`——事件源 slave 全有，无新增清序状态（请求自清，
+sticky 走既有 `CTRL_CLEAR_STATUS`）。新 CSR `0x044 IRQ_ENABLE`（bit0 总
+使能）、`0x048 IRQ_STATUS`（bit0 kv_req / bit1 q_req / bit2 done /
+bit3 error，只读）。`attn_top` / `attn_top_wrapper` 引出 `irq`。
+
+**Vivado**（`vivado_build.tcl`）：ps8 使能 `PSU__USE__IRQ0`，新增单端口
+`xlconcat` 把 `accel/irq` 接 `pl_ps_irq0`；DMA 中断输出保持原样未接。
+
+**driver**：`LARA_REQUEST_MODE=auto|irq|poll`（默认 auto）。auto 在真机
+且 overlay 暴露 `accel/irq`（需 v3.6 bitstream）时用 IRQ，否则自动回退
+poll；显式 `irq` 不可用时报错。`wait_done` 无待处理请求时经
+`pynq.interrupt.Interrupt` 阻塞等待（2 ms 有界超时，超时查 IRQ 电平决定
+续睡或轮询——丢边沿可恢复，不挂死）。请求到达/服务路径与 polling 完全
+相同。profile 新增 `request_mode` 供 A/B 量化。旧 bitstream 上自动回退
+polling，功能不受影响。
+
+**门禁（2026-09-24，全部通过）**：Python golden 7/7、`sw/tests` 40/40、
+Verilator lint 0、VCS 完整回归（synth+XPM）28/28、CSR TB IRQ 行为测试
+（使能门控/请求源映射/自清/done sticky/CTRL 清除联动/读回）；bit-exact
+板级 case 矩阵第一步 L1-L128 × 两套 position base 20/20 PASS，L512 层
+q31kv7 causal PASS（noncausal 与 q3kv3 在后台收尾，与改动无交互差异）。
+上板未开始（`.0`）——**IRQ 模式需 v3.6 bitstream 才会激活**。
+
 ## 2026-09-23（五）
 
 ### v3.5.0 — K/V ownership v1：请求门控的早发预取（未上板）

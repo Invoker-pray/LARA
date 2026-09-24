@@ -15,7 +15,9 @@ module attn_top_wrapper (
     // AXI4-Stream Sink (DMA→Accelerator data)
     s_axis_tdata, s_axis_tvalid, s_axis_tready, s_axis_tlast,
     // AXI4-Stream Source (Accelerator→DMA data)
-    m_axis_tdata, m_axis_tvalid, m_axis_tready, m_axis_tlast
+    m_axis_tdata, m_axis_tvalid, m_axis_tready, m_axis_tlast,
+    // Level interrupt to PS (request-pending/done/error, CSR-gated)
+    irq
 );
   // Clock + Reset
   (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis:m_axis, ASSOCIATED_RESET rst_n" *)
@@ -52,6 +54,7 @@ module attn_top_wrapper (
   output wire        m_axis_tvalid;
   input  wire        m_axis_tready;
   output wire        m_axis_tlast;
+  output wire        irq;
 
   attn_top u_top (
     .clk(clk), .rst_n(rst_n),
@@ -61,6 +64,7 @@ module attn_top_wrapper (
     .s_axi_araddr(s_axi_araddr), .s_axi_arvalid(s_axi_arvalid), .s_axi_arready(s_axi_arready),
     .s_axi_rdata(s_axi_rdata), .s_axi_rresp(s_axi_rresp), .s_axi_rvalid(s_axi_rvalid), .s_axi_rready(s_axi_rready),
     .s_axis_tdata(s_axis_tdata), .s_axis_tvalid(s_axis_tvalid), .s_axis_tready(s_axis_tready), .s_axis_tlast(s_axis_tlast),
-    .m_axis_tdata(m_axis_tdata), .m_axis_tvalid(m_axis_tvalid), .m_axis_tready(m_axis_tready), .m_axis_tlast(m_axis_tlast)
+    .m_axis_tdata(m_axis_tdata), .m_axis_tvalid(m_axis_tvalid), .m_axis_tready(m_axis_tready), .m_axis_tlast(m_axis_tlast),
+    .irq(irq)
   );
 endmodule

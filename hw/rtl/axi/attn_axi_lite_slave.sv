@@ -68,7 +68,11 @@ module attn_axi_lite_slave
     input  logic                   prefetch_kv_ready,
     input  logic                   prefetch_underflow,
     input  logic                   prefetch_overflow,
-    input  logic [7:0]             prefetch_outstanding
+    input  logic [7:0]             prefetch_outstanding,
+    // Level IRQ to the PS: request-pending / done / error sources gated by
+    // CSR_IRQ_ENABLE.  Requests self-clear when serviced; the done/error
+    // stickies clear through the existing CTRL clear-status bit.
+    output logic                   irq
 );
 
   logic aw_acked, w_acked;
@@ -83,6 +87,10 @@ module attn_axi_lite_slave
   logic [31:0] desc_len_mem [STREAM_DESC_FIFO_DEPTH];
   logic [DESC_PTR_W-1:0] desc_wr_ptr, desc_rd_ptr;
   logic [DESC_COUNT_W-1:0] desc_count;
+  logic irq_en;
+  wire irq_raw = kv_load_req | q_load_req | done_sticky | error_sticky |
+                 stream_error_sticky;
+  assign irq = irq_en & irq_raw;
 
   wire write_fire = aw_acked && w_acked && !s_axi_bvalid;
   wire desc_pop = desc_queue_enabled && desc_valid && desc_ready;
@@ -190,6 +198,7 @@ module attn_axi_lite_slave
       inband_command_enabled <= 1'b0;
       prefetch_enable     <= 1'b0;
       prefetch_error_clear <= 1'b0;
+      irq_en              <= 1'b0;
       desc_wr_ptr         <= '0;
       desc_rd_ptr         <= '0;
       desc_count          <= '0;
@@ -284,6 +293,10 @@ module attn_axi_lite_slave
             if (wstrb_r[1])
               prefetch_error_clear <= 1'b1;
           end
+          CSR_IRQ_ENABLE: begin
+            if (wstrb_r[0])
+              irq_en <= wdata_r[0];
+          end
           CSR_RESULT_LEN:  result_len      <= merge_wstrb(result_len, wdata_r, wstrb_r);
           default: begin end
         endcase
@@ -349,6 +362,9 @@ module attn_axi_lite_slave
           CSR_PERF_STALLS:     s_axi_rdata <= stall_cycles;
           CSR_PERF_TRANSPORT_STALLS: s_axi_rdata <= kv_transport_stall_cycles;
           CSR_PERF_BUFFER_WAIT: s_axi_rdata <= buffer_wait_cycles;
+          CSR_IRQ_ENABLE:     s_axi_rdata <= {31'd0, irq_en};
+          CSR_IRQ_STATUS:     s_axi_rdata <= {28'd0, error_sticky | stream_error_sticky,
+                                              done_sticky, q_load_req, kv_load_req};
           CSR_PREFETCH_STATUS: s_axi_rdata <=
               (32'(prefetch_outstanding) << 8) |
               (32'(prefetch_supported)) |

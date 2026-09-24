@@ -12,6 +12,7 @@ module tb_sw_hw_control_csr;
   logic kv_req, q_req, q_bank; logic [2:0] kv_group, q_group; logic [1:0] q_head; logic [7:0] q_tile;
   logic [31:0] cycle_cnt, mac_cycles, stall_cycles, buffer_wait_cycles, kv_transport_stall_cycles; int errors = 0;
   logic prefetch_enable, prefetch_error_clear;
+  logic irq;
   logic prefetch_supported, prefetch_enabled, prefetch_q_ready, prefetch_kv_ready;
   logic prefetch_underflow, prefetch_overflow;
   logic [7:0] prefetch_outstanding;
@@ -40,7 +41,8 @@ module tb_sw_hw_control_csr;
     .prefetch_enable, .prefetch_error_clear,
     .prefetch_supported, .prefetch_enabled, .prefetch_q_ready,
     .prefetch_kv_ready, .prefetch_underflow, .prefetch_overflow,
-    .prefetch_outstanding
+    .prefetch_outstanding,
+    .irq
   );
 
   task automatic fail(input string msg); begin $display("FAIL: %s", msg); errors++; end endtask
@@ -109,6 +111,28 @@ module tb_sw_hw_control_csr;
     axi_write(CSR_PREFETCH_CTRL, 32'd2);
     if (clear_pulse_count == 0) fail("prefetch error clear never pulsed");
     axi_write(CSR_CTRL, CTRL_CLEAR_STATUS); axi_read(CSR_STATUS, rd); if (rd[4:2] != 0) fail("clear status");
+    // Level IRQ: gated by CSR_IRQ_ENABLE; sources are the load requests and
+    // the done/error stickies; requests self-clear, stickies clear via CTRL.
+    // (#1 after each stimulus change so the combinational irq settles; the
+    // done pulse is held across a posedge from negedge to negedge.)
+    if (irq) fail("irq asserted while disabled");
+    axi_write(CSR_IRQ_ENABLE, 32'd1); #1;
+    if (!irq) fail("irq not asserted with kv/q requests pending");
+    axi_read(CSR_IRQ_STATUS, rd);
+    if (!rd[0] || !rd[1] || rd[2] || rd[3]) fail("irq status request decode");
+    kv_req = 0; #1;
+    if (!irq) fail("irq dropped while q request pending");
+    q_req = 0; #1;
+    if (irq) fail("irq stuck with no sources");
+    axi_read(CSR_IRQ_STATUS, rd);
+    if (rd[0] || rd[1] || rd[2] || rd[3]) fail("irq status not empty");
+    done = 1; @(negedge clk); done = 0; #1;
+    if (!irq) fail("irq not asserted on done sticky");
+    axi_read(CSR_IRQ_STATUS, rd);
+    if (rd[0] || rd[1] || !rd[2] || rd[3]) fail("irq status done decode");
+    axi_write(CSR_CTRL, CTRL_CLEAR_STATUS); #1;
+    if (irq) fail("irq stuck after clear status");
+    axi_read(CSR_IRQ_ENABLE, rd); if (!rd[0]) fail("irq enable readback");    axi_read(CSR_IRQ_ENABLE, rd); if (!rd[0]) fail("irq enable readback");
     if (errors == 0) begin $display("TB_SW_HW_CONTROL_CSR PASS"); $finish(0); end
     else begin $display("TB_SW_HW_CONTROL_CSR FAIL errors=%0d", errors); $finish(1); end
   end

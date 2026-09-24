@@ -48,6 +48,8 @@ CSR_DESC_STATUS = 0x034
 CSR_DESC_CTRL = 0x038
 CSR_PREFETCH_CTRL = 0x03C
 CSR_PREFETCH_STATUS = 0x040
+CSR_IRQ_ENABLE = 0x044
+CSR_IRQ_STATUS = 0x048
 CSR_RESULT_LEN = 0x058
 CSR_PERF_CYCLES = 0x100
 CSR_PERF_MAC_CYCLES = 0x108
@@ -71,6 +73,13 @@ PREFETCH_STATUS_SUPPORTED = 1 << 0
 PREFETCH_STATUS_ENABLED = 1 << 1
 PREFETCH_CTRL_ENABLE = 1 << 0
 PREFETCH_CTRL_CLEAR_ERRORS = 1 << 1
+IRQ_STATUS_KV_REQ = 1 << 0
+IRQ_STATUS_Q_REQ = 1 << 1
+IRQ_STATUS_DONE = 1 << 2
+IRQ_STATUS_ERROR = 1 << 3
+# Bounded per-wait timeout: a lost interrupt edge degrades IRQ mode to
+# polling at this period instead of hanging the request loop.
+IRQ_WAIT_TIMEOUT_S = 2e-3
 DESC_STATUS_INBAND_ENABLED = 1 << 11
 DESC_STATUS_ENABLED = 1 << 10
 DESC_STATUS_FULL = 1 << 9
@@ -116,6 +125,8 @@ STREAM_MODE_ENV = "LARA_STREAM_MODE"
 STREAM_MODES = ("auto", "inband", "descriptor", "legacy")
 PREFETCH_MODE_ENV = "LARA_PREFETCH_MODE"
 PREFETCH_MODES = ("off", "descriptor", "inband")
+REQUEST_MODE_ENV = "LARA_REQUEST_MODE"
+REQUEST_MODES = ("poll", "irq", "auto")
 
 ERR_NONE = 0x00
 ERR_BAD_CFG = 0x01
@@ -313,6 +324,7 @@ class RunProfile:
     inband_command_supported: bool = False
     inband_command_enabled: bool = False
     kv_prefetch_enabled: bool = False
+    request_mode: str = "poll"
     input_transport: str = "legacy"
     # v3.1 experiment gate; the RTL ownership protocol is armed per
     # transaction through _prepare_prefetch when the bitstream supports it.
@@ -366,6 +378,7 @@ class AttentionAccelerator:
         request_poll_sleep_us: float | None = None,
         stream_mode: str | None = None,
         prefetch_mode: str | None = None,
+        request_mode: str | None = None,
     ) -> None:
         self.bitstream_path = str(Path(bitstream_path).resolve()) if bitstream_path else None
         self._git_hash = self._git_commit()
@@ -406,6 +419,17 @@ class AttentionAccelerator:
         # Until the matching RTL ownership protocol lands, non-off modes are
         # accepted for A/B manifest generation but do not alter transport.
         self._requested_prefetch_mode = prefetch_mode
+        if request_mode is None:
+            request_mode = os.environ.get(REQUEST_MODE_ENV, "auto")
+        request_mode = request_mode.strip().lower()
+        if request_mode not in REQUEST_MODES:
+            raise ValueError(
+                f"{REQUEST_MODE_ENV}/request_mode must be one of {REQUEST_MODES}, "
+                f"got {request_mode!r}"
+            )
+        self._requested_request_mode = request_mode
+        self._request_mode = "poll"
+        self._accel_irq = None
         if HAS_PYNQ:
             self.overlay = overlay if overlay is not None else Overlay(bitstream_path)
             # Overlay.download applies the HWH divisors but does not reprogram
@@ -548,6 +572,75 @@ class AttentionAccelerator:
         if not enabled:
             raise RuntimeError("K/V prefetch enable was not acknowledged by the bitstream")
         self._kv_prefetch_active = True
+
+    def _prepare_irq(self) -> None:
+        """Arm the level interrupt and resolve the effective request mode.
+
+        ``auto`` resolves to ``irq`` only on real hardware where the overlay
+        exposes the accel/irq interrupt (requires the v3.6 bitstream with the
+        PS IRQ wiring).  Any failure falls back to polling — IRQ is an
+        optimization, never a functional requirement.
+        """
+        requested = self._requested_request_mode
+        if requested == "poll":
+            self._request_mode = "poll"
+            return
+        usable = (
+            self._hw_ready
+            and self.overlay is not None
+            and getattr(self.overlay, "accel", None) is not None
+        )
+        if requested == "irq" and not usable:
+            raise RuntimeError(
+                "LARA_REQUEST_MODE=irq requires real hardware with the "
+                "v3.6 bitstream (accel/irq wired to pl_ps_irq0)"
+            )
+        if not usable:
+            self._request_mode = "poll"
+            return
+        try:
+            from pynq.interrupt import Interrupt
+
+            self.mmio.write(CSR_IRQ_ENABLE, 1)
+            self._accel_irq = Interrupt("accel/irq")
+            self._request_mode = "irq"
+        except Exception as exc:  # pragma: no cover - board-only path
+            if requested == "irq":
+                raise RuntimeError(f"accel/irq interrupt unavailable: {exc}") from exc
+            self._request_mode = "poll"
+
+    def _irq_wait(self) -> bool:
+        """Block on the level IRQ.
+
+        Returns True when the interrupt (or a bounded timeout with the IRQ
+        still asserted) fired; False when the wait timed out with the IRQ
+        deasserted, in which case the caller should poll once and wait again.
+        """
+        irq = self._accel_irq
+        if irq is None:
+            return False
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.run_until_complete(
+                    asyncio.wait_for(irq.wait(), timeout=IRQ_WAIT_TIMEOUT_S)
+                )
+                return True
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                asyncio.wait_for(irq.wait(), timeout=IRQ_WAIT_TIMEOUT_S)
+            )
+            return True
+        except asyncio.TimeoutError:
+            # Level IRQ: if it is still asserted the event is pending and the
+            # caller can act immediately; otherwise edge was lost — poll.
+            return (self.mmio.read(CSR_IRQ_STATUS) &
+                    (IRQ_STATUS_KV_REQ | IRQ_STATUS_Q_REQ | IRQ_STATUS_DONE)) != 0
 
     def _prepare_input_transport(self) -> None:
         mode = self._requested_stream_mode
@@ -854,6 +947,12 @@ class AttentionAccelerator:
                 last_serviced_req = None
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("attention accelerator timed out while servicing load requests")
+            if self._request_mode == "irq" and self._accel_irq is not None:
+                # Sleep until the level IRQ (any request/done source) fires
+                # instead of burning request_poll_sleep_us per cycle.  The
+                # bounded wait keeps a lost edge recoverable.
+                self._irq_wait()
+                continue
             if self._hw_ready and self._request_poll_sleep_s > 0:
                 time.sleep(self._request_poll_sleep_s)
                 if self.last_profile is not None:
@@ -925,9 +1024,11 @@ class AttentionAccelerator:
         self.clear_status()
         self._prepare_input_transport()
         self._prepare_prefetch()
+        self._prepare_irq()
         self.last_profile.descriptor_queue_enabled = self._descriptor_queue_enabled
         self.last_profile.inband_command_enabled = self._inband_command_enabled
         self.last_profile.kv_prefetch_enabled = self._kv_prefetch_active
+        self.last_profile.request_mode = self._request_mode
         self.last_profile.input_transport = self._input_transport
         counts = self.byte_counts(L)
         if counts.o_bytes > DMA_MAX_TRANSFER_BYTES:
