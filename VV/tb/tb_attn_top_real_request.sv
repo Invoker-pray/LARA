@@ -22,6 +22,7 @@ module tb_attn_top_real_request;
   logic s_axis_tvalid, s_axis_tready, s_axis_tlast;
   logic [31:0] m_axis_tdata;
   logic m_axis_tvalid, m_axis_tready, m_axis_tlast;
+  logic irq;
 
   integer errors;
   integer output_beats;
@@ -37,11 +38,17 @@ module tb_attn_top_real_request;
   integer obuf_debug_count;
   integer q_request_count;
   integer kv_request_count;
+  integer irq_count;
+  integer irq_latency_cycles;
+  integer sim_cycles;
+  integer irq_start_cycle;
+  integer irq_done_cycle;
   integer last_output_data;
   integer last_debug_head;
   integer last_debug_group;
   logic saw_k_request, saw_v_request, saw_q_request;
   logic full_real, desc_queue_mode, inband_mode, kv_prefetch_mode;
+  logic irq_protocol_mode, irq_seen;
   int early_kv_requests;
 
   localparam logic [13:0] CSR_CTRL        = 14'h000;
@@ -54,6 +61,7 @@ module tb_attn_top_real_request;
   localparam logic [13:0] CSR_DESC_PUSH   = 14'h030;
   localparam logic [13:0] CSR_DESC_CTRL   = 14'h038;
   localparam logic [13:0] CSR_PREFETCH_CTRL = 14'h03c;
+  localparam logic [13:0] CSR_IRQ_ENABLE = 14'h044;
   localparam logic [13:0] CSR_RESULT_LEN  = 14'h058;
   localparam logic [31:0] CTRL_START      = 32'h1;
 
@@ -65,11 +73,17 @@ module tb_attn_top_real_request;
     .s_axi_araddr, .s_axi_arvalid, .s_axi_arready,
     .s_axi_rdata, .s_axi_rresp, .s_axi_rvalid, .s_axi_rready,
     .s_axis_tdata, .s_axis_tvalid, .s_axis_tready, .s_axis_tlast,
-    .m_axis_tdata, .m_axis_tvalid, .m_axis_tready, .m_axis_tlast
+    .m_axis_tdata, .m_axis_tvalid, .m_axis_tready, .m_axis_tlast,
+    .irq
   );
 
   always #5 clk = ~clk;
   assign m_axis_tready = 1'b1;
+
+  always @(posedge clk) begin
+    if (rst_n)
+      sim_cycles = sim_cycles + 1;
+  end
 
   task automatic axi_write(input logic [13:0] addr, input logic [31:0] value);
     begin
@@ -422,6 +436,12 @@ module tb_attn_top_real_request;
     obuf_debug_count = 0;
     q_request_count = 0;
     kv_request_count = 0;
+    irq_count = 0;
+    irq_latency_cycles = 0;
+    sim_cycles = 0;
+    irq_start_cycle = 0;
+    irq_done_cycle = 0;
+    irq_seen = 1'b0;
     last_output_data = 0;
     last_debug_head = -1;
     last_debug_group = -1;
@@ -432,6 +452,9 @@ module tb_attn_top_real_request;
     desc_queue_mode = $test$plusargs("DESC_QUEUE");
     inband_mode = $test$plusargs("INBAND_COMMAND");
     kv_prefetch_mode = $test$plusargs("KV_PREFETCH");
+    irq_protocol_mode = $test$plusargs("IRQ_PROTOCOL");
+    if (!$value$plusargs("IRQ_LATENCY_CYCLES=%d", irq_latency_cycles))
+      irq_latency_cycles = 0;
     early_kv_requests = 0;
 
     repeat (4) @(posedge clk);
@@ -442,6 +465,8 @@ module tb_attn_top_real_request;
     axi_write(CSR_Q_POS_BASE, 32'd3);
     axi_write(CSR_KV_POS_BASE, 32'd3);
     axi_write(CSR_CFG, 32'd1);
+    if (irq_protocol_mode)
+      axi_write(CSR_IRQ_ENABLE, 32'd1);
     if (inband_mode)
       axi_write(CSR_DESC_CTRL, 32'h7);
     else if (desc_queue_mode)
@@ -458,11 +483,19 @@ module tb_attn_top_real_request;
       force dut.u_fsm.group_cnt = 3'd7;
     end
     axi_write(CSR_CTRL, CTRL_START);
+    irq_start_cycle = sim_cycles;
 
     if (inband_mode)
       service_inband_transaction();
     while (!dut.done) begin
-      if (inband_mode)
+      if (irq_protocol_mode && !dut.irq)
+        irq_seen = 1'b0;
+      if (irq_protocol_mode && dut.irq && !irq_seen) begin
+        irq_seen = 1'b1;
+        irq_count = irq_count + 1;
+        repeat (irq_latency_cycles) @(posedge clk);
+      end
+      else if (inband_mode)
         @(posedge clk);
       else if (desc_queue_mode && dut.kv_load_req && dut.q_load_req)
         service_kvq_batch();
@@ -477,6 +510,7 @@ module tb_attn_top_real_request;
       else
         @(posedge clk);
     end
+    irq_done_cycle = sim_cycles;
     repeat (20) @(posedge clk);
 
     if (!full_real) begin
@@ -528,6 +562,12 @@ module tb_attn_top_real_request;
     if (kv_prefetch_mode && full_real && (early_kv_requests > 0))
       $display("KV_PREFETCH early_requests=%0d kv_transport_stall_visible=1", early_kv_requests);
     if (errors == 0) begin
+      if (irq_protocol_mode)
+        $display("IRQ PROTOCOL cycles=%0d irq_count=%0d irq_latency_cycles=%0d buffer_wait_cycles=%0d transport_stall_cycles=%0d core_active_cycles=%0d",
+                 irq_done_cycle - irq_start_cycle, irq_count,
+                 irq_latency_cycles, dut.buffer_wait_cycles,
+                 dut.kv_transport_stall_cycles,
+                 dut.cycle_cnt - dut.stall_cycles);
       $display("REAL REQUEST PATH PASS mode=%s transport=%s requests=%0d q_requests=%0d kv_requests=%0d output_beats=%0d nonzero_beats=%0d x_beats=%0d",
                full_real ? "full" : "focused",
                inband_mode ? "inband-stream" :

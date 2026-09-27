@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "Run as root: sudo bash $0 /path/to/kv260-pynq-offline" >&2
+    echo "Run as root: sudo bash $0 /path/to/kv260-pynq-runtime-20260806" >&2
     exit 1
 fi
 
@@ -153,10 +153,11 @@ pynq_root="$(find "${tmp_dir}/pynq-src" -mindepth 1 -maxdepth 1 -type d -name 'p
 }
 cp -a "${pynq_root}/pynq" "${site_packages}/"
 
-# PYNQ 3.0.1 incorrectly prefers a sibling .xsa over a valid .hwh when a
-# .bit/.hwh/.xsa deployment set is placed in one directory. For Overlay(.bit),
-# the HWH is the correct runtime metadata source; XSA remains supported when
-# it is explicitly used as the input file.
+# PYNQ 3.0.1 has two metadata problems for a .bit/.hwh/.xsa deployment:
+# it can prefer the sibling .xsa, and its RuntimeMetadataParser drops the
+# PL-to-PS interrupt pins from this HWH. Overlay(.bit) must therefore use the
+# legacy HWH parser; XSA remains supported when it is explicitly used as the
+# input file.
 pynq_embedded_py="${site_packages}/pynq/pl_server/embedded_device.py"
 python3 - "${pynq_embedded_py}" <<'PY'
 from pathlib import Path
@@ -168,7 +169,32 @@ old = "if hwh_data is not None and not is_xsa:"
 new = "if hwh_data is not None:"
 if old not in text:
     raise SystemExit("PYNQ metadata precedence patch target was not found")
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
+text = text.replace(old, new, 1)
+old_parser = "parser = RuntimeMetadataParser(Metadata(input=self._filepath.with_suffix(\".hwh\")))"
+new_parser = "parser = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))"
+if old_parser not in text:
+    raise SystemExit("PYNQ HWH parser patch target was not found")
+text = text.replace(old_parser, new_parser, 1)
+old_refresh = "            if not partial:\n                parser.refresh_hierarchy_dict()"
+new_refresh = "            if not partial and hasattr(parser, \"refresh_hierarchy_dict\"):\n                parser.refresh_hierarchy_dict()"
+if old_refresh not in text:
+    raise SystemExit("PYNQ hierarchy refresh patch target was not found")
+text = text.replace(old_refresh, new_refresh, 1)
+old_systemgraph = "            if not partial and hasattr(parser, \"refresh_hierarchy_dict\"):\n                parser.refresh_hierarchy_dict()"
+new_systemgraph = old_systemgraph + "\n            if not hasattr(parser, \"systemgraph\"):\n                parser.systemgraph = None"
+if old_systemgraph not in text:
+    raise SystemExit("PYNQ systemgraph compatibility patch target was not found")
+text = text.replace(old_systemgraph, new_systemgraph, 1)
+required_snippets = (
+    "if hwh_data is not None:",
+    "parser = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))",
+    "if not partial and hasattr(parser, \"refresh_hierarchy_dict\"):",
+    "if not hasattr(parser, \"systemgraph\"):",
+)
+missing = [snippet for snippet in required_snippets if snippet not in text]
+if missing:
+    raise SystemExit("PYNQ metadata compatibility patch incomplete: " + repr(missing))
+path.write_text(text, encoding="utf-8")
 PY
 
 mkdir -p "${PYNQ_VENV}/bin"
@@ -214,6 +240,23 @@ from pynq import Overlay, allocate
 print("PYNQ import PASS:", pynq.__file__)
 print("IPython version PASS:", IPython.__version__)
 print("PYNQ Overlay/allocate imports PASS")
+PY
+
+"${VENV_PYTHON}" - <<'PY'
+from pathlib import Path
+import pynq.pl_server.embedded_device as embedded
+
+source = Path(embedded.__file__).read_text(encoding="utf-8")
+required = (
+    "if hwh_data is not None:",
+    "parser = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))",
+    "if not partial and hasattr(parser, \"refresh_hierarchy_dict\"):",
+    "if not hasattr(parser, \"systemgraph\"):",
+)
+missing = [snippet for snippet in required if snippet not in source]
+if missing:
+    raise RuntimeError("installed PYNQ metadata patch is incomplete: " + repr(missing))
+print("PYNQ LARA metadata compatibility patch PASS")
 PY
 
 echo

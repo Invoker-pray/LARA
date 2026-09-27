@@ -4,7 +4,20 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BUILD_DIR=${1:-"$ROOT_DIR/vivado_proj/build-20260806T_v4_71p428MHz"}
 OUTPUT_DIR=${2:-"$ROOT_DIR/board_payload_v4_71p428MHz"}
-OFFLINE_BUNDLE=${3:-"${HOME}/Downloads/kv260-pynq-offline/sd-bundle"}
+if [[ $# -ge 3 && -n "${3}" ]]; then
+  OFFLINE_BUNDLE=$3
+elif [[ -n "${OFFLINE_BUNDLE:-}" ]]; then
+  : "Use the caller-provided OFFLINE_BUNDLE environment variable."
+else
+  OFFLINE_BUNDLE="${HOME}/Downloads/kv260-pynq-offline/sd-bundle"
+fi
+
+if [[ ! -d "$OFFLINE_BUNDLE" ]]; then
+  echo "ERROR: offline runtime bundle does not exist: $OFFLINE_BUNDLE" >&2
+  echo "Pass the bundle explicitly as the third argument:" >&2
+  echo "  bash sw/package_kv260_board.sh BUILD_DIR OUTPUT_DIR /path/to/sd-bundle" >&2
+  exit 2
+fi
 
 required=(
   "$BUILD_DIR/deploy/lara_attention.bit"
@@ -16,6 +29,8 @@ required=(
   "$ROOT_DIR/sw/board_matrix.py"
   "$ROOT_DIR/sw/board_performance.py"
   "$ROOT_DIR/sw/run_board_full_validation.py"
+  "$ROOT_DIR/sw/diagnose_pynq_irq_metadata.py"
+  "$ROOT_DIR/sw/patch_pynq_hwh_metadata_parser.py"
   "$ROOT_DIR/sw/kv260_pynq_offline_install.sh"
   "$OFFLINE_BUNDLE/src/pynq-3.0.1.tar.gz"
   "$OFFLINE_BUNDLE/src/pynq-v3.0-binaries.tar.gz"
@@ -53,6 +68,8 @@ cp -a \
   "$ROOT_DIR/sw/board_matrix.py" \
   "$ROOT_DIR/sw/board_performance.py" \
   "$ROOT_DIR/sw/run_board_full_validation.py" \
+  "$ROOT_DIR/sw/diagnose_pynq_irq_metadata.py" \
+  "$ROOT_DIR/sw/patch_pynq_hwh_metadata_parser.py" \
   "$OUTPUT_DIR/"
 chmod 0755 "$OUTPUT_DIR/clear_pynq_cache.py" "$OUTPUT_DIR/run_board_full_validation.py"
 cp -a "$ROOT_DIR/docs/kv260_board_validation.md" "$OUTPUT_DIR/"

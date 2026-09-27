@@ -143,3 +143,117 @@ git worktree 在干净基线复现来区分 pre-existing 与新回归；检查�
 case 数据稳定复现，再对 RTL 做"手术刀"式修改；禁止未过 python golden +
 Verilator + VCS 三层门禁就改板级结论。Python golden 无参数入口为
 `attention_golden.py --test-all`（或裸跑 self-test）。
+
+## 11. PYNQ 3.0.1 的 HWH 元数据缓存与 IRQ parser 兼容性
+
+**坑**：v3.6.0 上板后，RTL 已将 `accel/irq` 接到 `pl_ps_irq0`，HWH 中也
+明确包含 `accel/irq`，但 `Interrupt("accel/irq")` 报：
+`No Pin of name accel/irq found`。问题分成了三个相互叠加的 PYNQ 兼容点：
+
+1. PYNQ 3.0.1 的 metadata cache 只用 `.bit` 内容的 SHA-1 命中，未绑定
+   `.hwh/.xsa` 元数据来源、parser 版本或本地补丁版本。同一 `.bit` 曾经经由
+   错误的 sibling `.xsa` 路径解析后，旧 `_current_metadata.pkl` 会继续被复用。
+   这不是文件名弱哈希；实际函数是对 `.bit` 内容计算 SHA-1。
+2. 即使 HWH 优先分支补丁生效，无缓存路径仍调用
+   `RuntimeMetadataParser(Metadata(input=<file>.hwh))`。对本项目 HWH，
+   `RuntimeMetadataParser.interrupt_pins` 为空，而传统 `HWH` parser 能正确得到
+   `accel/irq` 和 `raw_irq=121`。UG1085 的 `PL_PS_Group0` 映射确认 IRQ 121
+   属于 `pl_ps_irq0` bit 0。
+3. 传统 `_HWHUltrascale` parser 没有新 parser 使用的
+   `refresh_hierarchy_dict()` 和 `systemgraph` 属性。只替换 parser 类型还会
+   依次触发这两个 AttributeError。
+
+**稳定定位过程**：同一份 `lara_attention.hwh` 上，板上诊断结果为：
+
+```text
+legacy HWH parser: accel/irq, raw_irq=121
+RuntimeMetadataParser: interrupt_pins={}
+```
+
+清除 `global_pl_state.json` 与 `_current_metadata.pkl` 后，将 `.bit + .hwh`
+路径切换到传统 parser，并补齐兼容字段：
+
+```python
+if not partial and hasattr(parser, "refresh_hierarchy_dict"):
+    parser.refresh_hierarchy_dict()
+if not hasattr(parser, "systemgraph"):
+    parser.systemgraph = None
+```
+
+随后 `parser.interrupt_pins`、`Overlay.interrupt_pins` 和 `PL.interrupt_pins`
+均包含 `accel/irq`，且 `raw_irq=121`。最终 `LARA_REQUEST_MODE=irq` 的
+KV260 L1 smoke test 通过，证明 metadata、PYNQ Interrupt、Linux IRQ 路径和
+RTL 顶层 IRQ 已连通。
+
+**规则**：
+
+- PYNQ 3.0.1 的 `.bit/.hwh/.xsa` 部署必须优先使用 HWH；不要只清 cache 而
+  保留 `RuntimeMetadataParser`。
+- 离线安装脚本必须在干净安装后自动完成 HWH 优先、传统 HWH parser、条件
+  hierarchy refresh 和 `systemgraph=None` 四项处理。
+- 每次更换 `.bit/.hwh/.xsa` 或 PYNQ parser 补丁后，先清理两个全局 cache，
+  再用新 Python 进程检查 `accel/irq` 与 `raw_irq=121`，最后才运行 IRQ
+  smoke test。
+- `No Pin of name ...` 属于 PYNQ metadata 层；`Could not find UIO device ...`
+  才进入 Linux UIO/GIC 注册层；不要把这两类错误混为 RTL IRQ 错误。
+
+## 12. 性能矩阵必须先固定比较层级和控制模式
+
+**坑**：同一 bitstream 的 `poll`、`irq`、descriptor 和 prefetch 不是同一
+层级的变量。若把 PL transaction、host-to-host E2E、CPU wall time 和
+`core_active` 混成一个“加速比”，会把控制路径变化误报成 RTL 算力提升。
+2026-09-25 的 KV260 结果明确显示：
+
+- `poll + descriptor + prefetch off` 相对 v2.6 的 q31/kv7 可比 10 个 case，
+  PL transaction 几何平均约改善 10.5%，host E2E 约改善 9.5%；
+- 同一当前 bitstream 中，`irq + descriptor + prefetch off` 相对 poll 的
+  几何平均反而变慢约 32.4%（PL）和 31.4%（E2E）；
+- `irq` 下 prefetch on/off 的差异约 0.55%，处于当前重复次数和系统噪声
+  能支持的范围内，不能写成 prefetch 收益。
+
+**规则**：性能报告必须至少分成四层：
+
+1. PL counter-derived transaction time；
+2. `total - stall` 的 controller/core-active time；
+3. driver host-to-host attention time；
+4. 独立 CPU baseline wall time。
+
+每次 A/B 只改变一个变量，固定 bitstream、case hash、clock、CPU affinity、
+warmup/repeats 和 buffer/Overlay 计时边界。`buffer_wait` 是可重叠等待观测，
+不能直接当作纯 stall；CPU baseline 也不能扩展成完整 Transformer latency。
+
+## 13. PYNQ IRQ 能工作不等于 IRQ 已经带来性能收益
+
+**坑**：IRQ smoke 通过只能证明 RTL → HWH → PYNQ → Linux UIO 的功能链路
+连通。当前 driver 每次无请求时通过 asyncio event loop 等待 level IRQ，板上
+矩阵显示它比 20 us polling 更慢，尤其在 L=1/16 的请求固定开销占主导场景。
+
+**规则**：IRQ 优化必须单独记录每次 IRQ wait、IRQ service、request-service
+和 DMA 时间；在优化完成前保留 poll 回退，并把 `auto` 的实际解析模式写入
+profile。候选方向应先评估阻塞 UIO fd、DONE/request 中断合并或减少每请求一次
+event-loop 调度，再决定是否让 IRQ 成为性能默认路径。
+
+## 14. v3.6.1 IRQ 修订：不要在同步 request loop 中反复驱动 asyncio
+
+**诊断**：PYNQ 3.0.1 的 `Interrupt.wait()` 通过 `asyncio.Event` 和 UIO
+`add_reader()` 工作。v3.6.0 driver 每个 PL request 都调用
+`run_until_complete(asyncio.wait_for(...))`，因此 IRQ 只替换了 20 us polling，
+没有减少 DMA、CSR 或 Python request-service 工作。若当前 event loop 已经运行，
+旧代码还会切换到新 loop，而 UIO reader 仍在旧 loop 上，可能把正常 IRQ 退化成
+2 ms timeout + CSR fallback。
+
+**v3.6.1 修复**：profile 增加 `irq_wait_count`、`irq_wakeup_count`、
+`irq_timeout_count`、`irq_csr_fallback_count`、`irq_wait_total_ms`、
+`irq_wait_max_ms`、`irq_service_gap_ms` 和 `irq_coalesced_requests`。默认 IRQ
+路径使用 direct blocking UIO fd；`LARA_IRQ_WAIT_MODE=async` 仅保留为旧路径
+对照。`hybrid` 模式先做 `LARA_IRQ_SPIN_US` 短窗口 CSR polling，再进入
+blocking UIO。
+
+**level IRQ 规则**：UIO `read(2)` 后必须保持 IRQ disabled，直到本次 request 的
+DMA service 完成；下一次进入 wait 前再 write(2) re-arm。level request 在 DMA
+期间保持有效，过早 re-arm 会形成 interrupt storm 或重复 wakeup。
+
+**验证规则**：任何新 IRQ 实现必须先运行
+`+IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=0/100` 的 VCS A/B，并确认 latency 增加只
+增加 `buffer_wait/transport_stall`、不改变 `core_active` 和 bit-exact 输出，
+再进行 KV260 实测。VCS license 不可用时只能记录为 blocked，不能写成 PASS。

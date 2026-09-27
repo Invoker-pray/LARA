@@ -518,6 +518,104 @@ cycle N+2: fp32 row-sum commit + P scratch write
   完整遍历 32 heads，并对每次 Q/head/group 切换做 `kv_tile_idx` 连续性断言。
 - 被拒绝的旧模型是把 `mac_done/softmax_done/o_write_done` 长期拉高；新模型对三者只
   产生单周期 ack，Q/KV 则按顶层实际语义使用 bank-ready 状态。
+
+## 12. 2026-09-27：结合 v3.6 KV260 实测的重新排序
+
+本节把公开资料中的可迁移思想与本项目当前实测结果重新对齐。外部资料只用于
+提出候选方向；是否采纳以 Python golden、Verilator、VCS、Vivado 和 KV260
+实测门禁为准。
+
+### 12.1 公开案例反复证明的共同主线
+
+| 公开案例/资料 | 可迁移原则 | 对 LARA 的具体含义 |
+|---|---|---|
+| FlashAttention-2，[论文](https://arxiv.org/abs/2307.08691) | 减少 non-matmul 工作、改善 work partition、保持片上中间状态 | 当前不要先复制 MAC；优先找 `PA_WAIT_P`、softmax/P-store 和 DMA request 的空拍 |
+| PagedAttention，[论文](https://arxiv.org/abs/2309.06180) | KV cache 的布局、复用和调度决定长上下文吞吐 | LARA 当前先保持 exact 单序列 prefill；下一阶段定义 chunk/page contract，再谈 L>512 |
+| FlashInfer，[项目](https://github.com/flashinfer-ai/flashinfer) | prefill、decode、append、paged/ragged KV 分路径优化 | 不把 decode/batching 假装成当前能力；未来应分别设计 prefill-fast 和 long-context fallback |
+| FlightLLM，[论文](https://arxiv.org/abs/2401.03868) | FPGA LLM 的关键是 memory hierarchy、片上驻留和数据流 | 当前单物理 K/V bank 的 prefetch 窗口太短，下一步应量化 bank/DDR/AXI 事务，而不是只堆 PE |
+| AMD UG906/UG579，[UG906](https://docs.amd.com/r/en-US/ug906-vivado-design-analysis)、[UG579](https://docs.amd.com/r/en-US/ug579-ultrascale-dsp) | routing/fanout 和 DSP register placement 需要以实现报告驱动 | 保留当前 71.429 MHz signoff；对 DRC 的 DSP input/PREG/MREG warning 做局部实验，不能用 timing exception 掩盖路径 |
+| `~/git/xx` 的 PYNQ/KV260 迁移与 CIM driver | legacy/DMA 双路径、连续 CMA buffer、S2MM、ping-pong、分项 profiler | LARA 已吸收 DMA、分项 profile 和回退思想；仍需把 IRQ、DMA completion 和 overlap 做成可重复 A/B |
+
+`~/git/xx` 的 `kv260` 分支目前与其 `master` 指向同一提交，不能把它当作一份
+独立的已验证优化版本。真正有价值的是其中的工程模式：PYNQ-Z2 与 KV260 的
+PS/IP/AXI/地址映射差异写成迁移清单；AXI-Lite 控制与 AXI-Stream/DMA 数据面
+分离；IRQ 使用 sticky DONE + enable CSR；以及先 smoke、再固定数据集、再统计
+benchmark 的验证顺序。
+
+### 12.2 当前实测改变了优先级
+
+v3.6 的 72 个功能 case 与 24 个 full-validation case 均 bit-exact，但性能矩阵
+说明三个方向不能按原计划直接宣传：
+
+1. **descriptor transport 是当前已确认的主要收益来源**：相对 v2.6，q31/kv7
+   可比 10 case 的 `poll + descriptor + prefetch off` PL transaction 几何平均
+   约下降 10.5%，host E2E 约下降 9.5%。这不是完整 Transformer speedup，且
+   q3/kv3 与 q31/kv7 必须分开报告。
+2. **IRQ 目前是功能完成、性能未完成**：同一 bitstream 的 IRQ descriptor
+   相对 poll descriptor 平均变慢约 32%（L=1/16 约 65--70%）。因此下一轮先
+   优化 IRQ 等待实现或维持 polling 默认，不能因为 IRQ smoke 通过就宣称加速。
+3. **单 bank prefetch v1 没有可发布的收益**：IRQ 内部 prefetch A/B 的几何平均
+   变化约 0.55%，应视为噪声/测量差异。它揭示当前 overlap 窗口不足；若不改变
+   bank ownership、DMA scheduling 或数据驻留，继续调 prefetch early point 的
+   投入产出比很低。
+
+### 12.3 建议的候选实验顺序
+
+**P0：先做 measurement closure。**
+
+- 给 IRQ profile 增加 `irq_wait_count`、每次 wait 总时长、CSR fallback 次数；
+- 同时记录 `irq_wakeup_count`、timeout、最大等待、service gap、hybrid poll
+  和 KV+Q coalesced request 数；v3.6.1 已实现这些 profile 字段；
+- 用同一 payload 做 `poll/descriptor/off`、`irq/descriptor/off`、
+  `poll/descriptor/prefetch` 的成对 A/B；
+- CPU baseline 保持“同一 bf16 输入的 NumPy FP32 attention”，另加明确的
+  host packing/driver/Overlay 边界，禁止把它写成端到端模型基线。
+
+**P1：优化请求服务，而不是先扩大阵列。**
+
+- v3.6.1 先使用 blocking UIO fd，避免同步 request loop 每次创建/驱动
+  asyncio event-loop；async 只保留为显式旧路径 A/B；
+- 使用 hybrid spin + blocking wait，继续评估 request coalescing、KV+Q
+  descriptor batching、DMA completion 等待；
+- 保留 `poll` 回退，所有变更先在 VCS 中用 level IRQ、丢边沿、DONE sticky、
+  backpressure case 稳定复现。
+
+**P2：重新设计可产生真实收益的 overlap。**
+
+- 当前 URAM 使用 48/64，物理 K/V double-bank 不是无条件可行；先做 URAM
+  budget 与 `MAX_SEQ_LEN`/tile 数的参数扫描；
+- 候选包括 Q-bank 双缓冲、较深 descriptor FIFO、DDR/paged KV 的 chunked
+  prefill，而不是在单 bank 上继续提前发一个请求；
+- 每个候选必须同时报告 `transport_stall`、`buffer_wait`、PL total、host E2E
+  和 DMA bytes，不能只看某一个计数器。
+
+**P3：在已有 16×16 时分复用阵列上做 exact softmax/dataflow。**
+
+- 以 `PA_WAIT_P` 和 softmax P 三段状态为切入点做 producer/consumer overlap；
+- 先做 scratch/P-store 复用和 valid/tag 流水，再评估 16×32 阵列；
+- 只有 post-route 资源、拥塞和 timing 仍可接受，才评估 base-2 softmax、KV
+  量化或稀疏化。近似/压缩方向必须增加 golden 误差门禁，不得用论文收益替代
+  本项目的 bf16 bit-exact 合同。
+
+### 12.4 本轮结论
+
+当前最稳妥的优化路线是：
+
+```text
+测量分层与 IRQ A/B
+        ↓
+请求/DMA/等待实现优化
+        ↓
+可验证的 Q/KV/DDR overlap
+        ↓
+exact softmax/dataflow
+        ↓
+长上下文分页、近似或压缩（Phase 2）
+```
+
+这条顺序与 FlashAttention 的 IO-aware 思路、FlightLLM 的 memory-hierarchy
+思路以及 `xx` 项目的 DMA/profiling 经验一致，也符合当前板上数据：目前最大
+的可确认收益来自事务控制，最大未解决瓶颈是等待/搬运，而不是“缺少更多 MAC”。
 - VCS 结果：L=512 causal/non-causal 分别为 2304/4096 pairs；L=70 partial 为 128；
   L=70、`q_pos_base=64` 为 192。synthesis-path softmax 独立保持 1106 cycles/block。
 - benchmark 的设计选择是只发布可证明的合同与 scoped model。由于当前 P0 没有真实

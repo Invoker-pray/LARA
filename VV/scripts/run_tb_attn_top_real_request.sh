@@ -39,4 +39,13 @@ grep -q "REAL REQUEST PATH PASS" sim.log
 grep -q "transport=descriptor-batch" sim_desc_queue.log
 ./simv -no_save ${SIM_ARGS:-} +INBAND_COMMAND -l sim_inband.log
 grep -q "inband-stream" sim_inband.log
+./simv -no_save ${SIM_ARGS:-} +IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=0 -l sim_irq0.log
+grep -q "IRQ PROTOCOL" sim_irq0.log
+./simv -no_save ${SIM_ARGS:-} +IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=100 -l sim_irq100.log
+grep -q "IRQ PROTOCOL" sim_irq100.log
+irq0_cycles="$(awk '/IRQ PROTOCOL/ {for (i=1; i<=NF; i++) if ($i ~ /^cycles=/) {sub("cycles=", "", $i); print $i; exit}}' sim_irq0.log)"
+irq100_cycles="$(awk '/IRQ PROTOCOL/ {for (i=1; i<=NF; i++) if ($i ~ /^cycles=/) {sub("cycles=", "", $i); print $i; exit}}' sim_irq100.log)"
+test -n "${irq0_cycles}" && test -n "${irq100_cycles}"
+test "${irq100_cycles}" -gt "${irq0_cycles}"
+echo "IRQ protocol latency A/B PASS: latency0=${irq0_cycles} cycles latency100=${irq100_cycles} cycles"
 echo "ALL REAL REQUEST PATH XPM CHECKS PASSED"

@@ -1,6 +1,30 @@
 # LARA 下一阶段优化路线
 
-更新日期：2026-08-02
+更新日期：2026-09-27
+
+## 2026-09-27 实测更新（优先级覆盖旧的 P5/P6 描述）
+
+v3.6 已完成 KV260 full-validation：功能矩阵和 raw-BF16 输出全部通过。当前
+`poll + descriptor + prefetch off` 相对 v2.6 q31/kv7 共同 10 cases 的 PL
+transaction 几何平均约快 10.5%，host E2E 约快 9.5%。IRQ metadata、Linux IRQ
+和 smoke 链路已通，但 `irq + descriptor` 相对 poll 平均慢约 32%；单 bank
+prefetch A/B 变化约 0.55%，暂不能称为收益。
+
+因此后续优先级调整为：
+
+1. IRQ wait/profile 和 request/DMA service 优化；
+2. 可验证的 Q/KV buffering、descriptor coalescing 和真实 overlap；
+3. exact softmax/P-store dataflow；
+4. 之后才做 16×32、长上下文 paging、近似 softmax 或 KV 压缩。
+
+本轮 v3.6.1 的执行顺序固定为 P0--P6：P0 完成 IRQ 时间线 profile，P1 修复
+asyncio/UIO 等待语义，P2 使用 direct blocking UIO，P3 使用 hybrid 短轮询，
+P4 保持并量化 KV+Q descriptor batch，P5 先通过 IRQ latency 参数化 VCS，P6
+只有 VCS 性能和功能均通过后才重新上板。新 bitstream 不得在 VCS 门禁前生成。
+
+`PL transaction`、`core_active`、`host E2E`、CPU baseline 必须分列；
+`buffer_wait` 不是纯 stall。完整结果审计、基线限制和版本状态见
+`docs/handle.md`，性能测量踩坑见 `docs/design_pitfalls.md` §12--13。
 
 ## 当前已完成状态
 

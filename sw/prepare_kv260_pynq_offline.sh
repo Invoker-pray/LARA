@@ -6,7 +6,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-OUT_ROOT="${1:-${HOME}/Downloads/kv260-pynq-offline}"
+OUT_ROOT="${1:-${HOME}/Downloads/kv260-pynq-runtime-20260806}"
 DOWNLOAD_ROOT="${OUT_ROOT}"
 BUNDLE="${OUT_ROOT}/sd-bundle"
 KRIA_REPO="${DOWNLOAD_ROOT}/Kria-PYNQ"
@@ -271,6 +271,6 @@ du -sh "${BUNDLE}"
 echo "  files: $(wc -l < "${BUNDLE}/OFFLINE_SHA256SUMS")"
 echo
 echo "Copy this directory to the SD card writable partition as:"
-echo "  /home/ubuntu/kv260-pynq-offline"
+echo "  /home/ubuntu/kv260-pynq-runtime-20260806"
 echo "This bundle contains only the offline PYNQ runtime."
 echo "Use sw/package_kv260_board.sh to combine it with the signed LARA build and tests."

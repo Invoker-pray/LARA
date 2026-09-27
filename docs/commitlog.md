@@ -1,5 +1,48 @@
 # LARA 项目提交记录
 
+## 2026-09-27
+
+### v3.6.1 — 上板 IRQ 性能诊断与 direct-UIO/hybrid service（已上板前仿真门禁）
+
+这是 `v3.6.0` 上板后的修订版本。按照项目约定，`v3.6.0` 的 `.0` 表示
+尚未完成上板验证；本版本保留 v3.6.0 的 IRQ RTL/bitstream 合同，修正
+host 等待路径并加入协议级性能仿真，未在 VCS 性能门禁通过前重新生成或部署
+新的板上 bitstream。
+
+**问题证据**：v3.6.0 KV260 同 bitstream 的
+`irq + descriptor + prefetch off` 相对 `poll + descriptor + prefetch off`
+PL transaction 慢约 32%。`pl_mac_cycles` 和
+`pl_core_active_cycles_excluding_stalls` 不变，增加项集中在
+`buffer_wait_cycles`/`transport_stall_cycles`。因此问题是逐 request 的
+PYNQ asyncio/UIO 唤醒和 host service gap，不是 attention MAC 计算变慢。
+
+**P0/P1**：`RunProfile` 增加 IRQ wait、wakeup、timeout、CSR fallback、
+hybrid poll、wait 总时长/最大时长、service gap 和 coalesced request 计数。
+IRQ 默认使用 direct blocking UIO fd；保留 `LARA_IRQ_WAIT_MODE=async` 作为
+旧路径对照，但不再在同步 request loop 中动态替换 event loop。
+
+**P2/P3**：`LARA_IRQ_WAIT_MODE=hybrid` 在进入阻塞 UIO 前先进行短窗口 CSR
+polling（默认 50 us，可由 `LARA_IRQ_SPIN_US` 调整）；UIO 在 IRQ read 后保持
+disabled，待 DMA request service 完成后下一次 wait 前再 re-arm，避免 level IRQ
+在 service 期间形成 interrupt storm。`LARA_IRQ_WAIT_TIMEOUT_US` 控制丢边沿的
+有界恢复时间。
+
+**P4**：保留同一 IRQ service loop 中 KV+Q 的合并 DMA batch，并增加实际合并
+计数；hybrid drain 先服务当前已可见 request，再进入阻塞等待。该版本不扩大
+K/V 物理 bank、不改变 ownership 合同；descriptor queue 扩深和真实双 bank
+overlap 仍须独立 RTL/VCS/Vivado 评估。
+
+**VCS 协议级测试**：`tb_attn_top_real_request.sv` 增加
+`+IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=N`，在 level IRQ 到达后注入可控 host
+service latency，并报告 transaction、buffer-wait、transport-stall 和
+core-active cycles；`run_tb_attn_top_real_request.sh` 增加 0/100 cycle A/B。
+VCS license 服务不可用时不得把 lint 结果写成 VCS PASS；完成版本签核前必须
+取得 IRQ latency 随 stall 增长、功能 PASS 且 full regression PASS 的证据。
+
+**当前门禁**：Python/mock `40/40` 通过；Verilator lint 通过（已有 shortreal
+等 warning）；本次工作站 VCS 运行受 license server 不可连接阻塞，尚未宣称
+VCS PASS，也未进行新 bitstream 的 KV260 上板测试。
+
 ## 2026-09-24
 
 ### v3.6.0 — CSR 门控电平 IRQ（RTL + Vivado 布线 + driver，未上板）
@@ -30,6 +73,15 @@ Verilator lint 0、VCS 完整回归（synth+XPM）28/28、CSR TB IRQ 行为测�
 板级 case 矩阵第一步 L1-L128 × 两套 position base 20/20 PASS，L512 层
 q31kv7 causal PASS（noncausal 与 q3kv3 在后台收尾，与改动无交互差异）。
 上板未开始（`.0`）——**IRQ 模式需 v3.6 bitstream 才会激活**。
+
+#### 2026-09-27 板上补充
+
+v3.6 bitstream 已在 KV260 完成 metadata 修复后的 IRQ smoke 和完整测试归档。
+功能矩阵、full-validation 和 raw-BF16 输出均通过；但是性能 A/B 显示当前
+asyncio IRQ 等待路径比同 bitstream 的 polling 慢约 32%，因此 v3.6 的 IRQ 是
+功能闭环而非性能签收。单 bank prefetch A/B 约 0.55% 变化，也不作为收益发布。
+已确认的 q31/kv7 性能改善来自 descriptor/DMA 事务路径，完整数据见 `temp/`
+审计和 `docs/handle.md`。
 
 ## 2026-09-23（五）
 

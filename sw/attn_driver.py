@@ -13,6 +13,8 @@ import hashlib
 import json
 import math
 import os
+import select
+import struct
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -78,8 +80,15 @@ IRQ_STATUS_Q_REQ = 1 << 1
 IRQ_STATUS_DONE = 1 << 2
 IRQ_STATUS_ERROR = 1 << 3
 # Bounded per-wait timeout: a lost interrupt edge degrades IRQ mode to
-# polling at this period instead of hanging the request loop.
+# CSR polling at this period instead of hanging the request loop.
 IRQ_WAIT_TIMEOUT_S = 2e-3
+IRQ_WAIT_TIMEOUT_ENV = "LARA_IRQ_WAIT_TIMEOUT_US"
+IRQ_WAIT_MODE_ENV = "LARA_IRQ_WAIT_MODE"
+IRQ_WAIT_MODES = ("blocking", "hybrid", "async")
+DEFAULT_IRQ_WAIT_MODE = "hybrid"
+DEFAULT_IRQ_WAIT_TIMEOUT_US = IRQ_WAIT_TIMEOUT_S * 1.0e6
+IRQ_SPIN_US_ENV = "LARA_IRQ_SPIN_US"
+DEFAULT_IRQ_SPIN_US = 50.0
 DESC_STATUS_INBAND_ENABLED = 1 << 11
 DESC_STATUS_ENABLED = 1 << 10
 DESC_STATUS_FULL = 1 << 9
@@ -292,6 +301,60 @@ class MockDMAChannel:
         self.trace.append(("wait", self.name, 0))
 
 
+class BlockingUioIrqWaiter:
+    """Direct blocking UIO waiter used by the board IRQ path.
+
+    PYNQ's public ``Interrupt`` API is asyncio based and registers the UIO
+    descriptor with the current event loop.  The request service loop is
+    synchronous, so using the descriptor directly avoids creating a coroutine
+    and repeatedly driving an event loop for every PL request.  One owner must
+    consume and re-enable the UIO fd; it must not be shared with
+    ``pynq.interrupt.Interrupt``.
+    """
+
+    def __init__(self, raw_irq: int) -> None:
+        from pynq.interrupt import get_uio_irq
+
+        path = get_uio_irq(int(raw_irq))
+        if path is None:
+            raise RuntimeError(f"no UIO device found for IRQ {raw_irq}")
+        self.path = path
+        self.fd = os.open(path, os.O_RDWR)
+        self._poller = select.poll()
+        self._poller.register(self.fd, select.POLLIN)
+        self._closed = False
+        self._armed = True
+
+    def wait(self, timeout_s: float) -> bool:
+        if self._closed:
+            return False
+        if not self._armed:
+            os.write(self.fd, struct.pack("I", 1))
+            self._armed = True
+        events = self._poller.poll(max(0, int(timeout_s * 1000.0)))
+        if not events:
+            return False
+        os.read(self.fd, 4)
+        # UIO disables the interrupt after read(2). Leave it disabled while
+        # the request's DMA is being serviced. Re-arming at the next wait
+        # mirrors PYNQ's Interrupt.add_event behavior and prevents a level
+        # request from generating an interrupt storm during service.
+        self._armed = False
+        return True
+
+    def close(self) -> None:
+        if not self._closed:
+            self._poller.unregister(self.fd)
+            os.close(self.fd)
+            self._closed = True
+
+    def __del__(self):  # pragma: no cover - board resource cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 @dataclass(frozen=True)
 class TensorByteCounts:
     q_bytes: int
@@ -319,6 +382,18 @@ class RunProfile:
     request_poll_sleep_us: float = 0.0
     request_poll_sleeps: int = 0
     request_duplicate_polls: int = 0
+    irq_wait_mode: str = "disabled"
+    irq_wait_timeout_us: float = 0.0
+    irq_spin_us: float = 0.0
+    irq_wait_count: int = 0
+    irq_wakeup_count: int = 0
+    irq_timeout_count: int = 0
+    irq_csr_fallback_count: int = 0
+    irq_hybrid_poll_count: int = 0
+    irq_wait_total_ms: float = 0.0
+    irq_wait_max_ms: float = 0.0
+    irq_service_gap_ms: float = 0.0
+    irq_coalesced_requests: int = 0
     descriptor_queue_supported: bool = False
     descriptor_queue_enabled: bool = False
     inband_command_supported: bool = False
@@ -379,6 +454,9 @@ class AttentionAccelerator:
         stream_mode: str | None = None,
         prefetch_mode: str | None = None,
         request_mode: str | None = None,
+        irq_wait_mode: str | None = None,
+        irq_wait_timeout_us: float | None = None,
+        irq_spin_us: float | None = None,
     ) -> None:
         self.bitstream_path = str(Path(bitstream_path).resolve()) if bitstream_path else None
         self._git_hash = self._git_commit()
@@ -428,8 +506,45 @@ class AttentionAccelerator:
                 f"got {request_mode!r}"
             )
         self._requested_request_mode = request_mode
+        if irq_wait_mode is None:
+            irq_wait_mode = os.environ.get(IRQ_WAIT_MODE_ENV, DEFAULT_IRQ_WAIT_MODE)
+        irq_wait_mode = irq_wait_mode.strip().lower()
+        if irq_wait_mode not in IRQ_WAIT_MODES:
+            raise ValueError(
+                f"{IRQ_WAIT_MODE_ENV}/irq_wait_mode must be one of {IRQ_WAIT_MODES}, "
+                f"got {irq_wait_mode!r}"
+            )
+        self._irq_wait_mode = irq_wait_mode
+        if irq_wait_timeout_us is None:
+            raw_timeout = os.environ.get(
+                IRQ_WAIT_TIMEOUT_ENV, str(DEFAULT_IRQ_WAIT_TIMEOUT_US)
+            )
+            try:
+                irq_wait_timeout_us = float(raw_timeout)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{IRQ_WAIT_TIMEOUT_ENV} must be a non-negative number, "
+                    f"got {raw_timeout!r}"
+                ) from exc
+        if not math.isfinite(irq_wait_timeout_us) or irq_wait_timeout_us <= 0:
+            raise ValueError("irq_wait_timeout_us must be a finite positive number")
+        self._irq_wait_timeout_s = float(irq_wait_timeout_us) / 1.0e6
+        if irq_spin_us is None:
+            raw_spin = os.environ.get(IRQ_SPIN_US_ENV, str(DEFAULT_IRQ_SPIN_US))
+            try:
+                irq_spin_us = float(raw_spin)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{IRQ_SPIN_US_ENV} must be a non-negative number, got {raw_spin!r}"
+                ) from exc
+        if not math.isfinite(irq_spin_us) or irq_spin_us < 0:
+            raise ValueError("irq_spin_us must be a finite non-negative number")
+        self._irq_spin_us = float(irq_spin_us)
         self._request_mode = "poll"
         self._accel_irq = None
+        self._uio_irq = None
+        self._irq_raw = None
+        self._irq_last_wakeup_time: float | None = None
         if HAS_PYNQ:
             self.overlay = overlay if overlay is not None else Overlay(bitstream_path)
             # Overlay.download applies the HWH divisors but does not reprogram
@@ -511,6 +626,9 @@ class AttentionAccelerator:
     def close(self) -> None:
         if self._closed:
             return
+        if self._uio_irq is not None:
+            self._uio_irq.close()
+            self._uio_irq = None
         for buf in (
             self._kv_send_buf, self._q_send_buf, self._batch_send_buf,
             self._stream_send_buf, self._out_buf,
@@ -599,10 +717,23 @@ class AttentionAccelerator:
             self._request_mode = "poll"
             return
         try:
-            from pynq.interrupt import Interrupt
-
             self.mmio.write(CSR_IRQ_ENABLE, 1)
-            self._accel_irq = Interrupt("accel/irq")
+            pins = getattr(self.overlay, "interrupt_pins", {})
+            entry = pins.get("accel/irq")
+            if entry is None:
+                try:
+                    from pynq.pl import PL
+                    entry = PL.interrupt_pins.get("accel/irq")
+                except Exception:
+                    entry = None
+            if entry is None or entry.get("raw_irq") is None:
+                raise RuntimeError("accel/irq metadata does not expose raw_irq")
+            self._irq_raw = int(entry["raw_irq"])
+            if self._irq_wait_mode == "async":
+                from pynq.interrupt import Interrupt
+                self._accel_irq = Interrupt("accel/irq")
+            else:
+                self._uio_irq = BlockingUioIrqWaiter(self._irq_raw)
             self._request_mode = "irq"
         except Exception as exc:  # pragma: no cover - board-only path
             if requested == "irq":
@@ -616,31 +747,70 @@ class AttentionAccelerator:
         still asserted) fired; False when the wait timed out with the IRQ
         deasserted, in which case the caller should poll once and wait again.
         """
-        irq = self._accel_irq
-        if irq is None:
+        if self._uio_irq is None and self._accel_irq is None:
             return False
+        wait_start = time.perf_counter()
+        fired = False
+        timed_out = False
         import asyncio
-
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            if self._uio_irq is not None:
+                fired = self._uio_irq.wait(self._irq_wait_timeout_s)
+            else:
+                # Legacy compatibility mode only.  Do not create or replace
+                # event loops here: PYNQ's UIO reader belongs to the loop on
+                # which Interrupt was constructed.
+                loop = asyncio.get_event_loop()
                 loop.run_until_complete(
-                    asyncio.wait_for(irq.wait(), timeout=IRQ_WAIT_TIMEOUT_S)
+                    asyncio.wait_for(
+                        self._accel_irq.wait(), timeout=self._irq_wait_timeout_s
+                    )
                 )
-                return True
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(
-                asyncio.wait_for(irq.wait(), timeout=IRQ_WAIT_TIMEOUT_S)
-            )
-            return True
+                fired = True
         except asyncio.TimeoutError:
+            timed_out = True
+        except (BlockingIOError, OSError):
+            timed_out = True
+        finally:
+            elapsed_ms = (time.perf_counter() - wait_start) * 1000.0
+            if self.last_profile is not None:
+                self.last_profile.irq_wait_count += 1
+                self.last_profile.irq_wait_total_ms += elapsed_ms
+                self.last_profile.irq_wait_max_ms = max(
+                    self.last_profile.irq_wait_max_ms, elapsed_ms
+                )
+                if fired:
+                    self.last_profile.irq_wakeup_count += 1
+                if timed_out or not fired:
+                    self.last_profile.irq_timeout_count += 1
+        if fired:
+            self._irq_last_wakeup_time = time.perf_counter()
+            return True
+        if timed_out or self._uio_irq is not None:
             # Level IRQ: if it is still asserted the event is pending and the
             # caller can act immediately; otherwise edge was lost — poll.
-            return (self.mmio.read(CSR_IRQ_STATUS) &
-                    (IRQ_STATUS_KV_REQ | IRQ_STATUS_Q_REQ | IRQ_STATUS_DONE)) != 0
+            pending = (self.mmio.read(CSR_IRQ_STATUS) &
+                       (IRQ_STATUS_KV_REQ | IRQ_STATUS_Q_REQ | IRQ_STATUS_DONE)) != 0
+            if self.last_profile is not None:
+                self.last_profile.irq_csr_fallback_count += 1
+            return pending
+        return False
+
+    def _irq_hybrid_spin(self) -> bool:
+        """Poll briefly after service before entering the blocking IRQ wait."""
+        if self._irq_spin_us <= 0:
+            return False
+        deadline = time.perf_counter() + self._irq_spin_us / 1.0e6
+        while time.perf_counter() < deadline:
+            status = self.mmio.read(CSR_STATUS)
+            if status & (STATUS_ERROR | STATUS_STREAM_ERROR | STATUS_DONE |
+                         STATUS_KV_LOAD_REQ | STATUS_Q_LOAD_REQ):
+                return True
+            if self.last_profile is not None:
+                self.last_profile.irq_hybrid_poll_count += 1
+            if self._request_poll_sleep_s > 0:
+                time.sleep(min(self._request_poll_sleep_s, max(0.0, deadline - time.perf_counter())))
+        return False
 
     def _prepare_input_transport(self) -> None:
         mode = self._requested_stream_mode
@@ -936,6 +1106,13 @@ class AttentionAccelerator:
             if status & (STATUS_KV_LOAD_REQ | STATUS_Q_LOAD_REQ):
                 req = self.mmio.read(CSR_LOAD_REQ)
                 if req != last_serviced_req:
+                    if self._irq_last_wakeup_time is not None and self.last_profile is not None:
+                        self.last_profile.irq_service_gap_ms += (
+                            time.perf_counter() - self._irq_last_wakeup_time
+                        ) * 1000.0
+                        self._irq_last_wakeup_time = None
+                    if (req & 1) and (req & 2) and self.last_profile is not None:
+                        self.last_profile.irq_coalesced_requests += 1
                     self._service_request(req, q_heads, k_heads, v_heads, seq_len)
                     last_serviced_req = req
                     # A completed DMA is immediately visible to the RTL. Poll
@@ -948,9 +1125,18 @@ class AttentionAccelerator:
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("attention accelerator timed out while servicing load requests")
             if self._request_mode == "irq" and self._accel_irq is not None:
-                # Sleep until the level IRQ (any request/done source) fires
-                # instead of burning request_poll_sleep_us per cycle.  The
-                # bounded wait keeps a lost edge recoverable.
+                # The direct UIO waiter is stored separately from the legacy
+                # PYNQ Interrupt object.  Keep the condition broad here so
+                # both wait implementations remain usable in tests.
+                if self._irq_wait_mode == "hybrid" and self._irq_hybrid_spin():
+                    continue
+                # Sleep until the level IRQ (any request/done source) fires.
+                # The bounded wait keeps a lost edge recoverable.
+                self._irq_wait()
+                continue
+            if self._request_mode == "irq" and self._uio_irq is not None:
+                if self._irq_wait_mode == "hybrid" and self._irq_hybrid_spin():
+                    continue
                 self._irq_wait()
                 continue
             if self._hw_ready and self._request_poll_sleep_s > 0:
@@ -1008,6 +1194,9 @@ class AttentionAccelerator:
             q_pos_base=q_pos_base,
             kv_pos_base=kv_pos_base,
             request_poll_sleep_us=self._request_poll_sleep_us,
+            irq_wait_mode=self._irq_wait_mode,
+            irq_wait_timeout_us=self._irq_wait_timeout_s * 1.0e6,
+            irq_spin_us=self._irq_spin_us,
             prefetch_mode=self._requested_prefetch_mode,
             descriptor_queue_supported=self._descriptor_queue_supported,
             inband_command_supported=self._inband_command_supported,

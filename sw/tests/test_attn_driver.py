@@ -52,6 +52,24 @@ class AttentionDriverTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be a non-negative number"):
                 AttentionAccelerator()
 
+    def test_irq_wait_configuration_and_profile_fields(self):
+        with self.assertRaisesRegex(ValueError, "irq_wait_mode"):
+            AttentionAccelerator(irq_wait_mode="event-loop")
+        with self.assertRaisesRegex(ValueError, "irq_spin_us"):
+            AttentionAccelerator(irq_spin_us=-1)
+        accel = AttentionAccelerator(irq_wait_mode="blocking", irq_spin_us=75)
+        profile = accel.run_attention(
+            np.zeros((N_Q_HEADS, 1, HEAD_DIM), dtype=np.uint16),
+            np.zeros((N_KV_HEADS, 1, HEAD_DIM), dtype=np.uint16),
+            np.zeros((N_KV_HEADS, 1, HEAD_DIM), dtype=np.uint16),
+            seq_len=1,
+        )
+        self.assertEqual(profile.shape, (N_Q_HEADS, 1, HEAD_DIM))
+        assert accel.last_profile is not None
+        self.assertEqual(accel.last_profile.irq_wait_mode, "blocking")
+        self.assertEqual(accel.last_profile.irq_spin_us, 75)
+        self.assertIn("irq_timeout_count", accel.last_profile.to_dict())
+
     def test_prefetch_mode_validation_and_profile_gate(self):
         with self.assertRaisesRegex(ValueError, "prefetch_mode"):
             AttentionAccelerator(prefetch_mode="invalid")
