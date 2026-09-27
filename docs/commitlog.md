@@ -35,13 +35,17 @@ overlap 仍须独立 RTL/VCS/Vivado 评估。
 **VCS 协议级测试**：`tb_attn_top_real_request.sv` 增加
 `+IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=N`，在 level IRQ 到达后注入可控 host
 service latency，并报告 transaction、buffer-wait、transport-stall 和
-core-active cycles；`run_tb_attn_top_real_request.sh` 增加 0/100 cycle A/B。
-VCS license 服务不可用时不得把 lint 结果写成 VCS PASS；完成版本签核前必须
-取得 IRQ latency 随 stall 增长、功能 PASS 且 full regression PASS 的证据。
+core-active cycles；脚本同时覆盖 legacy 与 `+DESC_QUEUE` descriptor-batch
+传输的 0/100 cycle A/B。legacy A/B 为 9393/9493 cycles，descriptor A/B
+为 9381/9481 cycles；两组均保持 `core_active_cycles=4881`，且 100-cycle
+延迟一一增加到 buffer/transport wait，功能均 PASS。
 
-**当前门禁**：Python/mock `40/40` 通过；Verilator lint 通过（已有 shortreal
-等 warning）；本次工作站 VCS 运行受 license server 不可连接阻塞，尚未宣称
-VCS PASS，也未进行新 bitstream 的 KV260 上板测试。
+**最终仿真门禁**：Python/mock `41/41` 通过，Verilator lint 通过（仅有既有
+shortreal、timescale、unused signal 等 warning），VCS 完整
+`RUN_SYNTH_PATHS=1 RUN_XPM_PATHS=1 bash VV/scripts/run_regression.sh`
+为 **28/28 PASS**，real-request IRQ legacy/descriptor 协议 A/B 均 PASS。
+本版本仍未重新生成 bitstream，也未重新部署到 KV260；direct-UIO/hybrid
+driver 的真实性能改善必须在这些仿真门禁之后再进行下一轮板测。
 
 ## 2026-09-24
 

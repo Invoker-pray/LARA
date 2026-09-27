@@ -29,8 +29,6 @@ required=(
   "$ROOT_DIR/sw/board_matrix.py"
   "$ROOT_DIR/sw/board_performance.py"
   "$ROOT_DIR/sw/run_board_full_validation.py"
-  "$ROOT_DIR/sw/diagnose_pynq_irq_metadata.py"
-  "$ROOT_DIR/sw/patch_pynq_hwh_metadata_parser.py"
   "$ROOT_DIR/sw/kv260_pynq_offline_install.sh"
   "$OFFLINE_BUNDLE/src/pynq-3.0.1.tar.gz"
   "$OFFLINE_BUNDLE/src/pynq-v3.0-binaries.tar.gz"
@@ -68,8 +66,6 @@ cp -a \
   "$ROOT_DIR/sw/board_matrix.py" \
   "$ROOT_DIR/sw/board_performance.py" \
   "$ROOT_DIR/sw/run_board_full_validation.py" \
-  "$ROOT_DIR/sw/diagnose_pynq_irq_metadata.py" \
-  "$ROOT_DIR/sw/patch_pynq_hwh_metadata_parser.py" \
   "$OUTPUT_DIR/"
 chmod 0755 "$OUTPUT_DIR/clear_pynq_cache.py" "$OUTPUT_DIR/run_board_full_validation.py"
 cp -a "$ROOT_DIR/docs/kv260_board_validation.md" "$OUTPUT_DIR/"

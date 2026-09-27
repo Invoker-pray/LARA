@@ -48,4 +48,16 @@ irq100_cycles="$(awk '/IRQ PROTOCOL/ {for (i=1; i<=NF; i++) if ($i ~ /^cycles=/)
 test -n "${irq0_cycles}" && test -n "${irq100_cycles}"
 test "${irq100_cycles}" -gt "${irq0_cycles}"
 echo "IRQ protocol latency A/B PASS: latency0=${irq0_cycles} cycles latency100=${irq100_cycles} cycles"
+
+# Repeat the protocol A/B with descriptor transport enabled.  This keeps the
+# IRQ performance gate tied to the optimized KV+Q path used by the driver.
+./simv -no_save ${SIM_ARGS:-} +DESC_QUEUE +IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=0 -l sim_irq_desc0.log
+./simv -no_save ${SIM_ARGS:-} +DESC_QUEUE +IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=100 -l sim_irq_desc100.log
+grep -q "transport=descriptor-batch" sim_irq_desc0.log
+grep -q "transport=descriptor-batch" sim_irq_desc100.log
+irq_desc0_cycles="$(awk '/IRQ PROTOCOL/ {for (i=1; i<=NF; i++) if ($i ~ /^cycles=/) {sub("cycles=", "", $i); print $i; exit}}' sim_irq_desc0.log)"
+irq_desc100_cycles="$(awk '/IRQ PROTOCOL/ {for (i=1; i<=NF; i++) if ($i ~ /^cycles=/) {sub("cycles=", "", $i); print $i; exit}}' sim_irq_desc100.log)"
+test -n "${irq_desc0_cycles}" && test -n "${irq_desc100_cycles}"
+test "${irq_desc100_cycles}" -gt "${irq_desc0_cycles}"
+echo "IRQ descriptor latency A/B PASS: latency0=${irq_desc0_cycles} cycles latency100=${irq_desc100_cycles} cycles"
 echo "ALL REAL REQUEST PATH XPM CHECKS PASSED"
