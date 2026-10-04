@@ -2,6 +2,44 @@
 
 ## 2026-10-04
 
+### v3.6.1 板上 CPU 占用与 IRQ spin 扫描 — "低 CPU 占用"结论不成立，性能最优为 busy poll
+
+在 KV260 上以同一 v3.6.1 bitstream、同一 20-case 矩阵（q3kv3+q31kv7、
+L=1/16/32/64/128、causal/noncausal、warmup 1、repeats 5、CPU core 3），
+用 `/usr/bin/time -v` 包裹整个 board_performance 进程，测量七组配置的
+进程级 CPU 时间与调度行为（结果归档 `temp/cpu_time_v_*.txt` 与
+`temp/board_perf_cpu_v3_6_1_*/`，全部 20/20 bit-exact PASS）：
+
+| 配置 | user+sys CPU | 墙钟 | 自愿切换 | PL_TX geo | E2E geo |
+|---|---|---|---|---|---|
+| busy poll（SLEEP_US=0） | 146.05 s | 2:39.7 | 1,198 | **-4.57%** | **-4.48%** |
+| sleep poll（20 µs，默认） | 144.56 s | 2:35.3 | 26,815 | 基线 | 基线 |
+| IRQ spin=0 | 144.17 s | 2:37.9 | ~11k | +0.99% | +5.13% |
+| IRQ spin=10 | 144.2 s | 2:40.6 | ~11k | +0.79% | +4.91% |
+| IRQ spin=25 | 144.6 s | 2:40.2 | ~11k | +3.42% | +7.43% |
+| IRQ spin=50（默认） | 144.75 s | 2:43.3 | 11,096 | +3.83% | +7.85% |
+| IRQ spin=100 | 144.6 s | 2:42.3 | ~11k | +3.13% | +7.18% |
+
+结论：
+
+1. **IRQ 不降低进程 CPU 时间**：所有七组 user+sys 在 144.2–146.1 s
+   （±1%）。原因：本项目 poll 路径本来就用 20 µs sleep 让出 CPU，
+   sleep 与 IRQ 阻塞等待都不消耗 CPU；因此"IRQ 是低 CPU 占用模式"的
+   预期在当前 driver 形态下不成立。IRQ 可保留的严谨表述是
+   **"低轮询活动模式"**：自愿上下文切换从 26,815 降到 11,096（-58.6%），
+   显式 polling sleep 从 21,350 次降为 0；尚无功耗/共存任务的直接测量。
+2. **性能最优配置是 busy poll（`LARA_REQUEST_POLL_SLEEP_US=0`）**：相比
+   当前默认的 20 µs sleep poll，PL transaction 几何平均再降 4.57%、
+   E2E 再降 4.48%。这延续了 v2.6 "reduce board request polling latency"
+   的方向；短序列场景建议后续把默认值切到 0 或重新评估默认。
+3. **IRQ spin 扫描**：spin=0/10 明显优于 spin≥25；当前默认 spin=50 不
+   是最优。IRQ 全部组保持 100% 真实唤醒（0 timeout、0 fallback）。
+   IRQ 在最优配置（spin=0）下仍比 sleep poll 慢约 1%（PL）/5%（E2E），
+   比 busy poll 慢约 5.5%/9.6%。
+4. 测量口径说明：`/usr/bin/time -v` 覆盖整个测试进程（含 Overlay 编程、
+   warmup、CPU baseline），组间边界一致、可对比，但不等于纯 request-loop
+   的 CPU 占用；板上无 perf，未取得 PMU 级数据。
+
 ### v3.6.1 上板验证补充 — IRQ 已真实唤醒，但性能仍劣于 poll
 
 在 KV260 上使用同一 v3.6.1 bitstream、同一 q31/kv7 与 q3/kv3 的

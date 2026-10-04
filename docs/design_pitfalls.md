@@ -297,3 +297,18 @@ UIO fd 的新实例也必须显式 `write(1)` re-arm。不要假设上一次进�
 PYNQ overlay 可能暴露 `attn_accel_0` 而不是 `accel`；初始化 DMA/MMIO 时已经
 支持两个名称，`_prepare_irq()` 也必须使用同样的 capability 判定，否则显式
 `LARA_REQUEST_MODE=irq` 会在 UIO 已可用时提前报“requires real hardware”。
+
+## 16. "IRQ 一定降低 CPU 占用"是未验证预期——必须用进程 CPU 时间证伪
+
+2026-10-04 用 `/usr/bin/time -v` 对 poll/IRQ/busy-poll/spin 七组同参数
+测量：所有组 user+sys CPU 时间在 ±1% 内相同。根因是本项目 poll 路径
+本来就用 20 µs `time.sleep` 让出 CPU，与 IRQ 的 UIO 阻塞等待一样不消耗
+CPU；busy-poll（sleep=0）也只多 ~1%。因此"IRQ 是低 CPU 占用模式"在本
+driver 形态下不成立——**IRQ 的可量化优势只有调度行为**（自愿上下文切换
+-58.6%、显式 polling sleep 21,350→0），且代价是 E2E 慢 5–8%。
+
+**规则**：宣称任何"降低 CPU 占用"前，必须直接测进程 CPU 时间
+（`/usr/bin/time -v` 或 perf stat），不能用"唤醒次数变少"或"不再忙轮询"
+推断；先检查对照的 poll 实现本身是否忙轮询——sleep-poll 与 IRQ 的 CPU
+时间天然相同。性能最优的请求等待方式要以实测几何平均为准（本轮实测
+busy poll 最快，PL_TX -4.57%）。
