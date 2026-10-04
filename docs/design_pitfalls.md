@@ -257,3 +257,30 @@ DMA service 完成；下一次进入 wait 前再 write(2) re-arm。level request
 `+IRQ_PROTOCOL +IRQ_LATENCY_CYCLES=0/100` 的 VCS A/B，并确认 latency 增加只
 增加 `buffer_wait/transport_stall`、不改变 `core_active` 和 bit-exact 输出，
 再进行 KV260 实测。VCS license 不可用时只能记录为 blocked，不能写成 PASS。
+## 15. v3.6.1 板上 IRQ profile PASS 不等于 IRQ 真正唤醒
+
+v3.6.1 新 bitstream 的 q31/kv7 与 q3/kv3 全序列长度功能矩阵均通过，且
+profile 的 bitstream SHA256 与新构建一致。但是 profile 同时显示：
+
+```text
+request_mode=irq
+irq_wait_mode=hybrid
+irq_wakeup_count=0
+irq_timeout_count=irq_wait_count
+irq_csr_fallback_count=irq_wait_count
+```
+
+这表示 request 在 timeout 后通过 CSR fallback 被发现和服务，不能把功能 PASS
+解释为 IRQ 性能已经生效。当前板上还观察到 `/dev/uio4` 为 `root:root`、
+`0600`，sysfs 节点为 `name=fabric`、`event=5`、`uio_pdrv_genirq`；这使
+普通 `ubuntu` 用户无法直接打开设备成为首要排查方向，但在确认
+`pynq.interrupt.get_uio_irq(raw_irq=121)` 的实际路径前，不能把根因写死为权限。
+
+后续检查顺序固定为：
+
+1. 记录 `raw_irq=121`、DTBO `fabric` 节点、`/dev/uio*`、sysfs event 和设备权限；
+2. 在用户态确认 PYNQ 返回的 UIO 路径，并用最小 request 检查 read 是否阻塞/唤醒；
+3. 若为权限问题，优先修复 DTBO/udev 的持久权限规则，不能把手工 `chmod` 当最终
+   方案；
+4. 修复后要求 `irq_wakeup_count>0`、timeout 不再占主导，再进行 poll/IRQ 性能 A/B；
+5. 在此之前保留 poll 作为正式性能基线，不修改 RTL 以掩盖 host/UIO 环境问题。
