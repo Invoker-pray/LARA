@@ -2,6 +2,42 @@
 
 ## 2026-10-04
 
+### v3.6.2 — in-band 板上性能签核与 Q-arena 实验结论（短序列 transport 分层确立）
+
+在 v3.6.1 bitstream（afa21bfb）上完成短序列 host gap 攻坚（改进 b）的
+板测闭环。同一 20-case 矩阵（q3kv3+q31kv7、L=1..128、warmup 1、
+repeats 5、CPU core 3、busy poll）三方 A/B，全部 bit-exact：
+
+| 配置 | PL_TX geo | E2E geo |
+|---|---|---|
+| descriptor（旧，busypoll 基线） | 基线 | 基线 |
+| descriptor + Q-arena 预装载 | **-9.31%** | **+4.24%** |
+| **in-band 单传输** | **-50.58%** | **-14.55%** |
+
+分长度 E2E：in-band 在 L1/L16/L32 分别 **-30.3%/-23.8%/-18.7%**，L64
+-1.0%，L128 +5.8%（长序列 PL active 主导，transport 收益自然趋零）。确立
+**短序列（L≤32）用 in-band、长序列用 descriptor** 的分层 transport 策略。
+这是 in-band 模式首次完成板上性能量化（此前仅有 v3.0 功能 smoke）。
+
+**Q-arena 实验（driver 内置，`LARA_Q_STAGING=on|off`，默认 off）**：把全部
+Q tile 预转换/预拷入 CMA arena，请求关键路径只剩 1 次 descriptor push +
+零拷贝 DMA 切片。设计目标在 PL 侧完全达成（L1 的 q_dma_setup
+7.37→3.51 ms，-52%），**但 host E2E 反而 +4.24%**——根因是请求循环本身
+host-bound（service 17.4 ms ≈ PL_TX 17.6 ms），把转换工作从循环内挪到
+START 之前只是移动位置而非消除，且额外增加一次 arena 拷贝与 flush。教训
+入 `design_pitfalls.md` §17：**优化 host-bound 循环时必须先确认瓶颈在
+host 计算还是 host↔PL 往返；只降 PL 等待不改 host 总工作量不改善 E2E。**
+
+driver 变更（无 RTL/bitstream 变更，bit 复用 afa21bfb）：
+- in-band 路径不变（本次为纯测量签核）；
+- Q-arena staging + staged 单段传输 + KV+Q 合批复用 staged tile
+  （`fp32_to_bf16_u16` 对 uint16 透传零转换），环境变量门控默认关闭；
+- 默认行为与 v3.6.1 完全一致（41/41 单测含 mock 全通路验证）。
+
+门禁：Python golden 7/7、sw/tests 41/41、Verilator lint 0、VCS 完整回归
+（synth+XPM）28/28；板上功能矩阵 q31kv7 12/12（legacy）+ q3kv3 12/12
+（in-band）+ 12/12（legacy）全 bit-exact PASS，A/B 三组各 20/20 PASS。
+
 ### v3.6.1 板上 CPU 占用与 IRQ spin 扫描 — "低 CPU 占用"结论不成立，性能最优为 busy poll
 
 在 KV260 上以同一 v3.6.1 bitstream、同一 20-case 矩阵（q3kv3+q31kv7、

@@ -118,6 +118,11 @@ DMA_MAX_TRANSFER_BYTES = (1 << DMA_LENGTH_WIDTH) - 1
 MAX_KV_HEAD_BYTES = MAX_SEQ_LEN * HEAD_DIM * BF16_BYTES
 Q_TILE_BYTES = TILE_Q * HEAD_DIM * BF16_BYTES
 MAX_BATCH_INPUT_BYTES = 2 * MAX_KV_HEAD_BYTES + Q_TILE_BYTES
+# Whole-transaction Q staging arena: every Q tile the RTL will request, laid
+# out head-major/tile-major so a Q request is serviced by one descriptor push
+# plus a zero-copy DMA slice (no numpy conversion, memcpy, or cache flush on
+# the request critical path).
+MAX_Q_ARENA_BYTES = N_Q_HEADS * ((MAX_SEQ_LEN + TILE_Q - 1) // TILE_Q) * Q_TILE_BYTES
 MAX_OUTPUT_BYTES = N_Q_HEADS * MAX_SEQ_LEN * HEAD_DIM * BF16_BYTES
 MAX_INPUT_PAYLOAD_BYTES = (
     N_Q_HEADS * MAX_SEQ_LEN * HEAD_DIM * BF16_BYTES
@@ -136,6 +141,8 @@ PREFETCH_MODE_ENV = "LARA_PREFETCH_MODE"
 PREFETCH_MODES = ("off", "descriptor", "inband")
 REQUEST_MODE_ENV = "LARA_REQUEST_MODE"
 REQUEST_MODES = ("poll", "irq", "auto")
+Q_STAGING_ENV = "LARA_Q_STAGING"
+Q_STAGING_MODES = ("off", "on")
 
 ERR_NONE = 0x00
 ERR_BAD_CFG = 0x01
@@ -548,6 +555,12 @@ class AttentionAccelerator:
         self._request_mode = "poll"
         self._accel_irq = None
         self._uio_irq = None
+        q_staging = os.environ.get(Q_STAGING_ENV, "off").strip().lower()
+        if q_staging not in Q_STAGING_MODES:
+            raise ValueError(
+                f"{Q_STAGING_ENV} must be one of {Q_STAGING_MODES}, got {q_staging!r}"
+            )
+        self._q_staging_enabled = q_staging == "on"
         self._irq_raw = None
         self._irq_last_wakeup_time: float | None = None
         if HAS_PYNQ:
@@ -580,6 +593,10 @@ class AttentionAccelerator:
         self._kv_send_buf = self._allocate_buffer(MAX_KV_HEAD_BYTES)
         self._q_send_buf = self._allocate_buffer(Q_TILE_BYTES)
         self._batch_send_buf = self._allocate_buffer(MAX_BATCH_INPUT_BYTES)
+        self._q_arena = self._allocate_buffer(MAX_Q_ARENA_BYTES)
+        # Offset (bytes) of each staged Q tile, keyed by (group, head, tile).
+        self._q_arena_offsets: dict[tuple[int, int, int], int] = {}
+        self._q_arena_staged = False
         self._stream_send_buf = self._allocate_buffer(MAX_STREAM_INPUT_BYTES)
         self._out_buf = self._allocate_buffer(MAX_OUTPUT_BYTES)
         self._q_tile_words = np.zeros((TILE_Q, HEAD_DIM), dtype=np.uint16)
@@ -636,7 +653,7 @@ class AttentionAccelerator:
             self._uio_irq = None
         for buf in (
             self._kv_send_buf, self._q_send_buf, self._batch_send_buf,
-            self._stream_send_buf, self._out_buf,
+            self._stream_send_buf, self._q_arena, self._out_buf,
         ):
             free = getattr(buf, "freebuffer", None)
             if callable(free):
@@ -943,6 +960,37 @@ class AttentionAccelerator:
 
         self._record_input_dma([(dest, int(payload_u8.nbytes))], setup_ms, transfer_ms)
 
+    def _transfer_staged(self, dest: int, payload_u8: np.ndarray) -> None:
+        """Issue one descriptor segment whose payload is a staged CMA view.
+
+        Critical path: a single descriptor MMIO push plus one zero-copy DMA
+        slice transfer — no numpy conversion, no memcpy, no cache flush.
+        Used for Q-only requests whose tiles were staged by _stage_q_arena.
+        """
+        if self._closed:
+            raise RuntimeError("attention accelerator buffers have been released")
+        nbytes = int(payload_u8.nbytes)
+        if nbytes > DMA_MAX_TRANSFER_BYTES:
+            raise ValueError(
+                f"staged DMA payload is {nbytes} bytes; "
+                f"DMA limit is {DMA_MAX_TRANSFER_BYTES} bytes"
+            )
+        setup_start = time.perf_counter()
+        self.mmio.write(CSR_DESC_PUSH, self._descriptor_word(dest, nbytes))
+        setup_ms = (time.perf_counter() - setup_start) * 1000.0
+
+        transfer_start = time.perf_counter()
+        self.dma_send.transfer(payload_u8)
+        self.dma_send.wait()
+        transfer_ms = (time.perf_counter() - transfer_start) * 1000.0
+        if hasattr(self.mmio, "transfer_complete"):
+            self.mmio.transfer_complete(dest)
+        if isinstance(self.mmio, MockMMIO):
+            self.mmio.regs[CSR_DESC_STATUS] = (
+                DESC_STATUS_SUPPORTED | DESC_STATUS_ENABLED | DESC_STATUS_EMPTY
+            )
+        self._record_input_dma([(dest, nbytes)], setup_ms, transfer_ms)
+
     def _transfer_batch(self, segments: list[tuple[int, np.ndarray]]) -> None:
         if not self._descriptor_queue_enabled:
             for dest, payload in segments:
@@ -1064,6 +1112,52 @@ class AttentionAccelerator:
             if self._hw_ready and self._request_poll_sleep_s > 0:
                 time.sleep(self._request_poll_sleep_s)
 
+    def _stage_q_arena(self, q_heads: np.ndarray, seq_len: int) -> None:
+        """Pre-convert and pre-copy every Q tile into the CMA arena.
+
+        The RTL request sequence is deterministic, so all conversion,
+        packing, and cache maintenance can happen once before START instead
+        of on the request critical path where the PL is stalled waiting.
+        """
+        tiles = (seq_len + TILE_Q - 1) // TILE_Q
+        offset = 0
+        self._q_arena_offsets = {}
+        for head_idx in range(N_Q_HEADS):
+            group = head_idx // GQA_GROUP_SIZE
+            head = head_idx % GQA_GROUP_SIZE
+            q_src = q_heads[head_idx]
+            for tile in range(tiles):
+                self._q_tile_words.fill(0)
+                lo = tile * TILE_Q
+                active = max(0, min(TILE_Q, seq_len - lo))
+                self._q_tile_words[:active, :] = q_src[lo:lo + TILE_Q, :]
+                payload_u8 = fp32_to_bf16_u16(self._q_tile_words).reshape(-1).view(np.uint8)
+                nbytes = int(payload_u8.nbytes)
+                self._q_arena[offset:offset + nbytes] = payload_u8
+                self._q_arena_offsets[(group, head, tile)] = offset
+                offset += nbytes
+        flush = getattr(self._q_arena, "flush", None)
+        if callable(flush):
+            flush()
+        self._q_arena_staged = True
+
+    def _q_tile_slice(self, req: int) -> np.ndarray:
+        """Zero-copy CMA view of the staged Q tile for a request word."""
+        group = (req >> 8) & 0x7
+        head = (req >> 12) & 0x3
+        tile = (req >> 16) & 0xFF
+        offset = self._q_arena_offsets[(group, head, tile)]
+        return self._q_arena[offset:offset + Q_TILE_BYTES]
+
+    def _q_tile_slice_u16(self, req: int) -> np.ndarray:
+        """Staged Q tile as bf16 words (uint16) for _transfer_batch.
+
+        fp32_to_bf16_u16 passes uint16 arrays through unchanged, so the
+        combined K/V+Q batch path reuses the staged tile with zero
+        conversion; only the K/V conversion and one packing copy remain.
+        """
+        return self._q_tile_slice(req).view(np.uint16).reshape(TILE_Q, HEAD_DIM)
+
     def _q_tile_payload(
         self,
         req: int,
@@ -1088,10 +1182,20 @@ class AttentionAccelerator:
                 (DEST_V_CACHE, v_heads[group, :seq_len, :]),
             ]
             if req & 2:
-                segments.append((DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len)))
+                if self._q_arena_staged:
+                    # Staged tile passes through fp32_to_bf16_u16 unchanged;
+                    # only the K/V conversion and one packing copy remain.
+                    segments.append((DEST_Q_BUF, self._q_tile_slice_u16(req)))
+                else:
+                    segments.append((DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len)))
             self._transfer_batch(segments)
         elif req & 2:
-            self._transfer(DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len))
+            if self._q_arena_staged and self._descriptor_queue_enabled:
+                # Dominant short-sequence path: one descriptor push plus a
+                # zero-copy DMA slice of the pre-staged Q arena.
+                self._transfer_staged(DEST_Q_BUF, self._q_tile_slice(req))
+            else:
+                self._transfer(DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len))
 
     def start(self) -> None:
         if not (self.mmio.read(CSR_STATUS) & STATUS_START_READY):
@@ -1222,6 +1326,13 @@ class AttentionAccelerator:
         self._prepare_input_transport()
         self._prepare_prefetch()
         self._prepare_irq()
+        if not self._inband_command_enabled:
+            # Interactive transports service one Q request at a time; stage
+            # every tile into CMA now so the request critical path is only a
+            # descriptor push plus a zero-copy DMA slice.  The in-band path
+            # packs its own single stream and does not use the arena.
+            self._q_arena_staged = False
+            self._stage_q_arena(q_heads, L)
         self.last_profile.descriptor_queue_enabled = self._descriptor_queue_enabled
         self.last_profile.inband_command_enabled = self._inband_command_enabled
         self.last_profile.kv_prefetch_enabled = self._kv_prefetch_active

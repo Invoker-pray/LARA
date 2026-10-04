@@ -312,3 +312,17 @@ driver 形态下不成立——**IRQ 的可量化优势只有调度行为**（�
 推断；先检查对照的 poll 实现本身是否忙轮询——sleep-poll 与 IRQ 的 CPU
 时间天然相同。性能最优的请求等待方式要以实测几何平均为准（本轮实测
 busy poll 最快，PL_TX -4.57%）。
+
+## 17. host-bound 循环的优化必须先定性瓶颈，PL 侧指标改善不等于 E2E 改善
+
+2026-10-04 Q-arena 实验：把每请求 ~230 µs 的 numpy 转换/拷贝/flush 从请求
+循环挪到 START 之前的 CMA 预装载。PL 侧目标全部达成（q_dma_setup -52%、
+PL transaction geo -9.31%），但 host E2E 反而 +4.24%。根因：L1 的请求循环
+是 host-bound（service 17.4 ms ≈ PL_TX 17.6 ms），挪动计算位置不减少 host
+总工作量，还新增一次 arena 拷贝；PL 等待的缩短被 host 串行时间吞掉。
+
+**规则**：优化请求服务路径前，先比较 host service 时间与 PL transaction
+时间——若 host ≥ PL，唯一有效的方向是减少 host↔PL 往返次数或 host 总工作
+量（如 in-band 单传输把 40 次往返折成 1 次，E2E -14.55%），而不是把 host
+工作在时间轴上重新安排。PL 侧计数器（stall/buffer_wait/q_dma_setup）的
+改善只有在 PL-bound 场景才转化为 E2E。
