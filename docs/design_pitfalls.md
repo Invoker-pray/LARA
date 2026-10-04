@@ -206,10 +206,13 @@ RTL 顶层 IRQ 已连通。
 
 - `poll + descriptor + prefetch off` 相对 v2.6 的 q31/kv7 可比 10 个 case，
   PL transaction 几何平均约改善 10.5%，host E2E 约改善 9.5%；
-- 同一当前 bitstream 中，`irq + descriptor + prefetch off` 相对 poll 的
-  几何平均反而变慢约 32.4%（PL）和 31.4%（E2E）；
-- `irq` 下 prefetch on/off 的差异约 0.55%，处于当前重复次数和系统噪声
-  能支持的范围内，不能写成 prefetch 收益。
+- 修复 UIO 权限、UIO re-arm 和真实 PYNQ 解释器后，同一 bitstream 的
+  `irq + descriptor + prefetch off` 相对 poll 仍反而变慢约 2.00%（PL）和
+  5.96%（E2E）；因此 IRQ 功能修复不等于性能收益，poll 仍是当前性能默认路径；
+- `irq + descriptor + prefetch descriptor` 相对 IRQ/off 变慢约 1.69%（PL）和
+  1.57%（E2E），当前不能写成 prefetch 收益；
+- 旧的约 32% 数据来自 IRQ 未真实唤醒时的 timeout + CSR fallback，只能作为
+  环境故障诊断证据，不能与真实 IRQ A/B 混合为性能结论。
 
 **规则**：性能报告必须至少分成四层：
 
@@ -280,7 +283,17 @@ irq_csr_fallback_count=irq_wait_count
 
 1. 记录 `raw_irq=121`、DTBO `fabric` 节点、`/dev/uio*`、sysfs event 和设备权限；
 2. 在用户态确认 PYNQ 返回的 UIO 路径，并用最小 request 检查 read 是否阻塞/唤醒；
-3. 若为权限问题，优先修复 DTBO/udev 的持久权限规则，不能把手工 `chmod` 当最终
-   方案；
+3. 若为权限问题，优先修复 DTBO/udev 的持久权限规则（当前离线安装器使用
+   `SUBSYSTEM=="uio", ATTR{name}=="fabric", GROUP="video", MODE="0660"`），
+   不能把手工 `chmod` 当最终方案；
 4. 修复后要求 `irq_wakeup_count>0`、timeout 不再占主导，再进行 poll/IRQ 性能 A/B；
 5. 在此之前保留 poll 作为正式性能基线，不修改 RTL 以掩盖 host/UIO 环境问题。
+
+UIO fd 的新实例也必须显式 `write(1)` re-arm。不要假设上一次进程退出后
+`uio_pdrv_genirq` 仍处于 enabled 状态；否则 `/proc/interrupts` 可能继续增加，
+但当前 fd 的 `poll/read` 不会唤醒，最终表现为 timeout/CSR fallback。
+
+此外，driver 的 IRQ capability 检查必须与 overlay IP 命名兼容。当前构建的
+PYNQ overlay 可能暴露 `attn_accel_0` 而不是 `accel`；初始化 DMA/MMIO 时已经
+支持两个名称，`_prepare_irq()` 也必须使用同样的 capability 判定，否则显式
+`LARA_REQUEST_MODE=irq` 会在 UIO 已可用时提前报“requires real hardware”。

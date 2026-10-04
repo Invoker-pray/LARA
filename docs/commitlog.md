@@ -1,5 +1,26 @@
 # LARA 项目提交记录
 
+## 2026-10-04
+
+### v3.6.1 上板验证补充 — IRQ 已真实唤醒，但性能仍劣于 poll
+
+在 KV260 上使用同一 v3.6.1 bitstream、同一 q31/kv7 与 q3/kv3 的
+`L=1/16/32/64/128`、causal/noncausal 共 20 个 case，固定 CPU core 3、CPU
+1333.333 MHz、PL 71.427857 MHz、warmup 1、repeats 5，完成三组 A/B：
+
+- `poll + descriptor + prefetch off`：20/20 bit-exact PASS；
+- `irq + descriptor + prefetch off`：20/20 bit-exact PASS，4470 次 IRQ wait
+  全部真实唤醒，timeout/fallback 均为 0；
+- `irq + descriptor + prefetch descriptor`：20/20 bit-exact PASS，100 个 profile
+  均确认 prefetch enabled，4283 次 IRQ wait 全部真实唤醒，timeout/fallback 均为 0。
+
+以每个 case 的五次测量 median 计算几何平均，真实 IRQ 相对 poll 仍然较慢：
+PL transaction **+2.00%**，host-to-host E2E **+5.96%**。prefetch descriptor
+相对 IRQ/off 也没有收益，分别为 **+1.69%** 和 **+1.57%**。因此本轮只能签收
+IRQ 功能链路修复，不能签收 IRQ 或 prefetch 的性能收益；后续性能默认路径仍应
+保留 poll。此前约 +32% 的 IRQ 结果是 UIO 权限/未 re-arm 导致的 timeout + CSR
+fallback，不能与本轮真实 IRQ 数据混用。
+
 ## 2026-09-27
 
 ### v3.6.1 — 上板 IRQ 性能诊断与 direct-UIO/hybrid service（已上板前仿真门禁）

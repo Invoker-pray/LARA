@@ -323,6 +323,11 @@ class BlockingUioIrqWaiter:
         self._poller = select.poll()
         self._poller.register(self.fd, select.POLLIN)
         self._closed = False
+        # uio_pdrv_genirq may remain disabled after a previous process exits
+        # while servicing an interrupt.  Explicitly re-arm on every new fd;
+        # relying on the driver's initial state causes silent timeout/CSR
+        # fallback even when GIC IRQ121 is incrementing.
+        os.write(self.fd, struct.pack("I", 1))
         self._armed = True
 
     def wait(self, timeout_s: float) -> bool:
@@ -706,7 +711,10 @@ class AttentionAccelerator:
         usable = (
             self._hw_ready
             and self.overlay is not None
-            and getattr(self.overlay, "accel", None) is not None
+            and (
+                getattr(self.overlay, "accel", None) is not None
+                or getattr(self.overlay, "attn_accel_0", None) is not None
+            )
         )
         if requested == "irq" and not usable:
             raise RuntimeError(

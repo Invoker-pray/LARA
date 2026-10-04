@@ -171,10 +171,15 @@ if old not in text:
     raise SystemExit("PYNQ metadata precedence patch target was not found")
 text = text.replace(old, new, 1)
 old_parser = "parser = RuntimeMetadataParser(Metadata(input=self._filepath.with_suffix(\".hwh\")))"
-new_parser = "parser = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))"
+new_parser = "xsa_path = self._filepath.with_suffix(\".xsa\")\n                    if xsa_path.exists():\n                        parser = RuntimeMetadataParser(Metadata(input=xsa_path))\n                        legacy_hwh = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))\n                        parser.interrupt_pins.update(legacy_hwh.interrupt_pins)\n                    else:\n                        parser = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))"
 if old_parser not in text:
     raise SystemExit("PYNQ HWH parser patch target was not found")
 text = text.replace(old_parser, new_parser, 1)
+old_mem = "            if xclbin_data is None:\n                # Some full KV260 HWH exports preserve IRQ topology but do\n                # not populate the legacy parser's mem_dict.  Use the runtime\n                # parser only for memory topology, while retaining the legacy\n                # parser's interrupt_pins.\n                if not parser.mem_dict:\n                    runtime_mem = RuntimeMetadataParser(\n                        Metadata(input=self._filepath.with_suffix(\".hwh\"))\n                    )\n                    parser.mem_dict = runtime_mem.mem_dict\n                xclbin_data = _create_xclbin(parser.mem_dict)"
+new_mem = "            if xclbin_data is None:\n                xclbin_data = (_create_xclbin(parser.mem_dict)\n                               if parser.mem_dict else DEFAULT_XCLBIN)\n            xclbin_parser = XclBin(xclbin_data=xclbin_data)\n            _unify_dictionaries(parser, xclbin_parser)"
+if old_mem not in text:
+    raise SystemExit("PYNQ memory topology patch target was not found")
+text = text.replace(old_mem, new_mem, 1)
 old_refresh = "            if not partial:\n                parser.refresh_hierarchy_dict()"
 new_refresh = "            if not partial and hasattr(parser, \"refresh_hierarchy_dict\"):\n                parser.refresh_hierarchy_dict()"
 if old_refresh not in text:
@@ -187,7 +192,8 @@ if old_systemgraph not in text:
 text = text.replace(old_systemgraph, new_systemgraph, 1)
 required_snippets = (
     "if hwh_data is not None:",
-    "parser = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))",
+    "legacy_hwh = HWH(hwh_name=str(self._filepath.with_suffix(\".hwh\")))",
+    "if xclbin_data is None:",
     "if not partial and hasattr(parser, \"refresh_hierarchy_dict\"):",
     "if not hasattr(parser, \"systemgraph\"):",
 )
@@ -215,6 +221,18 @@ export PATH="${PYNQ_VENV}/bin:${PYNQ_VENV}/bin/microblazeel-xilinx-elf/bin:\$PAT
 source "${PYNQ_VENV}/bin/activate"
 EOF
 chmod 0644 /etc/profile.d/pynq_venv.sh
+
+# The Kria-PYNQ DTBO exposes the PL fabric IRQ through uio_pdrv_genirq.
+# Ubuntu's default generic UIO permissions are root:root 0600, which makes
+# PYNQ's direct blocking UIO waiter silently fall back to CSR timeouts for a
+# normal ubuntu user.  Match the stable DT node name rather than uio4: the
+# numeric UIO index can change when other UIO devices are present.
+cat > /etc/udev/rules.d/99-lara-fabric-uio.rules <<'EOF'
+SUBSYSTEM=="uio", ATTR{name}=="fabric", GROUP="video", MODE="0660"
+EOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=uio
+echo "Installed /etc/udev/rules.d/99-lara-fabric-uio.rules"
 
 "${VENV_PYTHON}" - <<'PY'
 from importlib.metadata import version
