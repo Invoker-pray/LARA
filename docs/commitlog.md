@@ -47,6 +47,21 @@ shortreal、timescale、unused signal 等 warning），VCS 完整
 本版本仍未重新生成 bitstream，也未重新部署到 KV260；direct-UIO/hybrid
 driver 的真实性能改善必须在这些仿真门禁之后再进行下一轮板测。
 
+#### 2026-09-28 Vivado 构建补充
+
+全链路 VCS board-case 矩阵完成后，使用 v3.6.1 HEAD `92943f6` 重新执行
+Vivado 2025.2 clean build，构建目录为
+`vivado_proj/build-v3.6.1-irq/`。post-route fully routed，routing error 为
+0；WNS `+0.198 ns`、TNS `0`、WHS `+0.009 ns`、THS `0`，PL 时钟约
+`71.429 MHz`；DRC 为 0 errors（仅保留工具报告的 warning）。
+
+新的板上 payload 为 `board_payload_v3_6_1_irq_20260927/`，其中的
+`.bit/.hwh/.xsa` 与构建目录一致，bitstream SHA256 为
+`afa21bfb39beb49e8273c274622c0316f8c877fd9a3424797c8534b58de3ba4a`。
+payload 的 `LARA_SHA256SUMS` 已在复制两套正式 case 矩阵后重新生成并校验。
+下一步才进行 KV260 部署和 direct-UIO/hybrid IRQ 实测；板上结果不得与旧
+`v3.6` payload 混用。
+
 ## 2026-09-24
 
 ### v3.6.0 — CSR 门控电平 IRQ（RTL + Vivado 布线 + driver，未上板）
