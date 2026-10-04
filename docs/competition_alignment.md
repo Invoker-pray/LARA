@@ -1,6 +1,6 @@
 # Track B 赛题对齐审计
 
-审计日期：2026-08-02
+审计日期：2026-08-02（v3.6.2 后于 2026-10-04 复核更新；本节以下的资源/频率快照为 v2.5 时代历史，当前签核状态见文末追加）
 
 ## 1. 依据
 
@@ -171,3 +171,20 @@ utilization is 95479 LUT, 56940 FF, 50 BRAM, 48 URAM, and 165 DSP.
 The candidate is accepted via matching Explore route and is now the source
 default. `LARA_STREAMING_PV_ROLLBACK` restores the P2 schedule. This is not a
 KV260 throughput claim; no board is connected.
+
+
+## 13. 2026-10-04 复核（v3.6.2，aca3998）
+
+上文 §2 表格中"性能证据"一行为 v2.5 时代快照，已过时。当前状态：
+
+- 签核 bitstream：v3.6.1（afa21bfb），71.429 MHz，WNS +0.198 / TNS 0 /
+  WHS +0.009 / THS 0，DRC 0 Error；资源 LUT 77,546、FF 85,708、BRAM 50、
+  URAM 48、DSP 56（无 AI core 配置）。
+- 板上功能：q31kv7 与 q3kv3 各 12/12（L=1..512 含 L512）bit-exact PASS
+  （v3.6.1 bit + v3.6.2 driver，legacy 与 in-band 双 transport）。
+- 性能结论（同 bitstream 内 A/B，20-case 几何平均）：
+  descriptor transport 相对 v2.6 legacy：PL_TX -10.5% / E2E -9.5%；
+  in-band（L≤32）：E2E -14.55%（L1 -30.3%）vs descriptor busy-poll；
+  busy poll vs sleep poll：E2E -4.48%；IRQ 功能可用但无性能/CPU 收益；
+  prefetch v1 板上无收益。分层策略：短序列 in-band、长序列 descriptor。
+- 仍然不宣称：end-to-end CPU speedup、L>512、continuous batching/decode。
