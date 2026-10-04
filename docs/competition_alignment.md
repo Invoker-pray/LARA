@@ -173,7 +173,7 @@ default. `LARA_STREAMING_PV_ROLLBACK` restores the P2 schedule. This is not a
 KV260 throughput claim; no board is connected.
 
 
-## 13. 2026-10-04 复核（v3.6.2，aca3998）
+## 13. 2026-10-04 复核（v3.6.3，e8ced44）
 
 上文 §2 表格中"性能证据"一行为 v2.5 时代快照，已过时。当前状态：
 
@@ -183,8 +183,9 @@ KV260 throughput claim; no board is connected.
 - 板上功能：q31kv7 与 q3kv3 各 12/12（L=1..512 含 L512）bit-exact PASS
   （v3.6.1 bit + v3.6.2 driver，legacy 与 in-band 双 transport）。
 - 性能结论（同 bitstream 内 A/B，20-case 几何平均）：
-  descriptor transport 相对 v2.6 legacy：PL_TX -10.5% / E2E -9.5%；
-  in-band（L≤32）：E2E -14.55%（L1 -30.3%）vs descriptor busy-poll；
-  busy poll vs sleep poll：E2E -4.48%；IRQ 功能可用但无性能/CPU 收益；
-  prefetch v1 板上无收益。分层策略：短序列 in-band、长序列 descriptor。
+  v3.6.3 新默认（busy poll + auto 分层）vs v3.6.1 旧默认：
+  **E2E -19.17%**（L1 -39.4%/L16 -25.3%/L32 -23.0%/L64 -1.3%/L128 -1.3%）、
+  PL_TX -48.99%；相对 v2.6 legacy 基线的累计改善以旧默认为锚叠加。
+  分层策略：短序列 in-band、长序列 descriptor（auto 自动选择）。
+  IRQ 功能可用但无性能/CPU 收益；prefetch v1 板上无收益。
 - 仍然不宣称：end-to-end CPU speedup、L>512、continuous batching/decode。
