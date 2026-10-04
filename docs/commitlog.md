@@ -2,6 +2,42 @@
 
 ## 2026-10-04
 
+## 2026-10-04
+
+### v3.6.3 — 新默认签核：busy poll + auto 长度感知 transport 分层（E2E geo -19.17%）
+
+改进 a 落地（driver-only，bit 复用 afa21bfb）：
+
+1. **`LARA_REQUEST_POLL_SLEEP_US` 默认 20 → 0（busy poll）**：板上已证
+   E2E -4.48%（2026-10-04 七组测量）。
+2. **`LARA_STREAM_MODE=auto` 长度感知**：`seq_len ≤ 32` 且 bitstream 支持
+   时自动选 in-band（v3.6.2 签核的短序列最优），否则 descriptor；
+   `INBAND_AUTO_MAX_SEQ_LEN=32`（板测交叉点在 L32 -18.7% 与 L64 -1.0%
+   之间）。旧 bitstream（无 in-band 能力位）自动回退 descriptor，行为
+   不变。
+
+**板上验证（v3.6.1 bitstream + 本 driver，q3kv3+q31kv7 全长度）**：auto
+功能矩阵 24/24 bit-exact（L1/16/32 走 in-band、L64+ 走 descriptor，profile
+正确记录分层）；20-case 性能 A/B（新默认 vs 旧默认 sleep-poll/descriptor）：
+
+```text
+E2E  几何平均 -19.17%（L1 -39.4% / L16 -25.3% / L32 -23.0% /
+                    L64 -1.3% / L128 -1.3%，无任何长度退化）
+PL_TX 几何平均 -48.99%
+```
+
+**过程中发现并修复一个真 bug**：v3.6.2 的 staging 环境门控存在半成品
+编辑——`_q_staging_enabled` 有解析但调用点未生效，非 in-band 模式下
+staging 无条件执行（板上表现为 L128 `driver_setup_ms` 0.2→12.4 ms、
+E2E +4.6%）。本版修复调用点门控并新增两个回归单测
+（staging 默认 off 不预装载 / =on 才预装载），杜绝复发。这也修正了
+v3.6.2 记录中"Q-arena +4.24%"的对照口径：该数字含 staging 被强制开启
+的影响，修复后 default-off 路径 L64/L128 相对旧默认为 -1.3%。
+
+门禁：Python golden 7/7、sw/tests 45/45、Verilator lint 0、VCS 完整回归
+（synth+XPM）28/28；板上 auto 功能矩阵 24/24 + 性能 A/B 20/20 全部
+bit-exact。结果归档 `temp/v3_6_3/`。
+
 ### v3.6.2 — in-band 板上性能签核与 Q-arena 实验结论（短序列 transport 分层确立）
 
 在 v3.6.1 bitstream（afa21bfb）上完成短序列 host gap 攻坚（改进 b）的

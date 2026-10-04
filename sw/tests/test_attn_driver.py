@@ -152,13 +152,57 @@ class AttentionDriverTest(unittest.TestCase):
         self.assertEqual(profile.input_dma_batched_transfers, N_KV_HEADS)
         self.assertEqual(profile.input_dma_max_segments, 3)
 
+    def test_auto_selects_inband_only_for_short_sequences(self):
+        # With both transports advertised, auto must layer: in-band for
+        # L <= INBAND_AUTO_MAX_SEQ_LEN, descriptor above it.
+        for seq_len, expected in ((1, "inband"), (32, "inband"), (64, "descriptor"), (128, "descriptor")):
+            with AttentionAccelerator(stream_mode="auto") as accel:
+                q = np.zeros((N_Q_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+                k = np.zeros((N_KV_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
+                accel.run_attention(q, k, k, seq_len=seq_len)
+                profile = accel.last_profile
+                assert profile is not None
+                self.assertEqual(profile.input_transport, expected,
+                                 f"L={seq_len} should pick {expected}")
+
+    def test_q_staging_default_off_does_not_preStage(self):
+        # v3.6.3 regression guard: the staging gate at the run_attention call
+        # site must actually consult LARA_Q_STAGING (a partial edit once left
+        # staging unconditional, silently adding ~12 ms of pre-START work at
+        # L=128 on the board).
+        with AttentionAccelerator(stream_mode="descriptor") as accel:
+            q = np.zeros((N_Q_HEADS, 4, HEAD_DIM), dtype=np.uint16)
+            k = np.zeros((N_KV_HEADS, 4, HEAD_DIM), dtype=np.uint16)
+            accel.run_attention(q, k, k, seq_len=4)
+            self.assertFalse(accel._q_arena_staged)
+            self.assertEqual(accel._q_arena_offsets, {})
+
+    def test_q_staging_on_preStages(self):
+        # Explicit descriptor mode: auto would pick in-band at this short
+        # length, and the in-band path never uses the arena.
+        with patch.dict("os.environ", {"LARA_Q_STAGING": "on"}):
+            with AttentionAccelerator(stream_mode="descriptor") as accel:
+                q = np.zeros((N_Q_HEADS, 4, HEAD_DIM), dtype=np.uint16)
+                k = np.zeros((N_KV_HEADS, 4, HEAD_DIM), dtype=np.uint16)
+                accel.run_attention(q, k, k, seq_len=4)
+                self.assertTrue(accel._q_arena_staged)
+                self.assertIn((0, 0, 0), accel._q_arena_offsets)
+
+    def test_default_poll_sleep_is_busy(self):
+        # Board-validated default (v3.6.3): 0 us busy polling.
+        accel = AttentionAccelerator()
+        self.assertEqual(accel._request_poll_sleep_us, 0.0)
+
     def test_legacy_hardware_falls_back_to_single_destination_dma(self):
         seq_len = 1
         q = np.zeros((N_Q_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
         k = np.zeros((N_KV_HEADS, seq_len, HEAD_DIM), dtype=np.uint16)
         v = np.zeros_like(k)
         accel = AttentionAccelerator()
+        # Model legacy hardware: neither descriptor queue nor in-band framing
+        # is available, so auto must fall back to per-segment legacy DMA.
         accel._descriptor_queue_supported = False
+        accel._inband_command_supported = False
 
         accel.run_attention(q, k, v, seq_len=seq_len)
 

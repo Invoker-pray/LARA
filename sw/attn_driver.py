@@ -133,7 +133,10 @@ MAX_INPUT_DESCRIPTORS = (
     + N_Q_HEADS * ((MAX_SEQ_LEN + TILE_Q - 1) // TILE_Q)
 )
 MAX_STREAM_INPUT_BYTES = MAX_INPUT_PAYLOAD_BYTES + 4 * MAX_INPUT_DESCRIPTORS
-DEFAULT_REQUEST_POLL_SLEEP_US = 20.0
+# Board A/B (2026-10-04, v3.6.1 bitstream, 20-case geomean) shows busy
+# polling (0) beats a 20 us sleep by 4.48% E2E / 4.57% PL transaction: the
+# sleep granularity delays request discovery while the PL is stalled.
+DEFAULT_REQUEST_POLL_SLEEP_US = 0.0
 REQUEST_POLL_SLEEP_US_ENV = "LARA_REQUEST_POLL_SLEEP_US"
 STREAM_MODE_ENV = "LARA_STREAM_MODE"
 STREAM_MODES = ("auto", "inband", "descriptor", "legacy")
@@ -141,6 +144,9 @@ PREFETCH_MODE_ENV = "LARA_PREFETCH_MODE"
 PREFETCH_MODES = ("off", "descriptor", "inband")
 REQUEST_MODE_ENV = "LARA_REQUEST_MODE"
 REQUEST_MODES = ("poll", "irq", "auto")
+# Short-sequence ceiling for the auto in-band selection; board-measured
+# crossover sits between L=32 (in-band -18.7%) and L=64 (-1.0%).
+INBAND_AUTO_MAX_SEQ_LEN = 32
 Q_STAGING_ENV = "LARA_Q_STAGING"
 Q_STAGING_MODES = ("off", "on")
 
@@ -837,13 +843,17 @@ class AttentionAccelerator:
                 time.sleep(min(self._request_poll_sleep_s, max(0.0, deadline - time.perf_counter())))
         return False
 
-    def _prepare_input_transport(self) -> None:
+    def _prepare_input_transport(self, seq_len: int) -> None:
         mode = self._requested_stream_mode
         if mode == "auto":
-            # Descriptor batching keeps the legacy destination contract while
-            # reducing DMA transactions.  In-band framing is experimental and
-            # must be selected explicitly until its board-level gate passes.
-            if self._descriptor_queue_supported:
+            # Length-aware layering (board-validated 2026-10-04): the in-band
+            # single-transfer stream collapses per-request host round-trips
+            # and wins clearly for short sequences (E2E -30.3%/-23.8%/-18.7%
+            # at L=1/16/32), while longer sequences are compute-bound and
+            # keep descriptor batching (+5.8% E2E if forced in-band at L=128).
+            if seq_len <= INBAND_AUTO_MAX_SEQ_LEN and self._inband_command_supported:
+                mode = "inband"
+            elif self._descriptor_queue_supported:
                 mode = "descriptor"
             else:
                 mode = "legacy"
@@ -1323,16 +1333,20 @@ class AttentionAccelerator:
         setup_start = time.perf_counter()
         self.configure(L, q_pos_base=q_pos_base, kv_pos_base=kv_pos_base, causal=causal)
         self.clear_status()
-        self._prepare_input_transport()
+        self._prepare_input_transport(L)
         self._prepare_prefetch()
         self._prepare_irq()
-        if not self._inband_command_enabled:
-            # Interactive transports service one Q request at a time; stage
-            # every tile into CMA now so the request critical path is only a
-            # descriptor push plus a zero-copy DMA slice.  The in-band path
-            # packs its own single stream and does not use the arena.
+        if not self._inband_command_enabled and self._q_staging_enabled:
+            # Opt-in experimental path (LARA_Q_STAGING=on): pre-stage every Q
+            # tile into CMA so a Q request is one descriptor push plus a
+            # zero-copy DMA slice.  Board A/B (2026-10-04) shows the PL-side
+            # q_dma_setup halves, but host E2E does not improve because the
+            # request loop is host-bound and the staging work simply moves
+            # before START; default off, in-band is the validated short path.
             self._q_arena_staged = False
             self._stage_q_arena(q_heads, L)
+        else:
+            self._q_arena_staged = False
         self.last_profile.descriptor_queue_enabled = self._descriptor_queue_enabled
         self.last_profile.inband_command_enabled = self._inband_command_enabled
         self.last_profile.kv_prefetch_enabled = self._kv_prefetch_active

@@ -326,3 +326,16 @@ PL transaction geo -9.31%），但 host E2E 反而 +4.24%。根因：L1 的请�
 量（如 in-band 单传输把 40 次往返折成 1 次，E2E -14.55%），而不是把 host
 工作在时间轴上重新安排。PL 侧计数器（stall/buffer_wait/q_dma_setup）的
 改善只有在 PL-bound 场景才转化为 E2E。
+
+## 18. 半成品编辑会静默改变默认行为——功能测试不查性能
+
+v3.6.2 的 staging 门控编辑分两步执行，第二步断言失败导致第一步的调用点
+替换**整体未写盘**，但 env 解析部分已写入——结果 `_q_staging_enabled`
+有值却无人消费，staging 在所有非 in-band 事务上无条件执行。功能全绿
+（bit-exact、45 单测），只有板上 `driver_setup_ms` 0.2→12.4 ms 暴露了它。
+
+**规则**：(1) 多段 python 编辑脚本必须单事务化（先全部 assert 再统一
+写盘），或写盘后立即 grep 验证每个门控点真实存在；(2) 新增开关必须配
+"默认 off 时不产生副作用"的回归单测（本例补了 `_q_arena_staged` 两态
+断言）；(3) profile 里的 setup 类计时段（driver_setup_ms 等)每次板测
+A/B 都要扫一眼基线漂移。
