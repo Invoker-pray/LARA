@@ -165,28 +165,27 @@ class AttentionDriverTest(unittest.TestCase):
                 self.assertEqual(profile.input_transport, expected,
                                  f"L={seq_len} should pick {expected}")
 
-    def test_q_staging_default_off_does_not_preStage(self):
-        # v3.6.3 regression guard: the staging gate at the run_attention call
-        # site must actually consult LARA_Q_STAGING (a partial edit once left
-        # staging unconditional, silently adding ~12 ms of pre-START work at
-        # L=128 on the board).
+    def test_interactive_mode_always_stages(self):
+        # v3.8: staging is unconditional for interactive transports since
+        # tensors are pre-converted (cost = one CMA copy).  The old
+        # LARA_Q_STAGING env gate is retired; the arena must always be
+        # staged and request slices must resolve.
         with AttentionAccelerator(stream_mode="descriptor") as accel:
             q = np.zeros((N_Q_HEADS, 4, HEAD_DIM), dtype=np.uint16)
             k = np.zeros((N_KV_HEADS, 4, HEAD_DIM), dtype=np.uint16)
             accel.run_attention(q, k, k, seq_len=4)
-            self.assertFalse(accel._q_arena_staged)
-            self.assertEqual(accel._q_arena_offsets, {})
+            self.assertTrue(accel._q_arena_staged)
+            self.assertIn((0, 0, 0), accel._q_arena_offsets)
 
-    def test_q_staging_on_preStages(self):
-        # Explicit descriptor mode: auto would pick in-band at this short
-        # length, and the in-band path never uses the arena.
-        with patch.dict("os.environ", {"LARA_Q_STAGING": "on"}):
-            with AttentionAccelerator(stream_mode="descriptor") as accel:
-                q = np.zeros((N_Q_HEADS, 4, HEAD_DIM), dtype=np.uint16)
-                k = np.zeros((N_KV_HEADS, 4, HEAD_DIM), dtype=np.uint16)
-                accel.run_attention(q, k, k, seq_len=4)
-                self.assertTrue(accel._q_arena_staged)
-                self.assertIn((0, 0, 0), accel._q_arena_offsets)
+    def test_inband_mode_does_not_stage(self):
+        # In-band packs its own single stream; the arena stays unstaged.
+        with AttentionAccelerator(stream_mode="inband") as accel:
+            accel._inband_command_supported = True
+            accel._descriptor_queue_supported = True
+            q = np.zeros((N_Q_HEADS, 4, HEAD_DIM), dtype=np.uint16)
+            k = np.zeros((N_KV_HEADS, 4, HEAD_DIM), dtype=np.uint16)
+            accel.run_attention(q, k, k, seq_len=4)
+            self.assertFalse(accel._q_arena_staged)
 
     def test_default_poll_sleep_is_busy(self):
         # Board-validated default (v3.6.3): 0 us busy polling.

@@ -600,6 +600,11 @@ class AttentionAccelerator:
         self._q_send_buf = self._allocate_buffer(Q_TILE_BYTES)
         self._batch_send_buf = self._allocate_buffer(MAX_BATCH_INPUT_BYTES)
         self._q_arena = self._allocate_buffer(MAX_Q_ARENA_BYTES)
+        # Whole-tensor bf16 caches, rebuilt by _preconvert_tensors per
+        # transaction; interactive requests serve zero-conversion views.
+        self._q_bf16: np.ndarray | None = None
+        self._k_bf16: np.ndarray | None = None
+        self._v_bf16: np.ndarray | None = None
         # Offset (bytes) of each staged Q tile, keyed by (group, head, tile).
         self._q_arena_offsets: dict[tuple[int, int, int], int] = {}
         self._q_arena_staged = False
@@ -1065,9 +1070,19 @@ class AttentionAccelerator:
         offset = 0
         segments: list[tuple[int, int]] = []
 
-        def append_segment(dest: int, payload: np.ndarray) -> None:
+        # Whole-tensor bf16 conversion is ~50x faster than per-segment calls
+        # (one vectorized numpy op vs 48+ round trips through the rounding
+        # pipeline).  All segment payloads are byte-identical views into
+        # these pre-converted arrays.
+        q_u16 = fp32_to_bf16_u16(q_heads)
+        k_u16 = fp32_to_bf16_u16(k_heads)
+        v_u16 = fp32_to_bf16_u16(v_heads)
+        q_u8 = q_u16.reshape(-1).view(np.uint8)
+        k_u8 = k_u16.reshape(-1).view(np.uint8)
+        v_u8 = v_u16.reshape(-1).view(np.uint8)
+
+        def append_bytes(dest: int, payload_u8: np.ndarray) -> None:
             nonlocal offset
-            payload_u8 = fp32_to_bf16_u16(payload).reshape(-1).view(np.uint8)
             nbytes = int(payload_u8.nbytes)
             header = self._descriptor_word(dest, nbytes)
             wire_end = offset + 4 + nbytes
@@ -1084,18 +1099,22 @@ class AttentionAccelerator:
             offset += nbytes
             segments.append((dest, nbytes))
 
+        def append_segment(dest: int, payload: np.ndarray) -> None:
+            append_bytes(dest, fp32_to_bf16_u16(payload).reshape(-1).view(np.uint8))
+
         q_tiles = (seq_len + TILE_Q - 1) // TILE_Q
+        head_stride = seq_len * HEAD_DIM * BF16_BYTES
+        tile_stride = TILE_Q * HEAD_DIM * BF16_BYTES
         for group in range(N_KV_HEADS):
-            append_segment(DEST_K_CACHE, k_heads[group, :seq_len, :])
-            append_segment(DEST_V_CACHE, v_heads[group, :seq_len, :])
+            kv_off = group * head_stride
+            append_bytes(DEST_K_CACHE, k_u8[kv_off:kv_off + head_stride])
+            append_bytes(DEST_V_CACHE, v_u8[kv_off:kv_off + head_stride])
             for head in range(GQA_GROUP_SIZE):
-                q_src = q_heads[group * GQA_GROUP_SIZE + head]
+                head_idx = group * GQA_GROUP_SIZE + head
                 for tile in range(q_tiles):
-                    self._q_tile_words.fill(0)
-                    lo = tile * TILE_Q
-                    active = max(0, min(TILE_Q, seq_len - lo))
-                    self._q_tile_words[:active, :] = q_src[lo:lo + TILE_Q, :]
-                    append_segment(DEST_Q_BUF, self._q_tile_words)
+                    lo = head_idx * head_stride + tile * tile_stride
+                    hi = min(lo + tile_stride, (head_idx + 1) * head_stride)
+                    append_bytes(DEST_Q_BUF, q_u8[lo:hi])
 
         buf_view = self._stream_send_buf[:offset]
         flush = getattr(buf_view, "flush", None) or getattr(self._stream_send_buf, "flush", None)
@@ -1123,29 +1142,30 @@ class AttentionAccelerator:
                 time.sleep(self._request_poll_sleep_s)
 
     def _stage_q_arena(self, q_heads: np.ndarray, seq_len: int) -> None:
-        """Pre-convert and pre-copy every Q tile into the CMA arena.
+        """Copy every Q tile from the pre-converted bf16 tensor into the CMA arena.
 
-        The RTL request sequence is deterministic, so all conversion,
-        packing, and cache maintenance can happen once before START instead
-        of on the request critical path where the PL is stalled waiting.
+        Called after _preconvert_tensors; the only work here is padding partial
+        tiles to TILE_Q rows and a single CMA copy pass with one flush.
         """
         tiles = (seq_len + TILE_Q - 1) // TILE_Q
         offset = 0
         self._q_arena_offsets = {}
+        q_u8 = self._q_bf16.reshape(-1).view(np.uint8)
+        head_stride = seq_len * HEAD_DIM * BF16_BYTES
+        tile_stride = TILE_Q * HEAD_DIM * BF16_BYTES
         for head_idx in range(N_Q_HEADS):
             group = head_idx // GQA_GROUP_SIZE
             head = head_idx % GQA_GROUP_SIZE
-            q_src = q_heads[head_idx]
             for tile in range(tiles):
-                self._q_tile_words.fill(0)
-                lo = tile * TILE_Q
-                active = max(0, min(TILE_Q, seq_len - lo))
-                self._q_tile_words[:active, :] = q_src[lo:lo + TILE_Q, :]
-                payload_u8 = fp32_to_bf16_u16(self._q_tile_words).reshape(-1).view(np.uint8)
-                nbytes = int(payload_u8.nbytes)
-                self._q_arena[offset:offset + nbytes] = payload_u8
+                lo = head_idx * head_stride + tile * tile_stride
+                hi = min(lo + tile_stride, (head_idx + 1) * head_stride)
+                nbytes = hi - lo
+                self._q_arena[offset:offset + nbytes] = q_u8[lo:hi]
+                # Zero-pad a partial last tile up to TILE_Q rows.
+                if nbytes < tile_stride:
+                    self._q_arena[offset + nbytes:offset + tile_stride] = 0
                 self._q_arena_offsets[(group, head, tile)] = offset
-                offset += nbytes
+                offset += tile_stride
         flush = getattr(self._q_arena, "flush", None)
         if callable(flush):
             flush()
@@ -1168,6 +1188,18 @@ class AttentionAccelerator:
         """
         return self._q_tile_slice(req).view(np.uint16).reshape(TILE_Q, HEAD_DIM)
 
+    def _preconvert_tensors(self, q_heads: np.ndarray, k_heads: np.ndarray, v_heads: np.ndarray) -> None:
+        """Convert the full Q/K/V tensors to bf16 once per transaction.
+
+        The interactive request path then serves pre-converted uint16 views
+        without re-running the rounding pipeline per segment (~150 us per
+        call on the KV260 A53; 128 Q requests at L=128 previously spent
+        ~19 ms in per-request conversion inside the PL-stall critical path).
+        """
+        self._q_bf16 = fp32_to_bf16_u16(q_heads)
+        self._k_bf16 = fp32_to_bf16_u16(k_heads)
+        self._v_bf16 = fp32_to_bf16_u16(v_heads)
+
     def _q_tile_payload(
         self,
         req: int,
@@ -1188,21 +1220,16 @@ class AttentionAccelerator:
         if req & 1:
             group = (req >> 4) & 0x7
             segments = [
-                (DEST_K_CACHE, k_heads[group, :seq_len, :]),
-                (DEST_V_CACHE, v_heads[group, :seq_len, :]),
+                (DEST_K_CACHE, self._k_bf16[group, :seq_len, :]),
+                (DEST_V_CACHE, self._v_bf16[group, :seq_len, :]),
             ]
             if req & 2:
-                if self._q_arena_staged:
-                    # Staged tile passes through fp32_to_bf16_u16 unchanged;
-                    # only the K/V conversion and one packing copy remain.
-                    segments.append((DEST_Q_BUF, self._q_tile_slice_u16(req)))
-                else:
-                    segments.append((DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len)))
+                segments.append((DEST_Q_BUF, self._q_tile_slice_u16(req)))
             self._transfer_batch(segments)
         elif req & 2:
-            if self._q_arena_staged and self._descriptor_queue_enabled:
-                # Dominant short-sequence path: one descriptor push plus a
-                # zero-copy DMA slice of the pre-staged Q arena.
+            if self._descriptor_queue_enabled:
+                # One descriptor push plus a zero-copy DMA slice of the
+                # pre-converted Q tensor staged in the arena.
                 self._transfer_staged(DEST_Q_BUF, self._q_tile_slice(req))
             else:
                 self._transfer(DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len))
@@ -1331,18 +1358,18 @@ class AttentionAccelerator:
         self.last_profile.input_pack_ms = (time.perf_counter() - pack_start) * 1000.0
 
         setup_start = time.perf_counter()
+        self._preconvert_tensors(q_u16, k_u16, v_u16)
         self.configure(L, q_pos_base=q_pos_base, kv_pos_base=kv_pos_base, causal=causal)
         self.clear_status()
         self._prepare_input_transport(L)
         self._prepare_prefetch()
         self._prepare_irq()
-        if not self._inband_command_enabled and self._q_staging_enabled:
-            # Opt-in experimental path (LARA_Q_STAGING=on): pre-stage every Q
-            # tile into CMA so a Q request is one descriptor push plus a
-            # zero-copy DMA slice.  Board A/B (2026-10-04) shows the PL-side
-            # q_dma_setup halves, but host E2E does not improve because the
-            # request loop is host-bound and the staging work simply moves
-            # before START; default off, in-band is the validated short path.
+        if not self._inband_command_enabled:
+            # Interactive transports always stage the Q arena: tensors are
+            # already whole-tensor bf16 converted, so staging is a single
+            # CMA copy pass plus one flush.  Requests then serve zero-copy
+            # arena slices instead of running the rounding pipeline per
+            # segment inside the PL-stall critical path.
             self._q_arena_staged = False
             self._stage_q_arena(q_heads, L)
         else:

@@ -2,6 +2,35 @@
 
 ## 2026-10-05
 
+### v3.8.0 — 全张量 bf16 预转换消除 host 侧逐段转换（driver-only）
+
+板上 v3.7.0 数据分解定位了两个 host 侧瓶颈：
+
+1. **in-band 流打包**：`_pack_inband_stream` 对 48 个 segment 各做一次
+   `fp32_to_bf16_u16` 调用 = 7.26ms（L1）。整张张量一次向量化转换只需
+   0.04ms（本机基准 48×逐段 1.82ms vs 1×整张 0.038ms，板上 A53 约 4 倍
+   慢）。**向量化后 in-band L1-32 的 host gap 预计 -7ms**。
+2. **descriptor 模式逐请求转换**：每个 Q/K/V 请求服务时执行
+   `fp32_to_bf16_u16`（~150µs），L128 的 128 Q + 8 KV 请求共 ~19ms 在
+   PL-stall 关键路径上。**预转换后降为 0（只余 CMA 拷贝）**。
+
+实现：`_preconvert_tensors` 在 `run_attention` start 前一次性转换整张
+Q/K/V；`_pack_inband_stream` 改为直接从预转换数组切片（零转换拷贝）；
+`_stage_q_arena` 简化为纯 CMA 拷贝（零填充部分 tile）；`_service_request`
+全部走预转换视图。`LARA_Q_STAGING` 环境变量退役（staging 对交互模式
+无条件启用，成本仅为一次 CMA 拷贝）。
+
+优化②（exact dataflow）分析结论：L128 compute measured 6,554,880 cycles
+vs 理论 1,487,104 cycles（256 blocks × 5809 cy streaming）= **4.4 倍
+pipeline 气泡**。这不是单一 RTL 缺陷而是架构级 Phase A/B 仲裁 + 控制器
+turnaround 的累积效应，需要 VCS 波形级 profiling 定位气泡源后再做手术。
+本轮不动 RTL。
+
+门禁：golden 7/7、sw/tests 45/45（含更新的 staging/inband 契约测试）、
+Verilator lint 0、VCS 完整回归 28/28。
+
+## 2026-10-05
+
 ### v3.7.0 — Q head/group 边界预取（改进 c RTL 主线，板上验证通过）
 
 改进 c 落地。前置证据：K/V 物理 double-bank 经资源扫描判定 **no-go**
