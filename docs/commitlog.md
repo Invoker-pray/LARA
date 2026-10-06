@@ -1,5 +1,61 @@
 # LARA 项目提交记录
 
+## 2026-10-05
+
+### v3.7.0 — Q head/group 边界预取（改进 c RTL 主线，板上验证通过）
+
+改进 c 落地。前置证据：K/V 物理 double-bank 经资源扫描判定 **no-go**
+（URAM 48/64，K cache 8×128Kb + V cache 8×128Kb 翻倍需 +16~32 URAM 超出
+器件；且 K/V 装载时间相对计算可忽略——L512 时 ~2ms vs 1300ms active，
+翻倍 bank 无可测收益）。真实剩余瓶颈（v3.6.3 auto 板测）：L1-L32 in-band
+的 host_gap 8.6-10.4ms > PL stall 2.0-5.5ms，其中 head 边界 ST_Q_INIT
+的 Q fill 等待占主导。
+
+**RTL（`attn_core.sv`，完成 v3.1 设计遗留的 head 预取项）**：
+
+- `buf_sel` 在每个消费单元边界（tile 或 head/group）翻转；
+- 最后一个 tile 期间发射下一 head/group 的 tile-0 请求到对侧 bank
+  （`q_prefetch_next_head_or_group = kv_tile_last && last Q tile &&
+  !最终head&&最终group`），任何 tiles-per-head 奇偶性下预取 bank 与
+  后继单元的 compute bank 一致；
+- `q_load_bank_sel` 在五个计算状态统一指向 `~buf_sel`；
+  `q_ready_bank_sel` 在 NORMALIZE/WRITE_O 指向预取 bank（发射条件
+  `!q_load_done` 的语义为"预取未完成"）；
+- head 边界 next_state 增加 `q_load_done` 直通 KV_READ（跳过 ST_Q_INIT
+  的同步重载往返）；
+- `kv_tile_last` 输出补上 NORMALIZE/WRITE_O 的赋值（原先仅四个 MAC
+  状态赋值，head 预取条件在这两个状态恒为 0 是首版静默失败的根因）。
+
+**调试中修复的两个协议 bug**（强化后的 +HEAD_GROUP_PREFETCH 验收门
+暴露）：① head 预取缺 last-Q-tile 守卫时，中间 tile 的最后一个 KV tile
+会触发 `q_req` 重写为 next-head，把本应请求 next-tile 的 tile 预取
+latch 成错误 tag（L512 请求翻倍 992/512）；② NORMALIZE 的
+`q_ready_bank_sel` 仍指向当前 bank，tag 与 next-tile 请求不匹配导致
+`q_load_done=0` 重复发射。验收门条件同步强化（要求
+`q_tile_idx==q_tile_last_idx`，防止 tile 预取冒充 head 预取通过检查）。
+
+**门禁（全部通过）**：Python golden 7/7、sw/tests 45/45、Verilator lint 0、
+VCS 完整回归 28/28（synth+XPM）、loop_control/loop_control_delayed
+`+HEAD_GROUP_PREFETCH` 验收门激活 PASS（首版未激活时为静默跳过）、
+板级 case 仿真矩阵两套 position base 全长度 bit-exact PASS。
+
+**Vivado（build-v3_7_head_prefetch_20261004，bit d6089595b23ae9ac…）**：
+WNS **+0.243**（优于 v3.6.1 的 +0.198）、TNS/WHS/THS 全零、资源
+LUT 77,607（+61）/ FF 85,759 / BRAM 50 / URAM 48 / DSP 56。DRC 0 Error。
+
+**板上验证（KV260，auto 模式，20-case A/B）**：功能矩阵 24/24
+bit-exact PASS。性能对比 v3.6.3（同 driver 同 20 case）：
+
+```text
+E2E  geo -3.43%（L1 -0.3% / L16 -8.4% / L32 -6.1% / L64 -1.2% / L128 -0.4%）
+PL_TX geo -7.09%
+相对 v3.6.1 旧默认累计：E2E geo 约 -21.5%（L1 -39.5% / L16 -31.6% / L32 -27.7%）
+```
+
+L16/L32 收益符合设计预期（head 边界的 Q fill 等待被折叠）；L1 变化
+在噪声内（单 tile 序列 head 预取的提前量已被 in-band 段头门控吸收）；
+L64/L128 小幅受益于 head 边界跳过 ST_Q_INIT。结果归档 `temp/v3_7/`。
+
 ## 2026-10-04
 
 ## 2026-10-04

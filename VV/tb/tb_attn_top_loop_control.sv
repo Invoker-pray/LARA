@@ -155,19 +155,23 @@ module tb_attn_top_loop_control;
         saw_group_switch_prefetch = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
           (dut.u_fsm.state == ST_WRITE_O) &&
+          (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx) &&
           (dut.u_fsm.head_cnt < 2'd3))
         saw_head_switch_prefetch = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
           (dut.u_fsm.state == ST_WRITE_O) &&
+          (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx) &&
           (dut.u_fsm.head_cnt == 2'd3) &&
           (dut.u_fsm.group_cnt < 3'd7))
         saw_group_switch_prefetch = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
           (dut.u_fsm.state == ST_NORMALIZE) &&
+          (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx) &&
           (dut.u_fsm.head_cnt < 2'd3))
         saw_head_switch_prefetch_norm = 1'b1;
       if ((dut.q_load_start && !q_load_start_d) &&
           (dut.u_fsm.state == ST_NORMALIZE) &&
+          (dut.u_fsm.q_tile_idx == dut.u_fsm.q_tile_last_idx) &&
           (dut.u_fsm.head_cnt == 2'd3) &&
           (dut.u_fsm.group_cnt < 3'd7))
         saw_group_switch_prefetch_norm = 1'b1;

@@ -339,3 +339,13 @@ v3.6.2 的 staging 门控编辑分两步执行，第二步断言失败导致第�
 "默认 off 时不产生副作用"的回归单测（本例补了 `_q_arena_staged` 两态
 断言）；(3) profile 里的 setup 类计时段（driver_setup_ms 等)每次板测
 A/B 都要扫一眼基线漂移。
+
+## 19. 验收门 plusarg 必须真正激活过一次才算覆盖
+
+v3.1 时代给 loop_control TB 加的 `+HEAD_GROUP_PREFETCH` 门控检查，直到
+v3.7 实现该功能才第一次带 plusarg 运行——首版实现静默失败（`kv_tile_last`
+在 NORMALIZE/WRITE_O 未赋值，预取条件恒 0），而默认模式跑全回归 28/28
+全绿。**规则**：给 TB 加 plusarg 门控的同时，必须在同一提交里用该 plusarg
+实际跑一次并记录 PASS；CI 若只跑默认模式，门控检查等于不存在。同时，
+验收条件要与被验行为严格对应（head 预取检查要求 last Q tile，防止
+tile 预取在非最后 tile 触发时冒充通过）。

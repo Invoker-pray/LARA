@@ -212,17 +212,26 @@ module attn_core
       ((state == ST_QK_DOT) || (state == ST_SOFTMAX) || (state == ST_AV_DOT) ||
        (state == ST_NORMALIZE) || (state == ST_WRITE_O)) &&
       (head_cnt == LAST_Q_HEAD) && (group_cnt < LAST_GQA_GROUP);
-  // A head/group transition reuses the same Q bank when the current Q tile
-  // is the only tile.  Do not prefetch the following head into that bank while
-  // it is still being consumed; the next head is loaded synchronously through
-  // ST_Q_INIT after the current writeback completes.
-  assign q_prefetch_next_head_or_group = 1'b0;
+  // v3.7: at the last KV tile of a Q tile there is no next-tile prefetch;
+  // issue the next head/group's tile-0 request early instead.  buf_sel now
+  // toggles at every consumer-unit boundary (tile or head/group), so the
+  // prefetch target ~buf_sel is exactly the bank the next unit computes
+  // from, for any tiles-per-head parity.  The final head of the final group
+  // has no successor and stays quiet.
+  assign q_prefetch_next_head_or_group = kv_tile_last &&
+      (q_tile_idx == q_tile_last_idx) &&
+      !((head_cnt == LAST_Q_HEAD) && (group_cnt == LAST_GQA_GROUP));
   assign q_prefetch_head_or_group_early = 1'b0;
-  assign q_load_bank_sel = (((state == ST_QK_DOT) || (state == ST_SOFTMAX) || (state == ST_AV_DOT) ||
-                             ((state == ST_NORMALIZE) && (q_tile_idx < q_tile_last_idx)) ||
-                             ((state == ST_WRITE_O) && (q_tile_idx < q_tile_last_idx))) &&
-                            (q_tile_idx < q_tile_last_idx)) ? ~buf_sel : buf_sel;
-  assign q_ready_bank_sel = ((state == ST_WRITE_O) && (q_tile_idx < q_tile_last_idx)) ? ~buf_sel : buf_sel;
+  // During the compute states a prefetch (next tile, or next head/group at
+  // the last tile) always targets the bank the successor unit will use.
+  assign q_load_bank_sel = ((state == ST_QK_DOT) || (state == ST_SOFTMAX) ||
+                            (state == ST_AV_DOT) || (state == ST_NORMALIZE) ||
+                            (state == ST_WRITE_O)) ? ~buf_sel : buf_sel;
+  // At ST_NORMALIZE/ST_WRITE_O the pending prefetch belongs to the successor
+  // unit, whose compute bank is ~buf_sel; q_load_done there must report the
+  // prefetched bank's readiness (the boundary toggle lands on the WRITE_O
+  // edge), otherwise the fire condition re-issues the same request.
+  assign q_ready_bank_sel = ((state == ST_WRITE_O) || (state == ST_NORMALIZE)) ? ~buf_sel : buf_sel;
 
   // ==================================================================
   // Config Validation
@@ -361,6 +370,9 @@ module attn_core
             end else begin
               q_tile_idx <= 8'd0;
               kv_tile_idx <= 8'd0;
+              // Consumer-unit boundary (head or group): the next unit's
+              // tile 0 computes from the bank the early prefetch filled.
+              buf_sel <= ~buf_sel;
               if (head_cnt < LAST_Q_HEAD) begin
                 head_cnt <= head_cnt + 2'd1;
               end else begin
@@ -423,7 +435,8 @@ module attn_core
           else             next_state = ST_Q_INIT;
         end
         else if (head_cnt < LAST_Q_HEAD) begin
-          next_state = ST_Q_INIT;
+          if (q_load_done) next_state = ST_KV_READ;
+          else             next_state = ST_Q_INIT;
         end
         else if (group_cnt < LAST_GQA_GROUP)
           next_state = ST_LOAD_KV;
@@ -494,10 +507,15 @@ module attn_core
       end
       ST_NORMALIZE: begin
         o_write_start = 1'b1;
+        // The head/group prefetch evaluates here and in ST_WRITE_O; without
+        // this assignment kv_tile_last would read 0 in exactly those states
+        // and the early request could never fire.
+        kv_tile_last = (kv_tile_idx == kv_tile_limit_idx);
         if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
           q_load_start = !q_load_inflight;
       end
       ST_WRITE_O: begin
+        kv_tile_last = (kv_tile_idx == kv_tile_limit_idx);
         if (!o_write_done)
           o_write_start = 1'b1;
         if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
