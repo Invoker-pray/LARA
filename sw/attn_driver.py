@@ -611,6 +611,7 @@ class AttentionAccelerator:
         self._stream_send_buf = self._allocate_buffer(MAX_STREAM_INPUT_BYTES)
         self._out_buf = self._allocate_buffer(MAX_OUTPUT_BYTES)
         self._q_tile_words = np.zeros((TILE_Q, HEAD_DIM), dtype=np.uint16)
+        self._q_tile_padded = np.zeros(TILE_Q * HEAD_DIM * BF16_BYTES, dtype=np.uint8)
         self._closed = False
         self.last_profile: RunProfile | None = None
         desc_status = self.mmio.read(CSR_DESC_STATUS)
@@ -1114,7 +1115,16 @@ class AttentionAccelerator:
                 for tile in range(q_tiles):
                     lo = head_idx * head_stride + tile * tile_stride
                     hi = min(lo + tile_stride, (head_idx + 1) * head_stride)
-                    append_bytes(DEST_Q_BUF, q_u8[lo:hi])
+                    nbytes = hi - lo
+                    if nbytes < tile_stride:
+                        # Partial last tile: the RTL tile buffer is TILE_Q
+                        # rows deep; without explicit zero padding the upper
+                        # rows carry stale data from a previous fill.
+                        self._q_tile_padded[:nbytes] = q_u8[lo:hi]
+                        self._q_tile_padded[nbytes:tile_stride] = 0
+                        append_bytes(DEST_Q_BUF, self._q_tile_padded[:tile_stride])
+                    else:
+                        append_bytes(DEST_Q_BUF, q_u8[lo:hi])
 
         buf_view = self._stream_send_buf[:offset]
         flush = getattr(buf_view, "flush", None) or getattr(self._stream_send_buf, "flush", None)
