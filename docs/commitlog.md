@@ -1,5 +1,34 @@
 # LARA 项目提交记录
 
+## 2026-10-08
+
+### v3.9.0 — L>64 懒转换 + 计算气泡 profiling（driver + TB，RTL 不变）
+
+**Driver**：`ARENA_STAGING_MAX_SEQ_LEN=64`——L≤64 时照常 CMA arena staging
+（成本可忽略）；L>64 跳过 arena 避免串行 START 前 ~5ms CMA 拷贝，Q 请求
+在关键路径内从预转换 bf16 张量按需组装零填充 tile（`_q_tile_from_bf16`，
+被 PL stall 覆盖，恢复 v3.7 时序特征）。修复 v3.8 L128 E2E +2.3% 回退。
+
+**TB profiling**（`tb_attn_top_board_case.sv` + `+COMPUTE_PROFILE`）：在
+已有 always 块内添加 FSM 状态驻留/Phase A-B pipeline active/block 计数。
+L128 causal q31kv7 实测分解（8.70M cycles 总量）：
+
+```text
+ST_QK_DOT  6,834,912  78.6%   ← 主导；其中 phasea_depth_active 仅 54%
+ST_AV_DOT    812,448   9.3%
+ST_WRITE_O   786,816   9.0%   ← writeback 串行段
+其他           267,012   3.1%
+```
+
+**关键发现**：QK 状态内 MAC 阵列只有 54% 周期在做 Phase A 乘法，
+另外 46%（3.15M cycles）是 Phase B streaming PV 抢占共享 MAC + Phase A
+等待 P-store 退休。这是架构级共享 MAC 时间复用损耗（16.7x vs 理论），
+不是单点 bug。**RTL 手术方向**（后续版本）：改善 A/B 仲裁的 MAC 槽位
+分配或增大 P-store 深度；writeback 9% 可通过更激进的 normalization
+overlap 压缩。
+
+门禁：golden 7/7、sw/tests 45/45、lint 0、VCS 28/28（synth+XPM）。
+
 ## 2026-10-05
 
 ### v3.8.0 — 全张量 bf16 预转换消除 host 侧逐段转换（driver-only，已板测签核）

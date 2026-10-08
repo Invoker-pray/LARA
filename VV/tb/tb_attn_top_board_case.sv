@@ -200,6 +200,10 @@ module tb_attn_top_board_case;
     end
   endtask
 
+  // Compute-bubble profiling (+COMPUTE_PROFILE)
+  integer prof_kv_read, prof_qk, prof_sm, prof_av, prof_norm, prof_write_o, prof_other;
+  integer prof_pa_win, prof_pb_win, prof_pa_depth, prof_blocks;
+
   always @(posedge clk) begin
     integer out_word;
     logic [31:0] expected_beat;
@@ -406,6 +410,19 @@ module tb_attn_top_board_case;
                dut.mac_block_out[0][0], dut.obuf_update, dut.obuf_row,
                dut.obuf_dim_blk, dut.obuf_corr_sel, dut.u_obuf.acc_data[0]);
     end
+    if (rst_n && $test$plusargs("COMPUTE_PROFILE")) begin
+      if (dut.u_fsm.state == 4'd3) prof_kv_read <= prof_kv_read + 1;
+      else if (dut.u_fsm.state == 4'd4) prof_qk <= prof_qk + 1;
+      else if (dut.u_fsm.state == 4'd5) prof_sm <= prof_sm + 1;
+      else if (dut.u_fsm.state == 4'd6) prof_av <= prof_av + 1;
+      else if (dut.u_fsm.state == 4'd7) prof_norm <= prof_norm + 1;
+      else if (dut.u_fsm.state == 4'd8) prof_write_o <= prof_write_o + 1;
+      else if (dut.u_fsm.state != 4'd0) prof_other <= prof_other + 1;
+      if (dut.phasea_window) prof_pa_win <= prof_pa_win + 1;
+      if (dut.phaseb_window) prof_pb_win <= prof_pb_win + 1;
+      if (dut.phasea_depth_active) prof_pa_depth <= prof_pa_depth + 1;
+      if (dut.mac_start && !dut.mac_phase) prof_blocks <= prof_blocks + 1;
+    end
     if (rst_n) begin
       phaseb_prev_state = dut.phaseb_state;
       phaseb_prev_micro = dut.phaseb_micro_idx;
@@ -481,6 +498,9 @@ module tb_attn_top_board_case;
     s_axis_tlast = 1'b0;
     errors = 0;
     output_beats = 0;
+    prof_kv_read = 0; prof_qk = 0; prof_sm = 0; prof_av = 0;
+    prof_norm = 0; prof_write_o = 0; prof_other = 0;
+    prof_pa_win = 0; prof_pb_win = 0; prof_pa_depth = 0; prof_blocks = 0;
     k_v_requests = 0;
     q_requests = 0;
     first_error_beat = -1;
@@ -556,6 +576,14 @@ module tb_attn_top_board_case;
     $display("PERF_CSR_AFTER_DONE total=%0d mac=%0d stall=%0d transport_stall=%0d buffer_wait=%0d",
              perf_cycles, perf_mac_cycles, perf_stall_cycles,
              perf_transport_stall_cycles, perf_buffer_wait_cycles);
+    if ($test$plusargs("COMPUTE_PROFILE")) begin
+      $display("COMPUTE_PROFILE FSM: kv_read=%0d qk=%0d sm=%0d av=%0d norm=%0d write_o=%0d other=%0d",
+               prof_kv_read, prof_qk, prof_sm, prof_av, prof_norm, prof_write_o, prof_other);
+      $display("COMPUTE_PROFILE PIPE: pa_win=%0d pb_win=%0d pa_depth=%0d blocks=%0d",
+               prof_pa_win, prof_pb_win, prof_pa_depth, prof_blocks);
+      $display("COMPUTE_PROFILE AVG: qk+av_per_block=%0d",
+               (prof_qk + prof_av) / (prof_blocks > 0 ? prof_blocks : 1));
+    end
 
     if (k_v_requests != N_KV_HEADS) begin
       $display("FAIL board case K/V requests got=%0d expected=%0d", k_v_requests, N_KV_HEADS);

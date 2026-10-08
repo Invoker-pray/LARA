@@ -147,6 +147,9 @@ REQUEST_MODES = ("poll", "irq", "auto")
 # Short-sequence ceiling for the auto in-band selection; board-measured
 # crossover sits between L=32 (in-band -18.7%) and L=64 (-1.0%).
 INBAND_AUTO_MAX_SEQ_LEN = 32
+# Above this length the serial arena staging cost (~5 ms at L128) exceeds
+# its request-loop savings; serve Q from per-request lazy assembly instead.
+ARENA_STAGING_MAX_SEQ_LEN = 64
 Q_STAGING_ENV = "LARA_Q_STAGING"
 Q_STAGING_MODES = ("off", "on")
 
@@ -612,6 +615,7 @@ class AttentionAccelerator:
         self._out_buf = self._allocate_buffer(MAX_OUTPUT_BYTES)
         self._q_tile_words = np.zeros((TILE_Q, HEAD_DIM), dtype=np.uint16)
         self._q_tile_padded = np.zeros(TILE_Q * HEAD_DIM * BF16_BYTES, dtype=np.uint8)
+        self._q_tile_words_u16 = np.zeros((TILE_Q, HEAD_DIM), dtype=np.uint16)
         self._closed = False
         self.last_profile: RunProfile | None = None
         desc_status = self.mmio.read(CSR_DESC_STATUS)
@@ -1189,6 +1193,24 @@ class AttentionAccelerator:
         offset = self._q_arena_offsets[(group, head, tile)]
         return self._q_arena[offset:offset + Q_TILE_BYTES]
 
+    def _q_tile_from_bf16(self, req: int, seq_len: int) -> np.ndarray:
+        """Assemble a zero-padded Q tile from the pre-converted bf16 tensor.
+
+        Used for long sequences (L > ARENA_STAGING_MAX_SEQ_LEN) where the
+        serial cost of arena staging exceeds its request-loop savings; the
+        assembly runs inside the request critical path but is overlapped
+        with PL stall, restoring the v3.7 timing profile.
+        """
+        group = (req >> 8) & 0x7
+        head = (req >> 12) & 0x3
+        tile = (req >> 16) & 0xFF
+        head_idx = group * GQA_GROUP_SIZE + head
+        lo = tile * TILE_Q
+        active = max(0, min(TILE_Q, seq_len - lo))
+        self._q_tile_words_u16.fill(0)
+        self._q_tile_words_u16[:active, :] = self._q_bf16[head_idx, lo:lo + TILE_Q, :]
+        return self._q_tile_words_u16
+
     def _q_tile_slice_u16(self, req: int) -> np.ndarray:
         """Staged Q tile as bf16 words (uint16) for _transfer_batch.
 
@@ -1234,15 +1256,16 @@ class AttentionAccelerator:
                 (DEST_V_CACHE, self._v_bf16[group, :seq_len, :]),
             ]
             if req & 2:
-                segments.append((DEST_Q_BUF, self._q_tile_slice_u16(req)))
+                if self._q_arena_staged:
+                    segments.append((DEST_Q_BUF, self._q_tile_slice_u16(req)))
+                else:
+                    segments.append((DEST_Q_BUF, self._q_tile_from_bf16(req, seq_len)))
             self._transfer_batch(segments)
         elif req & 2:
-            if self._descriptor_queue_enabled:
-                # One descriptor push plus a zero-copy DMA slice of the
-                # pre-converted Q tensor staged in the arena.
+            if self._q_arena_staged and self._descriptor_queue_enabled:
                 self._transfer_staged(DEST_Q_BUF, self._q_tile_slice(req))
             else:
-                self._transfer(DEST_Q_BUF, self._q_tile_payload(req, q_heads, seq_len))
+                self._transfer(DEST_Q_BUF, self._q_tile_from_bf16(req, seq_len))
 
     def start(self) -> None:
         if not (self.mmio.read(CSR_STATUS) & STATUS_START_READY):
@@ -1374,15 +1397,16 @@ class AttentionAccelerator:
         self._prepare_input_transport(L)
         self._prepare_prefetch()
         self._prepare_irq()
-        if not self._inband_command_enabled:
-            # Interactive transports always stage the Q arena: tensors are
-            # already whole-tensor bf16 converted, so staging is a single
-            # CMA copy pass plus one flush.  Requests then serve zero-copy
-            # arena slices instead of running the rounding pipeline per
-            # segment inside the PL-stall critical path.
+        if not self._inband_command_enabled and L <= ARENA_STAGING_MAX_SEQ_LEN:
+            # Short sequences: stage the Q arena (small CMA copy, negligible
+            # serial cost) so requests serve zero-copy slices.
             self._q_arena_staged = False
             self._stage_q_arena(q_heads, L)
         else:
+            # In-band packs its own stream; long interactive sequences skip
+            # the arena to avoid ~5 ms of serial pre-START CMA work that
+            # would otherwise add directly to E2E (board-measured at L128:
+            # driver_setup 0.25 -> 8.29 ms without this gate).
             self._q_arena_staged = False
         self.last_profile.descriptor_queue_enabled = self._descriptor_queue_enabled
         self.last_profile.inband_command_enabled = self._inband_command_enabled
