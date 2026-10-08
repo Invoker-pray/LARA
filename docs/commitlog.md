@@ -2,6 +2,21 @@
 
 ## 2026-10-05
 
+### v3.8.0 — 全张量 bf16 预转换消除 host 侧逐段转换（driver-only，已板测签核）
+
+**板上验证结果**（bit d6089595 复用 + 本 driver，24/24 bit-exact PASS，
+20-case A/B）：v3.8 vs v3.7 E2E geo **-2.84%**（L1 -5.3% / L16 -4.2% /
+L32 -5.3% / L64 -1.5% / L128 +2.3%）、PL_TX geo -2.73%。L128 的 q_dma_setup
+从 24.2ms 降至 2.2ms（预转换生效）、buffer_wait 从 56.1 降至 37.2ms、
+PL_TX -3.9%，但 driver_setup 从 0.25 升至 8.29ms（预转换+arena staging
+为串行 START 前开销）导致 E2E 微退 +2.3%——geomean 为正收益。
+
+**板测中发现并修复一个 bug**：向量化 `_pack_inband_stream` 的部分 Q tile
+未零填充到 TILE_Q 行——tile buffer 上半区携带上一 head 填充的陈旧数据，
+L16 出现 1-ULP 输出偏差（got=0x3c93 expected=0x3c94，27,080 mismatches）。
+修复：预分配 `_q_tile_padded` scratch，部分 tile 组装（数据+零）到完整
+tile_stride 后一次 append（commit ea9a7c1）。
+
 ### v3.8.0 — 全张量 bf16 预转换消除 host 侧逐段转换（driver-only）
 
 板上 v3.7.0 数据分解定位了两个 host 侧瓶颈：
