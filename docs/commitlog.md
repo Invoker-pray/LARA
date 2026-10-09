@@ -2,7 +2,13 @@
 
 ## 2026-10-08
 
-### v3.9.0 — L>64 懒转换 + 计算气泡 profiling（driver + TB，RTL 不变）
+### v3.9.0 — L>64 懒转换 + 计算气泡 profiling（driver + TB，RTL 不变，已板测签核）
+
+**板上验证**（bit aeb27413 + 本 driver，24/24 bit-exact PASS，20-case
+A/B）：v3.9 vs v3.7 E2E geo **-3.14%**（L1 -5.8%/L16 -3.9%/L32 -5.0%/
+L64 -1.1%/L128 +0.2%）。L128 的 driver_setup 从 v3.8 的 8.29ms 回落到
+0.22ms（懒转换生效），E2E 从 +2.3% 回退修复到 +0.2%（噪声内）。v3.9
+是当前最优 driver 配置：短序列保留预转换收益，长序列恢复 v3.7 时序。
 
 **Driver**：`ARENA_STAGING_MAX_SEQ_LEN=64`——L≤64 时照常 CMA arena staging
 （成本可忽略）；L>64 跳过 arena 避免串行 START 前 ~5ms CMA 拷贝，Q 请求
