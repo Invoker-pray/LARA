@@ -1,5 +1,38 @@
 # LARA 项目提交记录
 
+## 2026-10-09
+
+### v3.10.0 — TILE_SPLIT_FACTOR 16→8：compute 1.73x 加速（架构级，待 timing 验证）
+
+**分析修正**：此前将 VCS profiling 的 "Phase A 54% 利用率" 解读为仲裁浪费
+是错误的。实际 MAC 阵列总利用率 89.4%（Phase A QK 3.69M + Phase B PV
+~3.15M = 6.83M / 7.65M），Phase B 的 PV 乘法占据共享 MAC 的 46% 是有用
+计算，不是闲置。实测 per-block 周期 = 理论值 1.04x，仲裁几乎无损。
+
+**真正的瓶颈**：`TILE_SPLIT_FACTOR=16` 将 16×16 MAC 阵列的有效吞吐从
+256 MAC/cycle 降至 16 MAC/cycle（每周期仅处理 1 列）。这是 v2.5 为
+71.4 MHz timing closure 做的决策。
+
+**改动**：`attn_pkg.sv` 默认 `TILE_SPLIT_FACTOR` 从 16 改为 8。零其他
+RTL 变动——split=8 的 datapath 代码路径早已存在（`PHASE_COLS=2`），只是
+未被选为默认。有效 MAC 吞吐翻倍。
+
+**VCS L128 实测对比**（causal q31kv7，BOARD CASE PASS bit-exact）：
+
+| 指标 | split=16 | split=8 | Δ |
+|---|---|---|---|
+| QK cycles | 6,834,912 | 3,623,648 | **-47.0%** |
+| AV cycles | 812,448 | 353,696 | **-56.5%** |
+| 总 cycles | 8,701,188 | 5,031,172 | **-42.2%** |
+| PL_TX (71.4MHz) | 121.8 ms | **70.4 ms** | **-42.2%** |
+
+**门禁**：golden 7/7、sw/tests 45/45、Verilator lint 0（split=8 和
+split=4 均通过）、VCS 完整回归 28/28（synth+XPM，split=8 默认）。
+
+**待验证**：Vivado timing 是否闭合。当前 WNS +0.243ns（1.7% 余量），
+split=8 使列选择 mux 路径翻倍。若 fail timing 可回退 split=16 或尝试
+split=4+降频。
+
 ## 2026-10-08
 
 ### v3.9.0 — L>64 懒转换 + 计算气泡 profiling（driver + TB，RTL 不变，已板测签核）

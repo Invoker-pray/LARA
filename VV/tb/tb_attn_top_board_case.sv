@@ -203,6 +203,7 @@ module tb_attn_top_board_case;
   // Compute-bubble profiling (+COMPUTE_PROFILE)
   integer prof_kv_read, prof_qk, prof_sm, prof_av, prof_norm, prof_write_o, prof_other;
   integer prof_pa_win, prof_pb_win, prof_pa_depth, prof_blocks;
+  integer prof_pb_run, prof_pb_cap, prof_pb_update, prof_pb_other;
 
   always @(posedge clk) begin
     integer out_word;
@@ -422,6 +423,11 @@ module tb_attn_top_board_case;
       if (dut.phaseb_window) prof_pb_win <= prof_pb_win + 1;
       if (dut.phasea_depth_active) prof_pa_depth <= prof_pa_depth + 1;
       if (dut.mac_start && !dut.mac_phase) prof_blocks <= prof_blocks + 1;
+      if (dut.phaseb_state == 3'd1) prof_pb_run <= prof_pb_run + 1;
+      if (dut.phaseb_state == 3'd2 || dut.phaseb_state == 3'd3 ||
+          dut.phaseb_state == 3'd8 || dut.phaseb_state == 3'd9) prof_pb_cap <= prof_pb_cap + 1;
+      if (dut.phaseb_state == 3'd5 || dut.phaseb_state == 3'd6 ||
+          dut.phaseb_state == 3'd7) prof_pb_other <= prof_pb_other + 1;
     end
     if (rst_n) begin
       phaseb_prev_state = dut.phaseb_state;
@@ -501,6 +507,7 @@ module tb_attn_top_board_case;
     prof_kv_read = 0; prof_qk = 0; prof_sm = 0; prof_av = 0;
     prof_norm = 0; prof_write_o = 0; prof_other = 0;
     prof_pa_win = 0; prof_pb_win = 0; prof_pa_depth = 0; prof_blocks = 0;
+    prof_pb_run = 0; prof_pb_cap = 0; prof_pb_update = 0; prof_pb_other = 0;
     k_v_requests = 0;
     q_requests = 0;
     first_error_beat = -1;
@@ -583,6 +590,7 @@ module tb_attn_top_board_case;
                prof_pa_win, prof_pb_win, prof_pa_depth, prof_blocks);
       $display("COMPUTE_PROFILE AVG: qk+av_per_block=%0d",
                (prof_qk + prof_av) / (prof_blocks > 0 ? prof_blocks : 1));
+      $display("COMPUTE_PROFILE PB: run=%0d cap_chain=%0d other=%0d", prof_pb_run, prof_pb_cap, prof_pb_other);
     end
 
     if (k_v_requests != N_KV_HEADS) begin

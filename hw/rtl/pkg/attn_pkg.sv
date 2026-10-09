@@ -62,7 +62,7 @@ package attn_pkg;
 `elsif LARA_TILE_SPLIT_FACTOR_2
   localparam int  TILE_SPLIT_FACTOR = 2;      // Column split factor {1, 2}
 `else
-  localparam int  TILE_SPLIT_FACTOR = 16;     // Column split factor {1, 2, 4, 8, 16}
+  localparam int  TILE_SPLIT_FACTOR = 8;      // v3.10: split 16→8 doubles effective MAC throughput
 `endif
   localparam int  TILE_SPLIT_INDEX_W = (TILE_SPLIT_FACTOR <= 1)
                                      ? 1 : $clog2(TILE_SPLIT_FACTOR);
