@@ -1,5 +1,74 @@
 # LARA 项目提交记录
 
+## 2026-10-10
+
+### v3.11.0 — causal 对角 tile 列上限（RTL，门禁进行中）
+
+**背景修正**：§8 路线中"causal tile skip"的 tile 级早退自 **v2.4** 起就存在
+（`kv_tile_limit_idx`，每个 Q tile 的 KV 循环按 `q_end` 截断），所有历史板测
+数据均已生效。实测验证：L512 q31kv7 causal/noncausal MAC cycles 比 0.617，
+与 tile-pair 计数 80/128=0.625 吻合；L128 为 7/8 pairs=0.875 ✓。
+
+**剩余浪费**：只存在于每个 Q tile 的 limit（对角）KV tile 内部——整 tile
+64 列全被计算，但列位置 > `q_end` 的列全部被 softmax 元素级 mask 成 P=0，
+对 row-max/sum/accumulation 的贡献恒为 +0.0（非退化情形下加法恒等），
+因此跳过与计算位精确等价。
+
+**改动**（`attn_core.sv` 组合逻辑 ~15 行，零 datapath 变更）：
+causal 且 `kv_tile_idx == kv_tile_limit_idx` 时，把 `active_kv` 收紧为
+`q_end - kv_tile_start + 1`（仅当该值 ∈ [1, active_kv)）。Phase A/B 的列
+迭代器自动按 16 列 subblock 量化生效（`kv_subblocks_active` /
+`active_cols_for_kv_subblock`），与 partial last tile 完全同一机制，L=1
+板测已证明 subblock 内死列的 P-store 清零路径。退化情形（整 tile 全
+mask，`q_end < kv_tile_start`）不收紧，保持 all-masked 事务形态不变。
+
+**收益量化**（按板上 position base 计算 KV-column-subblock 数）：
+
+| case | subblocks 计算前→后 | MAC cycles Δ | E2E 估 |
+|---|---|---|---|
+| L64 q3kv3 causal | 8→6 | **-25.0%** | ~-11% |
+| L128 q31kv7 causal | 28→26 | -7.1% | ~-4% |
+| L128 q3kv3 causal | 24→20 | **-16.7%** | ~-9% |
+| L512 q31kv7 causal | 320→306 | -4.4% | ~-3.5% |
+| L512 q3kv3 causal | 288→272 | -5.6% | ~-4.5% |
+| L1/L16/L32（两组 base） | 不变 | 0 | 0 |
+
+noncausal 完全不受影响。注：收益受 16 列 subblock 量化限制——cap=56 时
+`ceil(56/16)=4` 与 64 列相同，无收益；cap=24/32 时才有。更细的 split-phase
+级提前终止需动 P-store 清零语义与 Phase A/B capture 时序链，风险与收益
+不成比例，明确不做。
+
+**TB 扩展**（`tb_attn_core_causal_skip.sv`）：期望列值检查从单值改为 3 值
+列表；新增 `L128_causal`（cap 32）、`L128_causal_q31kv7`（cap 56/24，
+含 partial-tile 抑制交互）、`L64_causal_allmasked`（退化 guard：q 区间整体
+在 KV base 之前，cap 必须不触发）；`L70_position_base` 期望修正为仅 6
+（其 limit tile 是 partial tile，`left ≥ active_kv` 时 cap 被正确抑制——
+该 case 从"正向断言"转为"负向 guard"）。原有 4 case 期望值经模型复算全部
+保持成立。
+
+**门禁状态**：golden 7/7 ✓、sw-tests 45/45 ✓、Verilator ✓（HEAD 等价判定：
+`-Wall --timing` 全文件 lint 的 warning 集合与 97b8028 **逐字节一致**
+（133=133，`diff` 为空）——v3.11 零新增；注：历史"lint 0"口径的抑制参数
+未被记录，`-Wall` 全量本就有 133 条 pre-existing 噪声（SHORTREAL/
+UNUSEDSIGNAL/UNUSEDPARAM 等，均在 `ifndef SYNTHESIS` 仿真代码或历史
+遗留信号上），以"无新增"为判据）。VCS 全量回归 28/28 ✓、两组 board-case
+bit-exact 矩阵全 PASS ✓（用户执行）。位精确性论证见上；板上 bit-exact
+矩阵（L128/L512 causal 实际触发 cap=24/32/56）是经验证明。
+
+**Vivado build**（build-v3_11_causal_collimit_20261010，构建于未提交工作树，
+metadata 记录了完整 diff 状态）：**WNS +0.039 ns**、TNS/WHS/THS 全零
+（余量 +0.073→+0.039，`active_kv` 控制路径新增比较+减法的代价，符合
+预期）；DRC 0 Errors（DSP 流水 advisory 与历次一致）；资源 LUT 83.9K /
+FF 81.4K / URAM 48 / DSP 72，与 v3.10 持平。
+
+```text
+bit SHA256  c7e9e5d5…（全值见 build 目录 SHA256SUMS）
+hwh SHA256  fe33bc85…
+xsa SHA256  d5b5ed34…
+```
+
+**待上板**：功能矩阵 + A/B 性能（vs v3.10 bit ca6d4e05）。
+
 ## 2026-10-09
 
 ### v3.10.0 — TILE_SPLIT_FACTOR 16→8：板上 E2E geo -16.6% vs v3.9，-36.9% vs 旧默认（已板测签核）

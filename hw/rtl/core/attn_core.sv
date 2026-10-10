@@ -112,6 +112,7 @@ module attn_core
     logic [15:0] kv_tile_base_u;
     logic [16:0] q_end_abs_u;
     logic [16:0] kv_delta_u;
+    logic [16:0] causal_cols_left_u;
     logic [7:0]  causal_tile_idx_u;
     logic [4:0]  q_remainder;
     logic [5:0]  kv_remainder;
@@ -154,6 +155,23 @@ module attn_core
     end
     if (causal_r && (causal_tile_idx_u < kv_tile_last_idx))
       kv_tile_limit_idx = causal_tile_idx_u;
+
+    // v3.11: causal diagonal-tile column limit.  On the limit KV tile every
+    // column past the last active Q token is element-masked to P=0 by
+    // softmax_engine, so its QK/softmax/AV cycles are pure waste.  Shrink
+    // active_kv to the unmasked column count; the Phase A/B iterators
+    // quantize this to 16-column subblocks exactly like a partial last
+    // tile.  Every kept column set still contains each row's diagonal, so
+    // results are bit-identical.  When the whole tile is masked
+    // (q_end before this tile's start) keep the unshrunk bound so the
+    // degenerate all-masked transaction shape is unchanged.
+    causal_cols_left_u = 17'd0;
+    if (q_end_abs_u >= {1'b0, kv_pos_start})
+      causal_cols_left_u = q_end_abs_u - {1'b0, kv_pos_start} + 17'd1;
+    if (causal_r && (kv_tile_idx == kv_tile_limit_idx) &&
+        (causal_cols_left_u != 17'd0) &&
+        (causal_cols_left_u < {10'd0, active_kv}))
+      active_kv = causal_cols_left_u[6:0];
   end
 
   // Output position + active rows/cols

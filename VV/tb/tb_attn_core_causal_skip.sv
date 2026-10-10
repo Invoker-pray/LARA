@@ -6,7 +6,9 @@
 // Q/KV loads use explicit ready state, matching the top-level bank protocol.
 //
 // Verification target:
-//   attn_core.sv — causal KV-tile early exit, loop reset, partial positions
+//   attn_core.sv — causal KV-tile early exit, loop reset, partial positions,
+//   and the v3.11 diagonal-tile column limit (active_kv shrunk to the
+//   unmasked prefix on the limit tile; degenerate all-masked tiles exempt)
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -84,9 +86,9 @@ module tb_attn_core_causal_skip;
   integer last_q_tile;
   integer last_kv_tile;
   logic saw_expected_q_rows;
-  logic saw_expected_kv_cols;
+  logic saw_expected_kv_cols_list [0:2];
   integer expected_q_rows_r;
-  integer expected_kv_cols_r;
+  integer expected_kv_cols_list [0:2];
 
   attn_core dut (.*);
 
@@ -172,7 +174,9 @@ module tb_attn_core_causal_skip;
       last_q_tile <= -1;
       last_kv_tile <= -1;
       saw_expected_q_rows <= 1'b0;
-      saw_expected_kv_cols <= 1'b0;
+      saw_expected_kv_cols_list[0] <= 1'b0;
+      saw_expected_kv_cols_list[1] <= 1'b0;
+      saw_expected_kv_cols_list[2] <= 1'b0;
     end else begin
       prev_state <= dut.state;
       case (dut.state)
@@ -189,8 +193,11 @@ module tb_attn_core_causal_skip;
         pair_count <= pair_count + 1;
         if (active_q_rows == 6'(expected_q_rows_r))
           saw_expected_q_rows <= 1'b1;
-        if (active_kv_cols == 7'(expected_kv_cols_r))
-          saw_expected_kv_cols <= 1'b1;
+        for (int ei = 0; ei < 3; ei++) begin
+          if ((expected_kv_cols_list[ei] != 0) &&
+              (active_kv_cols == 7'(expected_kv_cols_list[ei])))
+            saw_expected_kv_cols_list[ei] <= 1'b1;
+        end
         if ((last_group != integer'(current_group)) ||
             (last_head != integer'(current_head)) ||
             (last_q_tile != integer'(current_q_tile))) begin
@@ -232,7 +239,9 @@ module tb_attn_core_causal_skip;
     input bit causal,
     input int expected_pairs,
     input int expected_last_q_rows,
-    input int expected_last_kv_cols
+    input int expected_kv_cols_a,
+    input int expected_kv_cols_b,
+    input int expected_kv_cols_c
   );
     integer timeout_cycles;
     logic [31:0] completed_cycles;
@@ -241,7 +250,9 @@ module tb_attn_core_causal_skip;
     begin
       reset_case();
       expected_q_rows_r = expected_last_q_rows;
-      expected_kv_cols_r = expected_last_kv_cols;
+      expected_kv_cols_list[0] = expected_kv_cols_a;
+      expected_kv_cols_list[1] = expected_kv_cols_b;
+      expected_kv_cols_list[2] = expected_kv_cols_c;
       seq_len = 16'(case_seq_len);
       cfg_q_pos_base = 16'(q_base);
       cfg_kv_pos_base = 16'(kv_base);
@@ -271,10 +282,13 @@ module tb_attn_core_causal_skip;
                  expected_last_q_rows);
         err++;
       end
-      if (!saw_expected_kv_cols) begin
-        $display("FAIL %s never observed active_kv_cols=%0d", name,
-                 expected_last_kv_cols);
-        err++;
+      for (int ei = 0; ei < 3; ei++) begin
+        if ((expected_kv_cols_list[ei] != 0) &&
+            !saw_expected_kv_cols_list[ei]) begin
+          $display("FAIL %s never observed active_kv_cols=%0d", name,
+                   expected_kv_cols_list[ei]);
+          err++;
+        end
       end
       if (error) begin
         $display("FAIL %s unexpected core error", name);
@@ -337,14 +351,26 @@ module tb_attn_core_causal_skip;
     cfg_causal = 1'b0;
     err = 0;
 
+    // v3.11 diagonal-tile column limit: the limit KV tile's active column
+    // count must shrink to the unmasked prefix (q_end - kv_tile_start + 1),
+    // quantized by the datapath to 16-column subblocks.
     run_case("L512_causal", 512, 0, 0, 1'b1,
-             72 * N_Q_HEADS, TILE_Q, TILE_KV);
+             72 * N_Q_HEADS, TILE_Q, TILE_KV, 32, 0);
     run_case("L512_noncausal", 512, 0, 0, 1'b0,
-             128 * N_Q_HEADS, TILE_Q, TILE_KV);
+             128 * N_Q_HEADS, TILE_Q, TILE_KV, 0, 0);
     run_case("L70_partial", 70, 0, 0, 1'b1,
-             4 * N_Q_HEADS, 6, 6);
+             4 * N_Q_HEADS, 6, 6, 32, TILE_KV);
     run_case("L70_position_base", 70, 64, 0, 1'b1,
-             6 * N_Q_HEADS, 6, 6);
+             6 * N_Q_HEADS, 6, 6, 0, 0);
+    run_case("L128_causal", 128, 0, 0, 1'b1,
+             6 * N_Q_HEADS, TILE_Q, 32, TILE_KV, 0);
+    run_case("L128_causal_q31kv7", 128, 31, 7, 1'b1,
+             7 * N_Q_HEADS, TILE_Q, 56, 24, TILE_KV);
+    // Degenerate fully-masked transaction (q range entirely before the KV
+    // base): the column limit must NOT engage; tile 0 keeps its full
+    // partial-tile width so the all-masked shape is unchanged.
+    run_case("L64_causal_allmasked", 64, 0, 100, 1'b1,
+             2 * N_Q_HEADS, TILE_Q, TILE_KV, 0, 0);
 
     $display("ALL ATTN_CORE CAUSAL SKIP CHECKS PASSED");
     $finish;
