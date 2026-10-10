@@ -1,5 +1,24 @@
 # LARA 项目提交记录
 
+## 2026-10-11
+
+### v3.11.1 — request mode 默认 auto→poll（driver，防 A/B 口径污染）
+
+**动机**：v3.11 板测发现以 root 运行时 `/dev/uio4` 可打开，driver 默认
+的 `auto` 解析为 irq，而 ubuntu 用户回退 poll——同一条命令因执行用户
+不同走出两种 request 路径，第一轮 A/B 被污染（E2E 假象 +8~14%，
+pitfalls §21）。poll 自 v3.6.3 起就是板测签核的性能基线。
+
+**改动**（`sw/attn_driver.py`）：新增 `DEFAULT_REQUEST_MODE = "poll"`
+常量并替换 `LARA_REQUEST_MODE` 未设置时的默认值；`_prepare_irq` 文档
+更新。`auto` 仍可显式选择，irq 路径与功能完全不变，仅不再作为静默
+默认。
+
+**门禁**：sw/tests 45/45 OK（golden/VCS 不涉及——纯 Python 默认值
+变更，无 RTL/协议改动）。板端 payload 的 attn_driver.py 已同步
+（manifest 重生成 0 差异），run_v3_11_tests.sh 两个 matrix 步骤补了
+显式 `LARA_REQUEST_MODE=poll`。下一次板测自然验证。
+
 ## 2026-10-10
 
 ### v3.11.0 — causal 对角 tile 列上限（RTL，门禁进行中）

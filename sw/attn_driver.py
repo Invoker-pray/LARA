@@ -144,6 +144,14 @@ PREFETCH_MODE_ENV = "LARA_PREFETCH_MODE"
 PREFETCH_MODES = ("off", "descriptor", "inband")
 REQUEST_MODE_ENV = "LARA_REQUEST_MODE"
 REQUEST_MODES = ("poll", "irq", "auto")
+# Poll is the default request service mode (board-signed performance
+# baseline since v3.6.3).  ``auto`` used to be the default and resolved to
+# ``irq`` whenever the UIO device happened to be openable — which depends
+# on the effective user (root can open /dev/uio4, ubuntu cannot) — so the
+# same benchmark silently changed request paths between runs and corrupted
+# A/B comparisons (pitfalls #21).  IRQ stays available via an explicit
+# LARA_REQUEST_MODE=irq / request_mode="irq".
+DEFAULT_REQUEST_MODE = "poll"
 # Short-sequence ceiling for the auto in-band selection; board-measured
 # crossover sits between L=32 (in-band -18.7%) and L=64 (-1.0%).
 INBAND_AUTO_MAX_SEQ_LEN = 32
@@ -519,7 +527,7 @@ class AttentionAccelerator:
         # accepted for A/B manifest generation but do not alter transport.
         self._requested_prefetch_mode = prefetch_mode
         if request_mode is None:
-            request_mode = os.environ.get(REQUEST_MODE_ENV, "auto")
+            request_mode = os.environ.get(REQUEST_MODE_ENV, DEFAULT_REQUEST_MODE)
         request_mode = request_mode.strip().lower()
         if request_mode not in REQUEST_MODES:
             raise ValueError(
@@ -732,10 +740,14 @@ class AttentionAccelerator:
     def _prepare_irq(self) -> None:
         """Arm the level interrupt and resolve the effective request mode.
 
-        ``auto`` resolves to ``irq`` only on real hardware where the overlay
-        exposes the accel/irq interrupt (requires the v3.6 bitstream with the
-        PS IRQ wiring).  Any failure falls back to polling — IRQ is an
-        optimization, never a functional requirement.
+        The default mode is ``poll`` (the board-signed baseline).  ``irq``
+        must be requested explicitly.  ``auto`` is kept for explicit opt-in
+        and resolves to ``irq`` only on real hardware where the overlay
+        exposes the accel/irq interrupt; any failure falls back to polling.
+        Because ``auto`` picks ``irq`` exactly when the UIO device is
+        openable — an effective-user property — it must never be the
+        default: identical commands would measure different request paths
+        under root vs ubuntu (pitfalls #21).
         """
         requested = self._requested_request_mode
         if requested == "poll":
