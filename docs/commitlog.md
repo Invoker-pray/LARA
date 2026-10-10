@@ -69,6 +69,43 @@ xsa SHA256  d5b5ed34…
 
 **待上板**：功能矩阵 + A/B 性能（vs v3.10 bit ca6d4e05）。
 
+### v3.11.0 板测结果（2026-10-11，bit c7e9e5d5，已签核）
+
+**功能：24/24 bit-exact PASS**（q31kv7/q3kv3 × L=1/16/32/64/128/512 ×
+causal/noncausal）。独立审计：temp 快照的 24 个 actual.npz 与仓库 case
+expected_o 逐位一致（raw bf16 bits）；24 个 profile `total==stall+core_active`
+守恒全部成立；全部 profile bitstream SHA256 = c7e9e5d5。
+
+**causal MAC 工作量按设计精确生效**（RTL 计数器，模式无关）：
+
+| case | dMAC cycles | 预测 | 板上 causal/noncausal MAC 比 |
+|---|---|---|---|
+| q3kv3 L64 causal | **-25.0%** | -25.0% | 1.000 → 0.7501 |
+| q3kv3 L128 causal | **-16.7%** | -16.7% | — |
+| q31kv7 L128 causal | **-7.1%** | -7.1% | 0.875 → 0.813 |
+| 其余（noncausal、L≤32、q31kv7 L64） | 0.0% | 0.0% | — |
+
+**E2E：geo ±0.0%（20-case A/B，poll/busy/auto 同 v3.10 口径）**。MAC 省下
+的 cycle 几乎 1:1 转成 stall：q3kv3 L64 causal MAC -284,032 cycles →
+stall +242,817（total 仅 -2.2%）；q31kv7 L128 causal MAC -284,032 →
+stall +298,866（total +0.6%）。PL 提前算完就等待 host 的下一个 request。
+
+**瓶颈迁移结论（重要）**：v3.10 计算提速后，L≥64 causal 已是
+request/host-bound——q31kv7 L128 causal 的 stall 占 PL_TX 的 46%
+（3.15M/6.83M cycles）。任何进一步的纯 compute 优化（含 v3.12 writeback
+overlap 的 ~9%）预计会被同样的 stall slack 大部分吸收；**request service
+路径（更深 prefetch 流水/批量服务/降低 per-request host 开销）升为下一
+优先级**。v3.11 的价值：硬件少做无用功（能效），并为 request-path 优化
+预先消除无效计算。
+
+**过程坑（记入 design_pitfalls §21/§22）**：(1) 以 root 跑板测时
+`/dev/uio4`（root:root 0600）可打开，driver 的 request mode auto 解析为
+**irq** 而非 ubuntu 用户的 poll 回退——第一轮 A/B 被污染（E2E +8~14%），
+必须显式 `LARA_REQUEST_MODE=poll`；(2) `sudo` env_reset 清掉
+`XILINX_XRT=/usr` → PYNQ "No Devices Found"，用 `sudo env XILINX_XRT=/usr
+BOARD=KV260 <venv-python>` 注入解决；sudo 无 tty 时还需 `ssh -tt` +
+pexpect 应答。
+
 ## 2026-10-09
 
 ### v3.10.0 — TILE_SPLIT_FACTOR 16→8：板上 E2E geo -16.6% vs v3.9，-36.9% vs 旧默认（已板测签核）

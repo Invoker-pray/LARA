@@ -361,3 +361,26 @@ buffer 上半区携带陈旧数据，L16 板测出现 1-ULP 偏差。mock 单测
 （填充、对齐、段长度、字节序），并在新代码中显式保持；对于 DMA 段长
 度这种 wire-format 属性，新旧实现的字节流必须 diff 验证，不能只看
 mock 测试结果。
+
+## 21. root 运行使 request mode auto→irq，污染性能 A/B（2026-10-11，v3.11）
+
+以 `sudo` 跑 board_matrix/board_performance 时进程 euid=0，可打开
+`/dev/uio4`（root:root 0600），attn_driver 的 request mode 默认 `auto` 因此
+解析为 **irq**；而 ubuntu 用户（v3.10 及以前的基线口径）打不开 UIO 回退
+**poll**。IRQ 比 poll 慢（v3.6 实测 +31%），第一轮 v3.11 A/B 全体 E2E
++8~14%、L≥64 PL_TX +5~7%，差点误判为"RTL 回退"。
+**判别特征**：PL_TX 完全不变的 L1/L16 E2E 也大幅偏慢；profile 里
+`request_mode=irq`。**规则**：板测 A/B 一律显式 `LARA_REQUEST_MODE=poll`；
+换执行用户（ubuntu↔root）就是换实验条件，必须在 run 记录里注明 euid。
+
+## 22. sudo env_reset 清掉 XILINX_XRT → PYNQ "No Devices Found"（2026-10-11）
+
+`sudo` 默认 env_reset 使 `XILINX_XRT=/usr`（由 /etc/profile.d/pynq_venv.sh
+设置）丢失，`pynq/pl_server/device.py` 的发现逻辑依赖该变量，报
+"No Devices Found"（与 pl.py:405 的 "Root permissions required" 是两个不同
+故障）。**解法**：`sudo env XILINX_XRT=/usr BOARD=KV260
+/usr/local/share/pynq-venv/bin/python3 ...` 显式注入；无 tty 的 ssh 下 sudo
+无法读密码（"a terminal is required"），需 `ssh -tt` + pexpect 应答，且
+expect 模式必须转义 `\\[sudo\\] password`（`[sudo]` 未转义是字符类，永远
+匹配不上）。另外 packaging 脚本只打印 board_cases 的 cp 提示并不代拷，
+payload 打包后必须确认 case 目录与 manifest 完整（78 项）。
