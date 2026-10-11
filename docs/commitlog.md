@@ -1,5 +1,68 @@
 # LARA 项目提交记录
 
+## 2026-10-12
+
+### v3.12.0 — 全长度 Q arena staging（driver 一行门控，RTL/bitstream 不变）
+
+**剖析依据**（v3.11 板上 poll profile，q31kv7 L128 causal）：
+- 128 个 Q 请求，`q_dma_setup_ms` 24.7ms（**193µs/请求**：per-tile bf16
+  二次转换 + CMA 拷贝 + cache flush）+ `q_dma_transfer_ms` 24.3ms
+  （190µs/8KB DMA，PYNQ 固定开销）；Q 侧合计 ~49ms，对应 PL stall 44ms。
+- 根因：v3.9 把 `ARENA_STAGING_MAX_SEQ_LEN` 定为 64（当时 L128 串行
+  staging 8.29ms > 请求路径收益——split=16 时代计算慢，host 躲在计算
+  影子里）。**v3.10/v3.11 计算提速 2.2× 后该 trade 翻转**：PL 变成
+  等 host，L>64 的每个请求都在关键路径上付 193µs。
+
+**改动**（`sw/attn_driver.py`，仅常量与注释）：`ARENA_STAGING_MAX_SEQ_LEN`
+64 → `MAX_SEQ_LEN`(512)。descriptor 模式所有长度在 pre-START 阶段
+一次性 stage Q arena（L128 约 1MB CMA 拷贝+flush，串行 ~2-4ms；
+L512 约 4MB，~8-10ms），请求路径变为零拷贝切片（`_transfer_staged`：
+1 次 MMIO 描述符推送 + DMA）。`_preconvert_tensors` 本就无条件全量
+转换、arena 本就按 4MB 全量分配——v3.9 的"懒"只剩这一个门。
+in-band（L≤32）与 legacy 路径不变；`LARA_Q_STAGING` 死旋钮不动。
+
+**预期**（由板上 profile 推算）：
+- L128：请求路径省 ~23ms，串行加 ~2-4ms → E2E 95.6 → ~76-80ms
+  （**-16~-20%**）；PL stall 44 → ~21-25ms。
+- L512：512 请求省 ~99ms，串行加 ~8-10ms → E2E ~-12%。
+- L1/L16/L32/L64：不变（L≤64 本就 staged；L≤32 走 in-band）。
+- noncausal 同享（请求结构与 causal 相同）。
+
+**门禁**：sw/tests 45/45 ✓；mock 级 staged-vs-lazy 等价性 128/128 tile
+逐位一致（L=100 含 partial tile）；golden 7/7 ✓（用户）。**RTL 零改动 →
+Verilator/VCS/Vivado 不适用，bitstream 复用 c7e9e5d5**。
+
+### v3.12.0 板测结果（2026-10-12，bit c7e9e5d5 + 新 driver，已签核）
+
+**功能：24/24 bit-exact PASS**（独立 raw-bf16 逐位审计 + profile 守恒
+24/24）。**A/B 20/20 PASS**（poll 口径，vs v3.11 同 bitstream）：
+
+| case | E2E Δ | PL_TX Δ |
+|---|---|---|
+| q3kv3 L128 causal | **-12.7%**（97.5→85.1ms） | **-22.4%**（88.6→68.7ms） |
+| q31kv7 L128 causal | **-9.5%**（104.3→94.5ms） | **-18.9%**（95.6→77.6ms） |
+| L128 noncausal × 2 | -4.2~-5.0% | -12.9~-13.2% |
+| L512 causal（功能矩阵） | — | **-13.2%/-14.3%**（stall 183→80ms） |
+| L1~L64 全部 | ±2% 噪声 | 0.0%（不经过该路径） |
+
+**20-case geo：E2E -1.81%、PL_TX -3.68%；causal-only geo E2E -2.38%**。
+vs v3.6.1 旧默认累计 E2E geo ≈ **-38.0%**。
+
+**机理验证**：q_dma_setup 24.5→2.1ms（per-request 转换消除）；
+stall **-35~-41%**（q3kv3 L128 causal 3.49M→2.07M cycles）；
+driver_setup 0.31→8.4ms（串行 staging 成本，预测兑现）。
+
+**瓶颈再评估**：stall 缩减后 L128 causal 的 compute 占比从 54% 升到
+~67%（core 51.7ms / PL_TX 77.6ms）——request-bound 缓解但未消除。
+剩余 stall 主体 = 190µs/次的 DMA 固定开销 × 128 次 ≈ 24ms。下一版
+候选：(a) writeback overlap（计算占比回升后 ~9% 收益的兑现率提高）；
+(b) 批量 Q 服务/更深 Q bank（RTL 协议手术，砍 DMA 次数）。
+
+**过程坑**：板子重启后 fabric dtbo 不会自动加载（zocl 缺失 → 全 case
+`ENODEV: Programming Device failed`）——板测脚本必须保留
+`clear_pynq_cache.py`（含 dtbo 插入）作为第一步，v3.12 首轮脚本漏掉
+该步导致 24/24 假 FAIL，补跑后全绿。
+
 ## 2026-10-11
 
 ### v3.11.1 — request mode 默认 auto→poll（driver，防 A/B 口径污染）

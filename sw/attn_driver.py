@@ -155,9 +155,14 @@ DEFAULT_REQUEST_MODE = "poll"
 # Short-sequence ceiling for the auto in-band selection; board-measured
 # crossover sits between L=32 (in-band -18.7%) and L=64 (-1.0%).
 INBAND_AUTO_MAX_SEQ_LEN = 32
-# Above this length the serial arena staging cost (~5 ms at L128) exceeds
-# its request-loop savings; serve Q from per-request lazy assembly instead.
-ARENA_STAGING_MAX_SEQ_LEN = 64
+# Stage the Q arena for every descriptor-mode length.  The old cap (64)
+# assumed the ~2-4 ms serial staging cost at L128 outweighed the request-loop
+# savings — true when compute was slow (split=16 era), but since v3.10 the PL
+# is request-bound: v3.11 board data shows each L>64 request paying ~193 us
+# of per-tile conversion+copy+flush on the critical path (128 requests at
+# L128 = ~24 ms of the 44 ms PL stall).  Serving zero-copy staged slices
+# removes that entirely; the one-off staging lands in driver_setup instead.
+ARENA_STAGING_MAX_SEQ_LEN = MAX_SEQ_LEN
 Q_STAGING_ENV = "LARA_Q_STAGING"
 Q_STAGING_MODES = ("off", "on")
 
@@ -1410,15 +1415,12 @@ class AttentionAccelerator:
         self._prepare_prefetch()
         self._prepare_irq()
         if not self._inband_command_enabled and L <= ARENA_STAGING_MAX_SEQ_LEN:
-            # Short sequences: stage the Q arena (small CMA copy, negligible
-            # serial cost) so requests serve zero-copy slices.
+            # Descriptor mode: stage the Q arena up front so every request
+            # serves a zero-copy CMA slice (see ARENA_STAGING_MAX_SEQ_LEN).
             self._q_arena_staged = False
             self._stage_q_arena(q_heads, L)
         else:
-            # In-band packs its own stream; long interactive sequences skip
-            # the arena to avoid ~5 ms of serial pre-START CMA work that
-            # would otherwise add directly to E2E (board-measured at L128:
-            # driver_setup 0.25 -> 8.29 ms without this gate).
+            # In-band packs its own stream and never raises Q requests.
             self._q_arena_staged = False
         self.last_profile.descriptor_queue_enabled = self._descriptor_queue_enabled
         self.last_profile.inband_command_enabled = self._inband_command_enabled
