@@ -35,6 +35,12 @@ module attn_core
     input  logic        q_load_done,
     output logic        o_write_start,
     input  logic        o_write_done,
+    // v3.13 writeback overlap: o_write_launched reports that this tile's
+    // final-microtile drain is in flight (top-side latch).  Intermediate
+    // tiles retire the boundary on it instead of waiting for o_write_done;
+    // the final head/group tile still waits for the full drain.
+    input  logic        o_write_launched,
+    output logic        q_tile_retire,   // pulse: Q-tile boundary retired (early or final)
     output logic        buf_sel,          // Q ping-pong bank select (toggles per Q tile)
     output logic        q_load_bank_sel,  // Which Q bank q_load_start should fill
     output logic        q_ready_bank_sel, // Which Q bank readiness q_load_done refers to
@@ -91,6 +97,8 @@ module attn_core
   logic        q_prefetch_next_head_or_group;
   logic        q_prefetch_head_or_group_early;
   logic        kv_prefetch_next_group;
+  logic        final_q_unit;
+  logic        wb_overlap_advance;
 
   localparam logic [15:0] MAX_SEQ_LEN_U16 = 16'(MAX_SEQ_LEN);
   localparam logic [16:0] MAX_SEQ_LEN_U17 = 17'(MAX_SEQ_LEN);
@@ -240,6 +248,19 @@ module attn_core
       (q_tile_idx == q_tile_last_idx) &&
       !((head_cnt == LAST_Q_HEAD) && (group_cnt == LAST_GQA_GROUP));
   assign q_prefetch_head_or_group_early = 1'b0;
+  // v3.13: the final unit (last Q tile of the last head of the last group)
+  // must still wait for the complete output drain before DONE; every other
+  // boundary may retire as soon as the final-microtile drain launched.
+  assign final_q_unit = (q_tile_idx == q_tile_last_idx) &&
+                        (head_cnt == LAST_Q_HEAD) &&
+                        (group_cnt == LAST_GQA_GROUP);
+  // Overlap only for two-microtile tiles.  A single-microtile drain reads
+  // sm_l_ctx[0], the very slot the successor tile's first softmax
+  // overwrites; retiring early would corrupt the in-flight normalize.
+  // Two-microtile drains sit on slot 1 while the successor starts on
+  // slot 0, and single-micro lengths are host-bound anyway.
+  assign wb_overlap_advance = o_write_launched && !final_q_unit &&
+                              (active_q > 6'(TILE_ROWS));
   // During the compute states a prefetch (next tile, or next head/group at
   // the last tile) always targets the bank the successor unit will use.
   assign q_load_bank_sel = ((state == ST_QK_DOT) || (state == ST_SOFTMAX) ||
@@ -289,10 +310,12 @@ module attn_core
           cycle_cnt <= cycle_cnt + 32'd1;
         if (state == ST_QK_DOT || state == ST_AV_DOT)
           mac_cycles <= mac_cycles + 32'd1;
-        // Stall cycles: waiting for external done signals.
+        // Stall cycles: waiting for external done signals.  With the v3.13
+        // overlap an intermediate ST_WRITE_O leaves on the launch event, so
+        // only pre-launch cycles (and the final full drain) count as stall.
         if ((state == ST_LOAD_KV && !kv_load_done) ||
             (state == ST_Q_INIT  && !q_load_done)  ||
-            (state == ST_WRITE_O && !o_write_done))
+            (state == ST_WRITE_O && !o_write_done && !wb_overlap_advance))
           stall_cycles <= stall_cycles + 32'd1;
       end
       // Perf valid pulse at DONE
@@ -374,7 +397,7 @@ module attn_core
           end
         end
         ST_WRITE_O: begin
-          if (o_write_done) begin
+          if (o_write_done || wb_overlap_advance) begin
             // A Q prefetch belongs to the tile/head that follows this
             // writeback. Re-arm the one-shot request guard when advancing
             // the loop; the request itself, if launched in this cycle, wins
@@ -447,7 +470,7 @@ module attn_core
         else                              next_state = ST_NORMALIZE;
       end
       ST_NORMALIZE:                     next_state = ST_WRITE_O;
-      ST_WRITE_O:  if (o_write_done) begin
+      ST_WRITE_O:  if (o_write_done || wb_overlap_advance) begin
         if (q_tile_idx < q_tile_last_idx) begin
           if (q_load_done) next_state = ST_KV_READ;
           else             next_state = ST_Q_INIT;
@@ -473,6 +496,12 @@ module attn_core
     kv_load_start  = 1'b0;
     q_load_start   = 1'b0;
     o_write_start  = 1'b0;
+    // v3.13: retire pulses COMBINATIONALLY in the boundary's advance cycle,
+    // while buf_sel still holds the retiring tile's bank.  A registered
+    // pulse would sample the post-toggle bank and clear the prefetch
+    // target the successor just filled (race exposed at group boundaries
+    // where ST_LOAD_KV re-checks q_load_done).
+    q_tile_retire  = 1'b0;
     mac_phase      = 1'b0;
     mac_start      = 1'b0;
     softmax_start  = 1'b0;
@@ -534,13 +563,18 @@ module attn_core
       end
       ST_WRITE_O: begin
         kv_tile_last = (kv_tile_idx == kv_tile_limit_idx);
-        if (!o_write_done)
+        // Hold the launch trigger only until the drain is in flight (or,
+        // for the final tile, until the drain completes).  The v3.13
+        // overlap retires the boundary at launch for intermediate tiles.
+        if (!o_write_done && !wb_overlap_advance)
           o_write_start = 1'b1;
         if ((q_prefetch_next_tile || q_prefetch_next_head_or_group) && !q_load_done)
           q_load_start = !q_load_inflight;
-        if (o_write_done && (q_tile_idx == q_tile_last_idx) &&
+        if ((o_write_done || wb_overlap_advance) && (q_tile_idx == q_tile_last_idx) &&
             (head_cnt == LAST_Q_HEAD) && (group_cnt < LAST_GQA_GROUP))
           group_advance = 1'b1;
+        if (o_write_done || wb_overlap_advance)
+          q_tile_retire = 1'b1;
       end
       default: begin end
     endcase

@@ -38,6 +38,10 @@ module tb_attn_top_two_tiles;
   int out_samples;
   int out_beats;
   int exp_logical_row;
+  // v3.13: the draining tile's start latched at writeback_launch (the
+  // controller retires the boundary before the drain finishes, so the live
+  // q_tile_start already describes the successor tile during src_valid).
+  logic [15:0] drain_tile_start;
   int exp_dim;
   bit saw_tile0_micro0;
   bit saw_tile0_micro1;
@@ -196,9 +200,12 @@ module tb_attn_top_two_tiles;
         end
       end
 
+      if (dut.writeback_launch)
+        drain_tile_start = dut.q_tile_start;
+
       if (dut.src_valid) begin
-        logical_row = int'(dut.q_tile_start) +
-                      (dut.phaseb_norm_micro_idx * TILE_ROWS) +
+        logical_row = int'(drain_tile_start) +
+                      (dut.wb_micro_q * TILE_ROWS) +
                       int'(dut.obuf_o_row);
         if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
           $display("FAIL two_tiles output order got row=%0d dim=%0d exp row=%0d dim=%0d",

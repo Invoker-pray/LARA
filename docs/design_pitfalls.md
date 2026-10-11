@@ -384,3 +384,20 @@ mock 测试结果。
 expect 模式必须转义 `\\[sudo\\] password`（`[sudo]` 未转义是字符类，永远
 匹配不上）。另外 packaging 脚本只打印 board_cases 的 cp 提示并不代拷，
 payload 打包后必须确认 case 目录与 manifest 完整（78 项）。
+
+## 23. 一物两用的指针在流水重叠下反噬（2026-10-12，v3.13）
+
+`phaseb_norm_micro_idx` 同时充当 phaseb FSM 的 launch 指针（PB_IDLE 每
+拍清零）和 writeback 的 drain 游标。旧串行流程 drain 期间 FSM 停在
+PB_DONE（不清零），三处 drain 侧引用（obuf bank selector、obuf_l_sel
+的 l_state 索引、phaseb 启动 guard）隐式依赖该稳定性；writeback overlap
+让后继 tile 的 mac_start 在 drain 中把 FSM 打回 PB_IDLE 后，三个引用
+依次暴露为：输出行映射错位、1-ULP 级 normalize 错（l 源中途翻转）、
+guard 误判。**规则**：跨流水段共享的游标，在段边界锁存自己的副本
+（`wb_micro_q`），活的指针只服务发射侧。
+配套教训：**retire/bank 清理脉冲必须在推进当拍组合采样**——寄存器化
+的脉冲晚一拍，buf_sel 已翻转，清理会打到预取刚填的新 bank（竞态是否
+暴露取决于 DMA 数据落岛时序，组边界 LOAD_KV 复查 ready 时才显形）。
+以及：**流水段上下文（sm_l_ctx 等 2-slot 索引）的重叠访问冲突要按
+slot 粒度审计**——单 microtile tile 的 drain 与后继首个 softmax 同用
+slot 0，提前退役前必须确认 slot 错开或显式阻塞。

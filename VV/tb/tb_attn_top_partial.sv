@@ -205,7 +205,7 @@ module tb_attn_top_partial;
       end
 
       if (dut.src_valid) begin
-        logical_row = (dut.phaseb_norm_micro_idx * TILE_ROWS) + int'(dut.obuf_o_row);
+        logical_row = (dut.wb_micro_q * TILE_ROWS) + int'(dut.obuf_o_row);
         if ((logical_row != exp_logical_row) || (dut.obuf_o_dim != 7'(exp_dim))) begin
           $display("FAIL partial output order got row=%0d dim=%0d exp row=%0d dim=%0d",
                    logical_row, dut.obuf_o_dim, exp_logical_row, exp_dim);

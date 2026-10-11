@@ -1,5 +1,63 @@
 # LARA 项目提交记录
 
+## 2026-10-12（二）
+
+### v3.13.0 — writeback overlap：Q-tile 边界在 drain 发射后立即退役（RTL，门禁进行中）
+
+**选型**：v3.12 数据显示剩余 stall ≈ 128×190µs 的 DMA 固定开销（host 串行
+服务饱和）；writeback drain（~36µs/tile）在旧流程中仍串行占据
+ST_WRITE_O。tile 计算时间（L128 ≈300µs、L512 ≈1.17ms）> Q 服务时间
+（~190µs）的长度上，边界时间从 `drain + q_wait` 变为 `max(drain,
+q_wait)`。**预期收益**：L512 ~-2.5~-3% PL_TX（~18ms）；L128 0~-6%
+（取决于 host 流水线相位）；L64 ~0；严格非负。(b) 批量 Q 服务（砍 DMA
+次数，RTL 协议手术更大）留作 v4。
+
+**机制**：
+- `attn_core`：新端口 `o_write_launched`（入）与 `q_tile_retire`（出）。
+  中间 tile 的 ST_WRITE_O 在 `o_write_launched && !final_q_unit` 时即执行
+  边界推进（计数器/buf_sel 翻转/group_advance/预取 re-arm 全部沿用原
+  o_write_done 路径）；最终 head/group tile 仍等完整 `o_write_done` 才进
+  DONE。stall 计数同步收窄（中间 tile 只计 launch 前等待）。
+- `attn_top`：writeback FSM 加跨 tile epoch——`mac_start` 不再杀死在飞
+  drain（`wb_epoch_pending`），drain 完成后游标归还新 tile；launch 时锁存
+  drain 上下文（`wb_rows_q`/`wb_last_micro_q`/`wb_final_unit_q`），流式
+  tlast/行界/`o_write_tile_done` 全部改用锁存值（边界提前退役后
+  active_q_rows/q_microtile_last_idx 已描述后继 tile）；
+  `phaseb_can_start_block` 加 selector 翻转 guard（micro-0 drain 期间
+  阻止新 tile Phase B，防 obuf bank 选择器在累加中途翻转——仅影响
+  单 microtile 短长度）；Q bank 失效清理从 `o_write_done` 上升沿改挂
+  `q_tile_retire`（提前退役后 o_write_done 到达时 buf_sel 已翻转，沿
+  用旧触发会清错 bank）。
+- **时序倒置修复（自查发现）**：overlap 使后继 tile 的 `mac_start` 早于
+  旧 drain 完成，`o_write_done_sticky` 原靠 mac_start 清零会卡高到下个
+  NORMALIZE，堵死后继 tile micro-0 的 phaseb 内 launch——epoch 完成事件
+  补清 sticky。
+
+**门禁**：Verilator ✓（warning 集合与 HEAD 归一化后逐条一致，133=133，
+零新增）；VCS 全量回归 **28/28 PASS** ✓（用户执行，含修复后的
+two_tiles/partial/loop_control/delayed）；board-case bit-exact 用户跑
+L512 抽样；Vivado 待跑。causal_skip TB 以 `o_write_launched =
+o_write_done` 建模（无重叠，遍历语义不变）。
+
+**调试过程（3 个真实 bug，均由回归暴露并定位，记入 pitfalls）**：
+1. **drain 游标被 launch 指针反噬**（two_tiles 输出 16 行错位）：
+   `phaseb_norm_micro_idx` 兼任 phaseb FSM launch 指针与 drain 游标，
+   `PB_IDLE` 持续清零指针；旧串行流程 drain 期间 FSM 停在 PB_DONE 从未
+   暴露，overlap 使后继 tile 的 mac_start 在 drain 中进入 PB_IDLE，
+   游标在 launch 两拍后被抹零。修复：launch 时锁存 `wb_micro_q`。
+2. **retire 清理竞态**（loop_control +7 重复 Q 请求）：寄存器化的
+   retire 脉冲晚一拍，buf_sel 已翻转，bank 清理打到新 compute bank
+   （= 预取刚填的 bank）；组边界走 LOAD_KV 复查 q_load_done 时暴露。
+   head 边界数据晚到时清空、KV_READ 不查 ready 且数据仍在——这是
+   full_traversal 始终 bit-exact 的原因。修复：脉冲改推进当拍组合输出。
+3. **单 micro tile 的 sm_l_ctx slot-0 冲突**（L16 板上 case 零行 +
+   L32 1-ULP normalize 错）：drain 读 `sm_l_ctx[wb_micro]`，提前推进使
+   后继 tile 的 softmax 立即覆写同 slot（单 micro 时两者都是 slot 0）；
+   l 源/索引另有独立的中途翻转路径（obuf_l_sel 用可抹零指针）。修复：
+   obuf_l_sel 与 phaseb 启动 guard 改用锁存 `wb_micro_q`；**提前退役
+   门控在 2-micro tile**（单 micro 长度 L≤16/partial 末 tile host-bound
+   本无收益；2-micro drain 在 slot 1、后继从 slot 0 起步，天然无冲突）。
+
 ## 2026-10-12
 
 ### v3.12.0 — 全长度 Q arena staging（driver 一行门控，RTL/bitstream 不变）

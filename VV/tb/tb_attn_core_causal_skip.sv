@@ -31,6 +31,12 @@ module tb_attn_core_causal_skip;
   logic q_load_done;
   logic o_write_start;
   logic o_write_done;
+  // v3.13 writeback-overlap ports.  This controller-only TB models no
+  // overlap: the boundary advance condition collapses to o_write_done, so
+  // traversal and cycle accounting keep their pre-v3.13 semantics.  The
+  // overlapped datapath behavior is covered by the attn_top TBs.
+  logic o_write_launched;
+  logic q_tile_retire;
   logic buf_sel;
   logic q_load_bank_sel;
   logic q_ready_bank_sel;
@@ -94,6 +100,7 @@ module tb_attn_core_causal_skip;
 
   always #5 clk = ~clk;
 
+  assign o_write_launched = o_write_done;
   assign kv_load_done = kv_ready;
   assign q_load_done = q_pending ? q_bank_ready[q_pending_bank]
                                  : q_bank_ready[q_ready_bank_sel];

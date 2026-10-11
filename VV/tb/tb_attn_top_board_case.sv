@@ -315,7 +315,7 @@ module tb_attn_top_board_case;
     end
     if (rst_n && $test$plusargs("LEGACY_DEBUG") &&
         (dut.q_load_start || dut.o_write_tile_done ||
-                  (dut.o_write_done && !dut.o_write_done_d))) begin
+         dut.q_tile_retire)) begin
       $display("CTRL qstart=%0d qdone=%0d qinflight=%0d qready=%b qbank=%0d buf=%0d qtile=%0d kv=%0d o_tile_done=%0d o_done=%0d same_reload=%0d state=%0d",
                dut.q_load_start, dut.q_load_done, dut.u_fsm.q_load_inflight,
                dut.q_bank_ready, dut.q_load_bank_sel, dut.buf_sel,
