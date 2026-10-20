@@ -33,11 +33,29 @@ q_wait)`。**预期收益**：L512 ~-2.5~-3% PL_TX（~18ms）；L128 0~-6%
   NORMALIZE，堵死后继 tile micro-0 的 phaseb 内 launch——epoch 完成事件
   补清 sticky。
 
-**门禁**：Verilator ✓（warning 集合与 HEAD 归一化后逐条一致，133=133，
-零新增）；VCS 全量回归 **28/28 PASS** ✓（用户执行，含修复后的
-two_tiles/partial/loop_control/delayed）；board-case bit-exact 用户跑
-L512 抽样；Vivado 待跑。causal_skip TB 以 `o_write_launched =
-o_write_done` 建模（无重叠，遍历语义不变）。
+**门禁（终态）**：Verilator ✓（归一化后与 HEAD 逐条一致）；VCS 全量
+回归 **28/28 PASS**；board-case 矩阵两组 × 全长度全 PASS（含此前失败
+的 L32/L128）。causal_skip TB 以 `o_write_launched = o_write_done`
+建模（无重叠，遍历语义不变）。
+
+### v3.13.0 修复：o_write_launched 只认发射锁存（板测暴露的第 4 个 bug）
+
+**现象**（板上 + VCS 双复现，q31kv7）：L32 双模式、L128 causal bit
+mismatch；`output beats 37888/65536`——从某 unit 起每个 tile 只有
+micro0 的 drain 流出，micro1 全部丢失。消融证实关掉
+`wb_overlap_advance` 即全对。
+**根因**：`o_write_launched = wb_last_drain_active || o_write_done` 中
+折叠的 `o_write_done`（含 sticky 残留）会在 micro1 发射前把边界放走；
+epoch 随即把发射指针归零并清 ready 位，micro1 的发射槽被永久吞掉。
+当初折叠是为防"drain 先于 WRITE_O 完成后 `wb_last_drain_active` 已
+清零导致挂死"。
+**修复**：`o_write_launched` 只认 `wb_last_drain_active`；该标志清零
+从"drain 结束"改到**下一 tile 的 `mac_start`**（retire 在 launch 后
+~2 拍、必然先于 mac_start，既不漏也不提前）。事件级 dump（WBL/LDA/
+WBA/OWD 边沿打印）定位后已从 TB 移除。
+**教训（并入 pitfalls §23）**：跨流水段的"许可"信号必须显式建模为
+锁存许可证（发射置位、消费点清零），不能复用含杂散脉冲/粘滞位的
+状态信号做或运算兜底。
 
 **调试过程（3 个真实 bug，均由回归暴露并定位，记入 pitfalls）**：
 1. **drain 游标被 launch 指针反噬**（two_tiles 输出 16 行错位）：

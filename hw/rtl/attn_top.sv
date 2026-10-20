@@ -560,7 +560,10 @@ module attn_top
         phaseb_microtile_ready <= 2'b00;
         // v3.13: a new tile's mac_start must not kill an in-flight drain
         // from the retired boundary.  Only when nothing is draining does
-        // the writeback cursor reset immediately, as before.
+        // the writeback cursor reset immediately, as before.  The retire
+        // license is consumed here: the boundary it licensed has already
+        // advanced, and keeping it set would leak into this tile's WRITE_O.
+        wb_last_drain_active <= 1'b0;
         if (writeback_active) begin
           wb_epoch_pending <= 1'b1;
         end else begin
@@ -588,10 +591,12 @@ module attn_top
           if (wb_epoch_pending) begin
             // The retired tile's drain finished after its successor began:
             // hand the writeback cursor back to the new tile at micro 0.
+            // wb_last_drain_active deliberately stays set: the retire it
+            // licensed has already happened, and only the next tile's
+            // mac_start may consume it.
             writeback_active <= 1'b0;
             phaseb_norm_micro_idx <= '0;
             wb_epoch_pending <= 1'b0;
-            wb_last_drain_active <= 1'b0;
           end else if (phaseb_norm_micro_idx != q_microtile_last_idx) begin
             // Drain the current normalizer response before launching the
             // next microtile.  Starting normalize in the same cycle as
@@ -601,7 +606,6 @@ module attn_top
             phaseb_norm_micro_idx <= phaseb_norm_micro_idx + 1'd1;
           end else begin
             writeback_active <= 1'b0;
-            wb_last_drain_active <= 1'b0;
           end
         end
 
@@ -901,11 +905,14 @@ module attn_top
                              src_ready &&
                              (wb_micro_q == wb_last_micro_q);
   assign o_write_done = o_write_tile_done || o_write_done_sticky;
-  // v3.13: the controller may retire a Q-tile boundary once the final
-  // microtile's drain is in flight; only the transaction's final tile waits
-  // for the full drain (o_write_done, folded in for degenerate same-cycle
-  // completions).
-  assign o_write_launched = wb_last_drain_active || o_write_done;
+  // v3.13: retire eligibility is ONLY the latched last-microtile launch
+  // flag.  Folding o_write_done in (sticky residue from the retired tile's
+  // drain or a fast drain completing before WRITE_O) lets the boundary
+  // advance before the final microtile has launched, after which the epoch
+  // reset eats its launch slot (board-case L32: 27 microtile drains lost).
+  // The flag now persists until the NEXT tile's mac_start, which always
+  // follows the retire, so no launch can be missed and none can fire early.
+  assign o_write_launched = wb_last_drain_active;
   assign softmax_done = softmax_start && phasea_done_all;
   assign s_valid = (phasea_state == PA_LAUNCH) && phasea_held_valid;
   assign phasea_softmax_accept_enable = 1'b1;
