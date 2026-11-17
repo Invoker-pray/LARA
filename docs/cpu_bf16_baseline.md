@@ -2,6 +2,13 @@
 
 ## 结果与边界
 
+**推荐表述**：主性能对比采用普通 NumPy attention 基线，优先报告实际延迟，
+再单列同频估算；RTL BF16 合同模型只作为正确性参考及模拟器耗时记录。
+以 q31/kv7 L128 causal 为例，同频估算应比较 NumPy 的 1703.676 ms 与
+FPGA E2E 的 93.949 ms，而不把合同模拟器的 360669.891 ms 当作通用 CPU
+性能基线。实际 CPU NumPy 为 91.267 ms，实际 FPGA E2E 为 93.949 ms。
+宿主机测试、结果解释和自动用例入口见 `docs/host_cpu_baseline.md`。
+
 - FPGA：使用 v3.12 driver 与其复用的 v3.11 bitstream，20/20 bit-exact PASS。
 - CPU：在 KV260 Cortex-A53 CPU 3 实际运行 RTL BF16 合同软件计算，20/20 raw-BF16 bit-exact PASS。
 - 每个 case 1 次 warmup、3 次正式测量，表中为中位数；L=1/16/32/64/128，两个 position-base 组，各含 causal/noncausal。

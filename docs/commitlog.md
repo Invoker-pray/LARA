@@ -2,6 +2,25 @@
 
 ## 2026-11-17
 
+### v3.12.3 — 宿主机 CPU 对照与性能口径澄清
+
+- 新增 `sw/benchmark_host_cpu.py`，默认自动发现 q31/kv7、q3/kv3 两组用例，
+  同时运行板上相同的 RTL BF16 合同软件模拟和普通 NumPy FP32 attention。
+- i7-12700H、CPU 3、单线程、1 warmup + 3 repeats，20/20 BF16 bit-exact
+  PASS；输入哈希与板上结果配对。本地软件测试55/55 PASS。
+- 动态频率按sysfs采样做时间加权积分，同频结果明确为估算而非PMU测量。
+  q31/kv7 L128 causal：宿主机NumPy实测4.673 ms，同频估算280.352 ms；
+  FPGA E2E实测93.949 ms。Python/NumPy版本及架构不同，不能将归一化
+  比值解释为单纯IPC差异。
+- 71.427857 MHz估算口径下，20-case普通NumPy CPU/FPGA E2E耗时比
+  几何平均约1.37；L128 causal约2.98。实际宿主机延迟仍远低于FPGA，
+  这些估算比值不代表物理同频实测，也不代表完整模型的端到端加速。
+- 主性能对比保留普通NumPy基线和实际延迟；BF16合同模拟器用于正确性与
+  模拟器耗时记录，不作为通用CPU性能主基线。板上同case的NumPy实测
+  91.267 ms、同频估算1703.676 ms；合同模拟器同频估算360669.891 ms。
+- 方法、命令和限制见 `docs/host_cpu_baseline.md`；数据在
+  `temp/host_cpu_bf16_20261117/`。本轮没有修改master分支。
+
 ### v3.12.2 — KV260 CPU BF16 合同计算与同频估算
 
 - 本版本记录 v3.12 基线的软件测试增量；提交接续当前 develop（含 v3.13
