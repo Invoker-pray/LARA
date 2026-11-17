@@ -1,5 +1,30 @@
 # LARA 项目提交记录
 
+## 2026-11-17
+
+### v3.12.2 — KV260 CPU BF16 合同计算与同频估算
+
+- 本版本记录 v3.12 基线的软件测试增量；提交接续当前 develop（含 v3.13
+  RTL 修复），板测对象仍为下述 v3.12 已签核组合，不表示 v3.13 新 bit 已签核。
+
+- 在独立目录 `/home/ubuntu/lara_cpu_bf16_20261117` 部署 v3.12 driver +
+  复用的 v3.11 bitstream `c7e9e5d5a248ba4a0ca5d3e358b96fd9581a5bbbb70dd3e5030d037b418c60b1`。
+  未使用旧 v3.13 bit，也未启动/覆盖用户本轮最新 bit 构建。
+- FPGA 与 CPU RTL-contract BF16 软件计算均 **20/20 bit-exact PASS**；
+  两组 position base × L1/16/32/64/128 × causal/noncausal，1 warmup + 3 repeats。
+- CPU 3、单线程，120 个 CPU 正式计时样本（BF16/NumPy 两路径）的前后
+  频率快照均为 1333.333 MHz。CPUFreq 仅支持 333333/444444/666666/1333333 kHz，
+  不支持 71.427857 MHz；目标频率结果明确标为等效估算：wall_ms × 18.666849。
+- CPU BF16 路径复用 `attention_gqa_rtl_vectorized`，包括 LUT、FP32 累加和
+  RTL 舍入；属于软件模拟，不能将其开销当作优化过的原生 BF16 kernel 性能。
+  同时保留普通 NumPy FP32 attention 的实测与等效频率数据。
+- 新增 `sw/benchmark_cpu_bf16.py` 及测试；修复 NumPy 1.26 `uint64` 标量
+  移位兼容性（等值常量替换，RTL 未改）。本地 sw 单测 **50/50 PASS**。
+- 原始证据自包含归档在 `temp/cpu_bf16_study_20261117/`；归档 SHA256
+  `da3d8c4f59034cd9abc89d09351b08da3e0c98b2c1329a1081b93ad2f6c8b540`。
+  输入、源码、bit/hwh/xsa 哈希及 PL 计数守恒已独立复核。
+- 完整方法、数据和复现命令见 `docs/cpu_bf16_baseline.md`。
+
 ## 2026-10-12（二）
 
 ### v3.13.0 — writeback overlap：Q-tile 边界在 drain 发射后立即退役（RTL，门禁进行中）

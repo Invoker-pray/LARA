@@ -249,7 +249,9 @@ def _q26_to_fp32_array(values: np.ndarray) -> np.ndarray:
 def _fp32_to_q8_23_array(bits: np.ndarray) -> np.ndarray:
     bits = np.asarray(bits, dtype=np.uint32)
     exponent = ((bits >> 23) & 0xFF).astype(np.int64)
-    mantissa = (np.uint64(1) << 23) | (bits & 0x7FFFFF).astype(np.uint64)
+    # NumPy 1.26 (KV260) cannot safely coerce a Python int shift count with
+    # a uint64 scalar. Construct the identical constant before casting.
+    mantissa = np.uint64(1 << 23) | (bits & 0x7FFFFF).astype(np.uint64)
     shift = exponent - 127
     left_shift = np.maximum(shift, 0).astype(np.uint64)
     right_shift = np.maximum(-shift, 0).astype(np.uint64)

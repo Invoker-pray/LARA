@@ -401,3 +401,18 @@ guard 误判。**规则**：跨流水段共享的游标，在段边界锁存自�
 以及：**流水段上下文（sm_l_ctx 等 2-slot 索引）的重叠访问冲突要按
 slot 粒度审计**——单 microtile tile 的 drain 与后继首个 softmax 同用
 slot 0，提前退役前必须确认 slot 错开或显式阻塞。
+
+## 24. KV260 NumPy 1.26 的 uint64 标量移位兼容性（2026-11-17）
+
+**现象**：CPU BF16 RTL-contract 模型在首个 L1 case 的 EXP LUT 路径报
+`TypeError: ufunc 'left_shift' not supported`，尚未产生有效 CPU 性能样本。
+**根因**：`np.uint64(1) << 23` 的 Python int/uint64 标量类型提升在
+板上的 NumPy 1.26.4 中不兼容，本机较新 NumPy 未暴露此问题。
+**修复**：构造等值常量 `np.uint64(1 << 23)`，不改变数值合同；增加
+2051 个点的向量/标量 EXP LUT 一致性检查，并在板上重跑 BF16 矩阵。
+**规则**：CPU golden 也必须在目标 Python/NumPy 环境实跑；软件模拟 BF16
+的时间须明确标注，不能当作优化过的原生 BF16 CPU kernel 性能。
+
+同频测试还需检查 CPUFreq 公布的 OPP：本板为 333333/444444/666666/
+1333333 kHz，不支持 71428 kHz。不得仅修改报告中的频率冒充物理调频；
+换算值单独标为估算，并保留实际时钟、原始 wall time 和归一化假设。
